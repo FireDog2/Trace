@@ -79,3 +79,29 @@ export interface TaskEvent {
   type: TaskEventType;
   payload: Record<string, unknown>;
 }
+
+export interface ProviderDefinition {
+  provider: string;
+  label: string;
+  base_url: string | null;
+  models: string[];
+  default_model: string;
+  custom_url: boolean;
+}
+
+export interface ModelConfigurationStatus {
+  provider: string | null;
+  base_url: string;
+  model: string;
+  configured: boolean;
+  has_api_key: boolean;
+  updated_at: string | null;
+  providers: ProviderDefinition[];
+}
+
+export interface SaveModelConfiguration {
+  provider: string;
+  base_url?: string | null;
+  model: string;
+  api_key?: string | null;
+}

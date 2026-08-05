@@ -2,9 +2,18 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 
 import { HttpApiClient, type ApiClient } from "./api";
 import { Conversation } from "./components/Conversation";
+import { ModelSettings } from "./components/ModelSettings";
 import { ProjectNav } from "./components/ProjectNav";
 import { TaskWorkbench } from "./components/TaskWorkbench";
-import type { Artifact, Project, Task, TaskDetail, TaskEvent } from "./types";
+import type {
+  Artifact,
+  ModelConfigurationStatus,
+  Project,
+  SaveModelConfiguration,
+  Task,
+  TaskDetail,
+  TaskEvent,
+} from "./types";
 
 interface AppProps {
   api?: ApiClient;
@@ -21,6 +30,8 @@ export function App({ api: suppliedApi }: AppProps) {
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const [objective, setObjective] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [modelConfiguration, setModelConfiguration] = useState<ModelConfigurationStatus | null>(null);
+  const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
 
   useEffect(() => {
     void api
@@ -29,6 +40,13 @@ export function App({ api: suppliedApi }: AppProps) {
         setProjects(items);
         setSelectedProjectId((current) => current ?? items[0]?.id ?? null);
       })
+      .catch((cause: Error) => setError(cause.message));
+  }, [api]);
+
+  useEffect(() => {
+    void api
+      .getModelConfiguration()
+      .then(setModelConfiguration)
       .catch((cause: Error) => setError(cause.message));
   }, [api]);
 
@@ -126,6 +144,13 @@ export function App({ api: suppliedApi }: AppProps) {
     if (selectedTaskId) setTask(await api.getTask(selectedTaskId));
   }
 
+  async function saveModelConfiguration(input: SaveModelConfiguration) {
+    const saved = await api.saveModelConfiguration(input);
+    setModelConfiguration(saved);
+    setModelSettingsOpen(false);
+    setError(null);
+  }
+
   return (
     <div className="app-shell">
       <ProjectNav
@@ -138,6 +163,8 @@ export function App({ api: suppliedApi }: AppProps) {
         onSelectTask={setSelectedTaskId}
         onCreateProject={createProject}
         onUpload={uploadDataset}
+        modelConfiguration={modelConfiguration}
+        onOpenModelSettings={() => setModelSettingsOpen(true)}
       />
 
       {error && <div className="error-banner" role="alert">{error}</div>}
@@ -175,6 +202,15 @@ export function App({ api: suppliedApi }: AppProps) {
         onSend={sendMessage}
         onApproval={decideApproval}
       />
+
+      {modelConfiguration && (
+        <ModelSettings
+          configuration={modelConfiguration}
+          open={modelSettingsOpen}
+          onClose={() => setModelSettingsOpen(false)}
+          onSave={saveModelConfiguration}
+        />
+      )}
     </div>
   );
 }

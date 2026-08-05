@@ -4,6 +4,53 @@ import { describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import type { ApiClient } from "./api";
 
+const PROVIDERS = [
+  {
+    provider: "deepseek",
+    label: "DeepSeek",
+    base_url: "https://api.deepseek.com",
+    models: ["deepseek-v4-flash", "deepseek-v4-pro"],
+    default_model: "deepseek-v4-flash",
+    custom_url: false,
+  },
+  {
+    provider: "openai",
+    label: "OpenAI",
+    base_url: "https://api.openai.com/v1",
+    models: ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna"],
+    default_model: "gpt-5.6-terra",
+    custom_url: false,
+  },
+  {
+    provider: "custom",
+    label: "第三方中转站",
+    base_url: null,
+    models: [],
+    default_model: "",
+    custom_url: true,
+  },
+];
+
+const CONFIGURED_MODEL = {
+  provider: "openai",
+  base_url: "https://api.openai.com/v1",
+  model: "gpt-5.6-terra",
+  configured: true,
+  has_api_key: true,
+  updated_at: "2026-08-05T00:00:00Z",
+  providers: PROVIDERS,
+};
+
+const UNCONFIGURED_MODEL = {
+  provider: null,
+  base_url: "",
+  model: "",
+  configured: false,
+  has_api_key: false,
+  updated_at: null,
+  providers: PROVIDERS,
+};
+
 function fakeApiWithCompletedTask(
   approvalEvent = false,
   decideApproval = vi.fn(async () => ({
@@ -95,6 +142,8 @@ function fakeApiWithCompletedTask(
       throw new Error("Not used in this test");
     },
     decideApproval,
+    getModelConfiguration: async () => CONFIGURED_MODEL,
+    saveModelConfiguration: async () => CONFIGURED_MODEL,
     subscribeToTask: (_taskId, onEvent) => {
       if (approvalEvent) {
         onEvent({
@@ -140,5 +189,61 @@ describe("analysis workbench", () => {
     await waitFor(() => {
       expect(decideApproval).toHaveBeenCalledWith("approval-1", true);
     });
+  });
+
+  it("configures a third-party model from the model route", async () => {
+    const api = fakeApiWithCompletedTask();
+    api.getModelConfiguration = async () => UNCONFIGURED_MODEL;
+    const saveModelConfiguration = vi.fn(async (input) => ({
+      ...UNCONFIGURED_MODEL,
+      ...input,
+      configured: true,
+      has_api_key: true,
+      updated_at: "2026-08-05T00:10:00Z",
+    }));
+    api.saveModelConfiguration = saveModelConfiguration;
+    render(<App api={api} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "配置模型" }));
+    fireEvent.click(screen.getByRole("radio", { name: "第三方中转站" }));
+    fireEvent.change(screen.getByLabelText("Base URL"), {
+      target: { value: "https://relay.example/v1" },
+    });
+    fireEvent.change(screen.getByLabelText("模型名称"), {
+      target: { value: "relay-model" },
+    });
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "relay-secret" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存模型配置" }));
+
+    await waitFor(() => {
+      expect(saveModelConfiguration).toHaveBeenCalledWith({
+        provider: "custom",
+        base_url: "https://relay.example/v1",
+        model: "relay-model",
+        api_key: "relay-secret",
+      });
+    });
+    expect(await screen.findByText("relay-model")).toBeVisible();
+  });
+
+  it("locks official endpoints and offers current provider models", async () => {
+    const api = fakeApiWithCompletedTask();
+    api.getModelConfiguration = async () => UNCONFIGURED_MODEL;
+    render(<App api={api} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "配置模型" }));
+    fireEvent.click(screen.getByRole("radio", { name: "DeepSeek" }));
+
+    expect(screen.getByDisplayValue("https://api.deepseek.com")).toBeDisabled();
+    expect(screen.getByRole("option", { name: "deepseek-v4-flash" })).toBeVisible();
+    expect(screen.getByRole("option", { name: "deepseek-v4-pro" })).toBeVisible();
+
+    fireEvent.click(screen.getByRole("radio", { name: "OpenAI" }));
+    expect(screen.getByDisplayValue("https://api.openai.com/v1")).toBeDisabled();
+    expect(screen.getByRole("option", { name: "gpt-5.6-terra" })).toBeVisible();
+    expect(screen.getByRole("option", { name: "gpt-5.6-sol" })).toBeVisible();
+    expect(screen.getByRole("option", { name: "gpt-5.6-luna" })).toBeVisible();
   });
 });

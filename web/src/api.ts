@@ -6,6 +6,8 @@ import type {
   TaskDetail,
   TaskEvent,
   TaskEventType,
+  ModelConfigurationStatus,
+  SaveModelConfiguration,
 } from "./types";
 
 export interface ApiClient {
@@ -18,6 +20,8 @@ export interface ApiClient {
   getTask(taskId: string): Promise<TaskDetail>;
   sendMessage(taskId: string, content: string): Promise<Task>;
   decideApproval(approvalId: string, approved: boolean): Promise<ApprovalDecision>;
+  getModelConfiguration(): Promise<ModelConfigurationStatus>;
+  saveModelConfiguration(input: SaveModelConfiguration): Promise<ModelConfigurationStatus>;
   subscribeToTask(taskId: string, onEvent: (event: TaskEvent) => void): () => void;
 }
 
@@ -93,6 +97,18 @@ export class HttpApiClient implements ApiClient {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ approved }),
+    });
+  }
+
+  getModelConfiguration(): Promise<ModelConfigurationStatus> {
+    return this.request("/api/model-config");
+  }
+
+  saveModelConfiguration(input: SaveModelConfiguration): Promise<ModelConfigurationStatus> {
+    return this.request("/api/model-config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
     });
   }
 

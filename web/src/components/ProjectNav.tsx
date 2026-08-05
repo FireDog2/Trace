@@ -1,6 +1,6 @@
 import { FormEvent, useState } from "react";
 
-import type { Artifact, Project, Task } from "../types";
+import type { Artifact, ModelConfigurationStatus, Project, Task } from "../types";
 
 interface ProjectNavProps {
   projects: Project[];
@@ -12,6 +12,8 @@ interface ProjectNavProps {
   onSelectTask(id: string): void;
   onCreateProject(name: string): Promise<void>;
   onUpload(file: File): Promise<void>;
+  modelConfiguration: ModelConfigurationStatus | null;
+  onOpenModelSettings(): void;
 }
 
 export function ProjectNav({
@@ -24,6 +26,8 @@ export function ProjectNav({
   onSelectTask,
   onCreateProject,
   onUpload,
+  modelConfiguration,
+  onOpenModelSettings,
 }: ProjectNavProps) {
   const [newProjectName, setNewProjectName] = useState("");
 
@@ -42,6 +46,24 @@ export function ProjectNav({
         <strong>迹析</strong>
         <p>每个结论，都有来路。</p>
       </header>
+
+      <button
+        type="button"
+        className={`model-route ${modelConfiguration?.configured ? "configured" : "unconfigured"}`}
+        aria-label={modelConfiguration?.configured ? "更改模型配置" : "配置模型"}
+        onClick={onOpenModelSettings}
+      >
+        <span className="model-route-label">
+          <span>MODEL ROUTE</span>
+          <i>{modelConfiguration?.configured ? "READY" : "SETUP"}</i>
+        </span>
+        <strong>{modelConfiguration?.configured ? modelConfiguration.model : "配置运行模型"}</strong>
+        <small>
+          {modelConfiguration?.configured
+            ? modelConfiguration.providers.find((item) => item.provider === modelConfiguration.provider)?.label
+            : "DeepSeek · OpenAI · 中转站"}
+        </small>
+      </button>
 
       <section className="rail-section">
         <div className="section-label">项目</div>
