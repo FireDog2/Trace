@@ -328,6 +328,7 @@ def create_app(
                     created_at=message.created_at,
                 )
                 for message in services.tasks.list_messages(task_id)
+                if message.role != "assistant_tool_call"
             ],
             plan=(
                 PlanResponse(

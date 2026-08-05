@@ -43,7 +43,9 @@ def test_agent_executes_tools_and_completes(
 
     assert completed.status is TaskStatus.COMPLETED
     assert [message.role for message in task_repository.list_messages(task.id)] == [
+        "assistant_tool_call",
         "tool",
+        "assistant_tool_call",
         "tool",
         "assistant",
     ]

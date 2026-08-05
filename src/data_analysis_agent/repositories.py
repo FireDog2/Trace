@@ -198,7 +198,7 @@ class TaskRepository:
         )
 
     def add_message(self, task_id: str, role: str, content: str) -> Message:
-        if role not in {"user", "assistant", "system", "tool"}:
+        if role not in {"user", "assistant", "assistant_tool_call", "system", "tool"}:
             raise ValueError(f"Unsupported message role: {role}")
         normalized_content = content.strip()
         if not normalized_content:

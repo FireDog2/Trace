@@ -70,6 +70,30 @@ class AgentRunner:
             if not response.tool_calls:
                 return self._complete_task(task_id)
 
+            tool_call_message = self._tasks.add_message(
+                task_id,
+                "assistant_tool_call",
+                json.dumps(
+                    {
+                        "tool_calls": [
+                            {
+                                "id": call.id,
+                                "name": call.name,
+                                "arguments": call.arguments,
+                            }
+                            for call in response.tool_calls
+                        ]
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            )
+            self._tasks.append_event(
+                task_id,
+                "message.created",
+                {"message_id": tool_call_message.id, "role": tool_call_message.role},
+            )
+
             for call in response.tool_calls:
                 action_count += 1
                 signature = json.dumps(

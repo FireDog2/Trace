@@ -5,6 +5,7 @@ import argparse
 import uvicorn
 
 from data_analysis_agent.api import create_app
+from data_analysis_agent.providers import ProviderError, provider_from_settings
 from data_analysis_agent.settings import Settings
 
 
@@ -17,8 +18,15 @@ def main() -> None:
     arguments = parser.parse_args()
 
     if arguments.command == "serve":
+        settings = Settings.local()
+        try:
+            provider = provider_from_settings(settings)
+        except ProviderError as exc:
+            if exc.category != "not_configured":
+                raise
+            provider = None
         uvicorn.run(
-            create_app(Settings.local()),
+            create_app(settings, provider),
             host=arguments.host,
             port=arguments.port,
         )
