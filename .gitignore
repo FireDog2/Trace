@@ -7,6 +7,7 @@ __pycache__/
 htmlcov/
 node_modules/
 web/dist/
+*.tsbuildinfo
 .data-analysis-agent/
 *.sqlite3
 .env
