@@ -1,0 +1,13 @@
+month,region,category,revenue,product_cost,logistics_cost,profit
+2026-01,East,Electronics,120,60,10,50
+2026-02,East,Electronics,118,59,12,47
+2026-03,East,Electronics,119,59,28,32
+2026-01,East,Home,80,42,8,30
+2026-02,East,Home,82,43,9,30
+2026-03,East,Home,81,42,20,19
+2026-01,West,Electronics,110,55,10,45
+2026-02,West,Electronics,112,56,10,46
+2026-03,West,Electronics,114,57,10,47
+2026-01,North,Home,76,38,8,30
+2026-02,North,Home,78,39,8,31
+2026-03,North,Home,80,40,8,32

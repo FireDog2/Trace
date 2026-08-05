@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from data_analysis_agent.db import migrate
+from data_analysis_agent.datasets import DatasetService
 from data_analysis_agent.repositories import ArtifactRepository, ProjectRepository
 from data_analysis_agent.settings import Settings
 from data_analysis_agent.workspace import WorkspaceService
@@ -48,3 +49,16 @@ def project(project_repository: ProjectRepository, workspace: WorkspaceService):
 @pytest.fixture
 def artifact_repository(db_connection, workspace: WorkspaceService) -> ArtifactRepository:
     return ArtifactRepository(db_connection, workspace)
+
+
+@pytest.fixture
+def dataset_service(
+    workspace: WorkspaceService,
+    artifact_repository: ArtifactRepository,
+) -> DatasetService:
+    return DatasetService(workspace, artifact_repository)
+
+
+@pytest.fixture
+def operations_csv() -> Path:
+    return Path(__file__).parent / "fixtures" / "operations.csv"
