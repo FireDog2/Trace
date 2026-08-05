@@ -114,6 +114,17 @@ CREATE INDEX idx_task_events_task_sequence
 ON task_events(task_id, sequence);
 """
 
+MIGRATION_2_SQL = """
+CREATE TABLE model_configuration (
+    singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+    provider TEXT NOT NULL,
+    base_url TEXT NOT NULL,
+    model TEXT NOT NULL,
+    protected_api_key BLOB NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
@@ -148,5 +159,11 @@ def migrate(connection: sqlite3.Connection) -> None:
         connection.execute(
             "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
             (1, utc_now()),
+        )
+    if 2 not in applied:
+        connection.executescript(MIGRATION_2_SQL)
+        connection.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+            (2, utc_now()),
         )
     connection.commit()
