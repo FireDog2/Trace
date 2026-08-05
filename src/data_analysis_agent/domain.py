@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from enum import StrEnum
+from pathlib import Path
+from typing import Any
 
 
 class ProjectStatus(StrEnum):
@@ -70,4 +71,58 @@ class Artifact:
     content_type: str | None
     producer_execution_id: str | None
     input_artifact_ids: tuple[str, ...]
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class Task:
+    id: str
+    project_id: str
+    objective: str
+    status: TaskStatus
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class Message:
+    id: str
+    task_id: str
+    role: str
+    content: str
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class PlanStepDraft:
+    title: str
+
+
+@dataclass(frozen=True, slots=True)
+class PlanStep:
+    id: str
+    plan_revision_id: str
+    position: int
+    title: str
+    status: StepStatus
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class PlanRevision:
+    id: str
+    task_id: str
+    revision: int
+    reason: str
+    steps: tuple[PlanStep, ...]
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class TaskEvent:
+    id: str
+    task_id: str
+    sequence: int
+    event_type: str
+    payload: dict[str, Any]
     created_at: str

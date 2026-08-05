@@ -8,7 +8,11 @@ import pytest
 
 from data_analysis_agent.db import migrate
 from data_analysis_agent.datasets import DatasetService
-from data_analysis_agent.repositories import ArtifactRepository, ProjectRepository
+from data_analysis_agent.repositories import (
+    ArtifactRepository,
+    ProjectRepository,
+    TaskRepository,
+)
 from data_analysis_agent.settings import Settings
 from data_analysis_agent.workspace import WorkspaceService
 
@@ -62,3 +66,13 @@ def dataset_service(
 @pytest.fixture
 def operations_csv() -> Path:
     return Path(__file__).parent / "fixtures" / "operations.csv"
+
+
+@pytest.fixture
+def task_repository(db_connection) -> TaskRepository:
+    return TaskRepository(db_connection)
+
+
+@pytest.fixture
+def task(task_repository: TaskRepository, project):
+    return task_repository.create(project.id, "Diagnose East profit decline")
