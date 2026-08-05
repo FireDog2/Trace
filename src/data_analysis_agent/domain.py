@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from pathlib import Path
 from enum import StrEnum
 
 
@@ -45,3 +47,27 @@ class ExecutionStatus(StrEnum):
     FAILED = "failed"
     TIMED_OUT = "timed_out"
     INTERRUPTED = "interrupted"
+
+
+@dataclass(frozen=True, slots=True)
+class Project:
+    id: str
+    name: str
+    status: ProjectStatus
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class Artifact:
+    id: str
+    project_id: str
+    task_id: str | None
+    artifact_type: ArtifactType
+    path: Path
+    title: str
+    description: str
+    content_type: str | None
+    producer_execution_id: str | None
+    input_artifact_ids: tuple[str, ...]
+    created_at: str
