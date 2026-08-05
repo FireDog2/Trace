@@ -309,7 +309,7 @@ def create_app(
         except SecretStorageUnavailable as exc:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
         except ModelConfigurationError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
         return _model_configuration_response(services.model_configs)
 
     @app.get("/api/projects", response_model=list[ProjectResponse])
@@ -474,6 +474,9 @@ def create_app(
         request: ApprovalDecisionRequest,
         background_tasks: BackgroundTasks,
     ) -> dict[str, str | None]:
+        resolved_provider = (
+            _configured_provider_or_409(services) if request.approved else None
+        )
         approval = services.approvals.decide(approval_id, request.approved)
         services.tasks.append_event(
             approval.task_id,
@@ -481,7 +484,7 @@ def create_app(
             {"approval_id": approval.id, "status": approval.status},
         )
         if request.approved:
-            resolved_provider = _configured_provider_or_409(services)
+            assert resolved_provider is not None
             background_tasks.add_task(
                 _resume_approved_task,
                 settings,

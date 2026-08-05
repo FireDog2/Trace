@@ -115,7 +115,7 @@ ON task_events(task_id, sequence);
 """
 
 MIGRATION_2_SQL = """
-CREATE TABLE model_configuration (
+CREATE TABLE IF NOT EXISTS model_configuration (
     singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
     provider TEXT NOT NULL,
     base_url TEXT NOT NULL,

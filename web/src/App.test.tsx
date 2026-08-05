@@ -246,4 +246,14 @@ describe("analysis workbench", () => {
     expect(screen.getByRole("option", { name: "gpt-5.6-sol" })).toBeVisible();
     expect(screen.getByRole("option", { name: "gpt-5.6-luna" })).toBeVisible();
   });
+
+  it("requires a new key only after switching providers", async () => {
+    render(<App api={fakeApiWithCompletedTask()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "更改模型配置" }));
+    expect(screen.getByLabelText("API Key")).not.toBeRequired();
+
+    fireEvent.click(screen.getByRole("radio", { name: "DeepSeek" }));
+    expect(screen.getByLabelText("API Key")).toBeRequired();
+  });
 });

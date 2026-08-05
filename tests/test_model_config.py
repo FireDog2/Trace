@@ -68,6 +68,8 @@ def test_switching_provider_requires_a_new_key(db_connection) -> None:
     [
         ("file:///tmp/model", "http or https"),
         ("relay.example/v1", "http or https"),
+        ("https://relay.example/v1?api_key=secret", "query"),
+        ("https://relay.example/v1#models", "fragment"),
         ("", "Base URL"),
     ],
 )
@@ -97,6 +99,18 @@ def test_custom_provider_preserves_user_endpoint(db_connection) -> None:
     assert credentials.base_url == "https://relay.example/v1"
     assert credentials.model == "relay-model"
     assert credentials.api_key == "relay-key"
+
+
+def test_builtin_provider_rejects_endpoint_override(db_connection) -> None:
+    repository = ModelConfigurationRepository(db_connection, RecordingProtector())
+
+    with pytest.raises(ModelConfigurationError, match="official Base URL"):
+        repository.save(
+            "deepseek",
+            "deepseek-v4-flash",
+            "https://relay.example/v1",
+            "deepseek-key",
+        )
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows DPAPI only")

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from data_analysis_agent.db import migrate
+
 
 def test_migrate_creates_versioned_core_tables(db_connection) -> None:
     names = {
@@ -43,3 +45,16 @@ def test_model_configuration_is_a_singleton_table(db_connection) -> None:
         "protected_api_key",
         "updated_at",
     }
+
+
+def test_model_configuration_migration_recovers_after_version_record_is_missing(
+    db_connection,
+) -> None:
+    db_connection.execute("DELETE FROM schema_migrations WHERE version = 2")
+    db_connection.commit()
+
+    migrate(db_connection)
+
+    assert db_connection.execute(
+        "SELECT version FROM schema_migrations WHERE version = 2"
+    ).fetchone() == (2,)

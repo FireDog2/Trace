@@ -195,6 +195,11 @@ class ModelConfigurationRepository:
                     f"Unsupported {definition.label} model: {normalized_model}"
                 )
             assert definition.base_url is not None
+            requested_base_url = (base_url or "").strip().rstrip("/")
+            if requested_base_url and requested_base_url != definition.base_url:
+                raise ModelConfigurationError(
+                    f"{definition.label} must use its official Base URL"
+                )
             normalized_base_url = definition.base_url
 
         existing = self._get_row()
@@ -267,4 +272,8 @@ def _custom_base_url(value: str | None) -> str:
         raise ModelConfigurationError("Base URL must use http or https")
     if parsed.username or parsed.password:
         raise ModelConfigurationError("Base URL must not include credentials")
+    if parsed.query:
+        raise ModelConfigurationError("Base URL must not include a query string")
+    if parsed.fragment:
+        raise ModelConfigurationError("Base URL must not include a fragment")
     return normalized

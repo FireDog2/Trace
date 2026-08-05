@@ -151,8 +151,13 @@ export class HttpApiClient implements ApiClient {
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
     const response = await fetch(`${this.baseUrl}${path}`, init);
     if (!response.ok) {
-      const body = (await response.json().catch(() => ({}))) as { detail?: string };
-      throw new Error(body.detail ?? `请求失败（${response.status}）`);
+      const body = (await response.json().catch(() => ({}))) as {
+        detail?: string | { category?: string; message?: string };
+      };
+      const message = typeof body.detail === "string"
+        ? body.detail
+        : body.detail?.message;
+      throw new Error(message ?? `请求失败（${response.status}）`);
     }
     return (await response.json()) as T;
   }

@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from data_analysis_agent.api import create_app
 from data_analysis_agent.domain import TaskStatus
+from data_analysis_agent.model_config import SecretStorageUnavailable
 from data_analysis_agent.permissions import ToolAction
 from data_analysis_agent.providers import ModelResponse, ScriptedProvider
 
@@ -14,6 +15,16 @@ class RecordingProtector:
 
     def unprotect(self, value: bytes) -> str:
         return value.removeprefix(b"protected:").decode("utf-8")
+
+
+class UnreadableProtector(RecordingProtector):
+    def unprotect(self, value: bytes) -> str:
+        raise SecretStorageUnavailable("Saved model key cannot be decrypted")
+
+
+class UnavailableProtector(RecordingProtector):
+    def protect(self, value: str) -> bytes:
+        raise SecretStorageUnavailable("Secure storage is unavailable")
 
 
 def test_project_dataset_task_lifecycle(api_client, operations_csv) -> None:
@@ -132,6 +143,30 @@ def test_approval_decision_is_visible_and_resumes_configured_agent(settings) -> 
         assert '"status": "approved"' in events
 
 
+def test_approval_stays_pending_when_model_is_unconfigured(settings) -> None:
+    app = create_app(settings, secret_protector=RecordingProtector())
+    services = app.state.services
+    project = services.projects.create("Approval review")
+    task = services.tasks.create(project.id, "Use an external benchmark")
+    services.tasks.transition(task.id, TaskStatus.NEEDS_INPUT)
+    approval = services.approvals.request(
+        task.id,
+        ToolAction("network_access", {"url": "https://example.invalid"}),
+        "External network access requires approval",
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/approvals/{approval.id}/decision",
+            json={"approved": True},
+        )
+
+        assert response.status_code == 409
+        assert services.approvals.get(approval.id).status == "pending"
+        events = client.get(f"/api/tasks/{task.id}/events").text
+        assert "event: approval.decided" not in events
+
+
 def test_model_configuration_api_never_returns_key(settings) -> None:
     with TestClient(
         create_app(settings, secret_protector=RecordingProtector())
@@ -154,6 +189,50 @@ def test_model_configuration_api_never_returns_key(settings) -> None:
         assert body["providers"][0]["provider"] == "deepseek"
         assert "api_key" not in body
         assert "openai-secret" not in client.get("/api/model-config").text
+
+
+def test_model_configuration_api_preserves_blank_key_for_same_provider(settings) -> None:
+    protector = RecordingProtector()
+    app = create_app(settings, secret_protector=protector)
+    with TestClient(app) as client:
+        client.put(
+            "/api/model-config",
+            json={
+                "provider": "deepseek",
+                "model": "deepseek-v4-flash",
+                "api_key": "deepseek-secret",
+            },
+        )
+
+        response = client.put(
+            "/api/model-config",
+            json={
+                "provider": "deepseek",
+                "model": "deepseek-v4-pro",
+                "api_key": None,
+            },
+        )
+
+        assert response.status_code == 200
+        assert app.state.services.model_configs.credentials().api_key == "deepseek-secret"
+
+
+def test_builtin_model_configuration_rejects_endpoint_override(settings) -> None:
+    with TestClient(
+        create_app(settings, secret_protector=RecordingProtector())
+    ) as client:
+        response = client.put(
+            "/api/model-config",
+            json={
+                "provider": "openai",
+                "base_url": "https://relay.example/v1",
+                "model": "gpt-5.6-terra",
+                "api_key": "openai-secret",
+            },
+        )
+
+        assert response.status_code == 422
+        assert "official Base URL" in response.json()["detail"]
 
 
 def test_unconfigured_task_is_rejected_before_creation(settings) -> None:
@@ -210,3 +289,112 @@ def test_saved_configuration_is_resolved_for_a_new_task(settings) -> None:
         assert credentials.model == "relay-model"
         assert credentials.api_key == "relay-key"
         assert timeout_seconds == settings.model_timeout_seconds
+
+
+def test_latest_configuration_is_resolved_for_each_agent_run(settings) -> None:
+    captured_models: list[str] = []
+
+    def provider_factory(credentials, timeout_seconds=60):
+        captured_models.append(credentials.model)
+        return ScriptedProvider(
+            [ModelResponse(text=f"Completed with {credentials.model}.", tool_calls=())]
+        )
+
+    app = create_app(
+        settings,
+        secret_protector=RecordingProtector(),
+        provider_factory=provider_factory,
+    )
+    with TestClient(app) as client:
+        client.put(
+            "/api/model-config",
+            json={
+                "provider": "custom",
+                "base_url": "https://relay.example/v1",
+                "model": "relay-a",
+                "api_key": "relay-key",
+            },
+        )
+        project = client.post("/api/projects", json={"name": "Review"}).json()
+        first_task = client.post(
+            f"/api/projects/{project['id']}/tasks",
+            json={"objective": "First diagnosis"},
+        ).json()
+
+        client.put(
+            "/api/model-config",
+            json={
+                "provider": "openai",
+                "model": "gpt-5.6-terra",
+                "api_key": "openai-key",
+            },
+        )
+        client.post(
+            f"/api/projects/{project['id']}/tasks",
+            json={"objective": "Second diagnosis"},
+        )
+        client.post(
+            f"/api/tasks/{first_task['id']}/messages",
+            json={"content": "Follow up with the latest model"},
+        )
+
+        services = app.state.services
+        approval_task = services.tasks.create(project["id"], "Approved diagnosis")
+        services.tasks.transition(approval_task.id, TaskStatus.NEEDS_INPUT)
+        approval = services.approvals.request(
+            approval_task.id,
+            ToolAction("network_access", {"url": "https://example.invalid"}),
+            "External network access requires approval",
+        )
+        response = client.post(
+            f"/api/approvals/{approval.id}/decision",
+            json={"approved": True},
+        )
+
+        assert response.status_code == 200
+        assert captured_models == [
+            "relay-a",
+            "gpt-5.6-terra",
+            "gpt-5.6-terra",
+            "gpt-5.6-terra",
+        ]
+
+
+def test_unreadable_saved_key_rejects_task_before_creation(settings) -> None:
+    with TestClient(
+        create_app(settings, secret_protector=UnreadableProtector())
+    ) as client:
+        client.put(
+            "/api/model-config",
+            json={
+                "provider": "deepseek",
+                "model": "deepseek-v4-flash",
+                "api_key": "deepseek-key",
+            },
+        )
+        project = client.post("/api/projects", json={"name": "Review"}).json()
+
+        response = client.post(
+            f"/api/projects/{project['id']}/tasks",
+            json={"objective": "Diagnose profit"},
+        )
+
+        assert response.status_code == 409
+        assert client.get(f"/api/projects/{project['id']}/tasks").json() == []
+
+
+def test_unavailable_secret_storage_returns_service_unavailable(settings) -> None:
+    with TestClient(
+        create_app(settings, secret_protector=UnavailableProtector())
+    ) as client:
+        response = client.put(
+            "/api/model-config",
+            json={
+                "provider": "deepseek",
+                "model": "deepseek-v4-flash",
+                "api_key": "deepseek-key",
+            },
+        )
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == "Secure storage is unavailable"
