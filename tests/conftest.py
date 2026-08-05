@@ -8,6 +8,7 @@ import pytest
 
 from data_analysis_agent.db import migrate
 from data_analysis_agent.datasets import DatasetService
+from data_analysis_agent.execution import DuckDBExecutor, PythonExecutor
 from data_analysis_agent.repositories import (
     ArtifactRepository,
     ProjectRepository,
@@ -20,7 +21,11 @@ from data_analysis_agent.workspace import WorkspaceService
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
     data_dir = tmp_path / "app-data"
-    return Settings(data_dir=data_dir, database_path=data_dir / "metadata.sqlite3")
+    return Settings(
+        data_dir=data_dir,
+        database_path=data_dir / "metadata.sqlite3",
+        python_timeout_seconds=1,
+    )
 
 
 @pytest.fixture
@@ -76,3 +81,26 @@ def task_repository(db_connection) -> TaskRepository:
 @pytest.fixture
 def task(task_repository: TaskRepository, project):
     return task_repository.create(project.id, "Diagnose East profit decline")
+
+
+@pytest.fixture
+def dataset_artifact(dataset_service: DatasetService, project, operations_csv: Path):
+    return dataset_service.add_file(project.id, operations_csv)
+
+
+@pytest.fixture
+def duckdb_executor(
+    workspace: WorkspaceService,
+    artifact_repository: ArtifactRepository,
+) -> DuckDBExecutor:
+    return DuckDBExecutor(workspace, artifact_repository)
+
+
+@pytest.fixture
+def python_executor(
+    settings: Settings,
+    workspace: WorkspaceService,
+    artifact_repository: ArtifactRepository,
+    task_repository: TaskRepository,
+) -> PythonExecutor:
+    return PythonExecutor(settings, workspace, artifact_repository, task_repository)
