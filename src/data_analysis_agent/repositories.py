@@ -118,6 +118,22 @@ class ProjectRepository:
             updated_at=row["updated_at"],
         )
 
+    def list(self) -> tuple[Project, ...]:
+        rows = self._connection.execute(
+            "SELECT id, name, status, created_at, updated_at "
+            "FROM projects ORDER BY created_at, rowid"
+        ).fetchall()
+        return tuple(
+            Project(
+                id=row["id"],
+                name=row["name"],
+                status=ProjectStatus(row["status"]),
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+            for row in rows
+        )
+
 
 class TaskRepository:
     def __init__(self, connection: sqlite3.Connection) -> None:
@@ -363,6 +379,54 @@ class TaskRepository:
         ).fetchall()
         return tuple(_task_event_from_row(row) for row in rows)
 
+    def list_for_project(self, project_id: str) -> tuple[Task, ...]:
+        rows = self._connection.execute(
+            "SELECT id, project_id, objective, status, created_at, updated_at "
+            "FROM tasks WHERE project_id = ? ORDER BY created_at, rowid",
+            (project_id,),
+        ).fetchall()
+        return tuple(_task_from_row(row) for row in rows)
+
+    def start_tool_execution(
+        self,
+        task_id: str,
+        tool_name: str,
+        arguments: dict[str, object],
+    ) -> str:
+        self.get(task_id)
+        execution_id = str(uuid4())
+        self._connection.execute(
+            "INSERT INTO tool_executions("
+            "id, task_id, step_id, tool_name, arguments_json, status, started_at"
+            ") VALUES (?, ?, NULL, ?, ?, ?, ?)",
+            (
+                execution_id,
+                task_id,
+                tool_name,
+                json.dumps(arguments, ensure_ascii=False, separators=(",", ":")),
+                "running",
+                utc_now(),
+            ),
+        )
+        self._connection.commit()
+        return execution_id
+
+    def finish_tool_execution(
+        self,
+        execution_id: str,
+        status: str,
+        error_category: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        cursor = self._connection.execute(
+            "UPDATE tool_executions SET status = ?, error_category = ?, "
+            "error_message = ?, completed_at = ? WHERE id = ?",
+            (status, error_category, error_message, utc_now(), execution_id),
+        )
+        self._connection.commit()
+        if cursor.rowcount == 0:
+            raise RecordNotFoundError(f"Tool execution not found: {execution_id}")
+
 
 class ArtifactRepository:
     def __init__(
@@ -482,6 +546,65 @@ class ArtifactRepository:
             input_artifact_ids=tuple(row["input_artifact_id"] for row in input_rows),
             created_at=row["created_at"],
         )
+
+    def list_for_project(self, project_id: str) -> tuple[Artifact, ...]:
+        rows = self._connection.execute(
+            "SELECT id FROM artifacts WHERE project_id = ? ORDER BY created_at, rowid",
+            (project_id,),
+        ).fetchall()
+        return tuple(self.get(row["id"]) for row in rows)
+
+    def list_for_task(self, task_id: str) -> tuple[Artifact, ...]:
+        rows = self._connection.execute(
+            "SELECT id FROM artifacts WHERE task_id = ? ORDER BY created_at, rowid",
+            (task_id,),
+        ).fetchall()
+        return tuple(self.get(row["id"]) for row in rows)
+
+    def set_producer(
+        self,
+        artifact_ids: tuple[str, ...],
+        execution_id: str,
+    ) -> None:
+        if not artifact_ids:
+            return
+        placeholders = ",".join("?" for _ in artifact_ids)
+        cursor = self._connection.execute(
+            f"UPDATE artifacts SET producer_execution_id = ? "
+            f"WHERE id IN ({placeholders}) AND producer_execution_id IS NULL",
+            (execution_id, *artifact_ids),
+        )
+        self._connection.commit()
+        if cursor.rowcount != len(set(artifact_ids)):
+            raise InvalidArtifactError("Could not assign producing execution")
+
+    def record_evidence(
+        self,
+        report_artifact_id: str,
+        evidence_artifact_ids: tuple[str, ...],
+    ) -> None:
+        report = self.get(report_artifact_id)
+        unique_evidence = tuple(dict.fromkeys(evidence_artifact_ids))
+        for evidence_id in unique_evidence:
+            evidence = self.get(evidence_id)
+            if evidence.project_id != report.project_id:
+                raise ArtifactOwnershipError(
+                    "Report evidence must belong to the same project"
+                )
+        self._connection.executemany(
+            "INSERT INTO evidence_links(report_artifact_id, evidence_artifact_id) "
+            "VALUES (?, ?)",
+            ((report_artifact_id, evidence_id) for evidence_id in unique_evidence),
+        )
+        self._connection.commit()
+
+    def evidence_for(self, report_artifact_id: str) -> tuple[str, ...]:
+        rows = self._connection.execute(
+            "SELECT evidence_artifact_id FROM evidence_links "
+            "WHERE report_artifact_id = ? ORDER BY rowid",
+            (report_artifact_id,),
+        ).fetchall()
+        return tuple(row["evidence_artifact_id"] for row in rows)
 
 
 def _task_from_row(row: sqlite3.Row) -> Task:

@@ -9,12 +9,16 @@ import pytest
 from data_analysis_agent.db import migrate
 from data_analysis_agent.datasets import DatasetService
 from data_analysis_agent.execution import DuckDBExecutor, PythonExecutor
+from data_analysis_agent.domain import ArtifactType
+from data_analysis_agent.permissions import ApprovalRepository, PermissionPolicy
+from data_analysis_agent.reporting import ReportService
 from data_analysis_agent.repositories import (
     ArtifactRepository,
     ProjectRepository,
     TaskRepository,
 )
 from data_analysis_agent.settings import Settings
+from data_analysis_agent.tools import ToolContext, build_tool_registry
 from data_analysis_agent.workspace import WorkspaceService
 
 
@@ -104,3 +108,53 @@ def python_executor(
     task_repository: TaskRepository,
 ) -> PythonExecutor:
     return PythonExecutor(settings, workspace, artifact_repository, task_repository)
+
+
+@pytest.fixture
+def chart_artifact(workspace, artifact_repository, task):
+    path = workspace.resolve_inside(task.project_id, "charts/logistics-cost-trend.html")
+    path.write_text("<html><body>chart</body></html>", encoding="utf-8")
+    return artifact_repository.register(
+        project_id=task.project_id,
+        task_id=task.id,
+        artifact_type=ArtifactType.CHART,
+        path=path,
+        title="Logistics cost trend",
+        description="East region logistics cost trend",
+        producer_execution_id=None,
+        input_artifact_ids=(),
+    )
+
+
+@pytest.fixture
+def report_service(workspace, artifact_repository, task_repository) -> ReportService:
+    return ReportService(workspace, artifact_repository, task_repository)
+
+
+@pytest.fixture
+def tool_registry(
+    dataset_service,
+    duckdb_executor,
+    python_executor,
+    workspace,
+    artifact_repository,
+    report_service,
+    task_repository,
+    db_connection,
+):
+    return build_tool_registry(
+        datasets=dataset_service,
+        duckdb_executor=duckdb_executor,
+        python_executor=python_executor,
+        workspace=workspace,
+        artifacts=artifact_repository,
+        reports=report_service,
+        tasks=task_repository,
+        permission_policy=PermissionPolicy(),
+        approvals=ApprovalRepository(db_connection),
+    )
+
+
+@pytest.fixture
+def tool_context(task) -> ToolContext:
+    return ToolContext(project_id=task.project_id, task_id=task.id)
