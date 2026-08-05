@@ -5,7 +5,9 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
+from data_analysis_agent.api import create_app
 from data_analysis_agent.db import migrate
 from data_analysis_agent.datasets import DatasetService
 from data_analysis_agent.execution import DuckDBExecutor, PythonExecutor
@@ -158,3 +160,9 @@ def tool_registry(
 @pytest.fixture
 def tool_context(task) -> ToolContext:
     return ToolContext(project_id=task.project_id, task_id=task.id)
+
+
+@pytest.fixture
+def api_client(settings: Settings) -> Iterator[TestClient]:
+    with TestClient(create_app(settings)) as client:
+        yield client

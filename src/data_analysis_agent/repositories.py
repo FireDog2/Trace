@@ -329,6 +329,14 @@ class TaskRepository:
             created_at=revision_row["created_at"],
         )
 
+    def latest_plan(self, task_id: str) -> PlanRevision | None:
+        row = self._connection.execute(
+            "SELECT id FROM plan_revisions WHERE task_id = ? "
+            "ORDER BY revision DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        return self.get_plan_revision(row["id"]) if row is not None else None
+
     def append_event(
         self,
         task_id: str,

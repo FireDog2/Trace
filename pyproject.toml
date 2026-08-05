@@ -34,3 +34,6 @@ packages = ["src/data_analysis_agent"]
 addopts = "-ra -p no:cacheprovider"
 pythonpath = ["src"]
 testpaths = ["tests"]
+filterwarnings = [
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning",
+]
