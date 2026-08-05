@@ -7,7 +7,6 @@ from typing import Any, Protocol
 
 import httpx
 
-from data_analysis_agent.settings import Settings
 from data_analysis_agent.model_config import ProviderCredentials
 from data_analysis_agent.tools import ToolCall, ToolSchema
 
@@ -139,20 +138,6 @@ class OpenAICompatibleProvider:
                 "malformed_response",
                 "The model service returned an invalid response",
             ) from exc
-
-
-def provider_from_settings(settings: Settings) -> ModelProvider:
-    if not settings.model_base_url or not settings.model_api_key or not settings.model_name:
-        raise ProviderError(
-            "not_configured",
-            "DAA_MODEL_BASE_URL, DAA_MODEL_API_KEY, and DAA_MODEL_NAME are required",
-        )
-    return OpenAICompatibleProvider(
-        base_url=settings.model_base_url,
-        api_key=settings.model_api_key,
-        model=settings.model_name,
-        timeout_seconds=settings.model_timeout_seconds,
-    )
 
 
 def provider_from_credentials(

@@ -24,15 +24,15 @@ npm --prefix web ci
 
 ## 配置模型
 
-三个变量缺一不可。`DAA_MODEL_BASE_URL` 应指向兼容服务的 API 根路径，程序会在其后请求 `/chat/completions`。
+不需要在启动前配置 URL、API Key 或模型环境变量。启动工作台后，点击左侧的 `MODEL ROUTE`，选择厂商并保存：
 
-```powershell
-$env:DAA_MODEL_BASE_URL = "https://your-model-service.example/v1"
-$env:DAA_MODEL_API_KEY = "your-api-key"
-$env:DAA_MODEL_NAME = "your-function-calling-model"
-```
+- **DeepSeek**：使用官方地址，可选 `deepseek-v4-flash` 或 `deepseek-v4-pro`。
+- **OpenAI**：使用官方地址，可选当前内置的 GPT-5.6 模型。
+- **第三方中转站**：填写服务商提供的 OpenAI 兼容 Base URL、模型名称和 API Key。
 
-模型配置只从当前进程环境读取，不会写入项目数据库。没有配置模型时，项目、数据上传和工作台仍可使用，但新分析任务不会自动执行。
+官方厂商的 Base URL 会被锁定，第三方地址可以编辑。配置保存后立即用于新任务和后续追问，不需要重启 API；切换厂商时需要提供新厂商的 API Key。
+
+API Key 不会返回给前端，也不会以明文写入数据库。在 Windows 上，它使用当前登录用户的 DPAPI 加密，因此只有保存密钥的 Windows 用户能够解密。删除 `.data-analysis-agent/` 会同时删除模型配置和本地项目数据。
 
 ## 本地运行
 
@@ -54,13 +54,14 @@ npm --prefix web run dev
 
 ## 推荐体验流程
 
-1. 新建项目，例如“经营复盘”。
-2. 上传 `tests/fixtures/operations.csv`。
-3. 新建任务：“为什么 East 区域利润下降？”
-4. 在任务工作台查看计划修订、执行时间线、代码、派生表、图表与最终报告。
-5. 打开报告中的 `artifact://...` 证据引用，核对结论对应的持久化产物。
-6. 任务完成后继续追问，例如“再和 West 比较”。即使重启应用，追问仍在同一个任务和项目上下文中继续。
-7. 当操作越过自动权限边界时，在对话侧栏查看审批卡；批准只对完全相同的一次操作生效，使用后即失效。
+1. 点击左侧 `MODEL ROUTE`，选择模型厂商并保存 API Key。
+2. 新建项目，例如“经营复盘”。
+3. 上传 `tests/fixtures/operations.csv`。
+4. 新建任务：“为什么 East 区域利润下降？”
+5. 在任务工作台查看计划修订、执行时间线、代码、派生表、图表与最终报告。
+6. 打开报告中的 `artifact://...` 证据引用，核对结论对应的持久化产物。
+7. 任务完成后继续追问，例如“再和 West 比较”。即使重启应用，追问仍在同一个任务和项目上下文中继续。
+8. 当操作越过自动权限边界时，在对话侧栏查看审批卡；批准只对完全相同的一次操作生效，使用后即失效。
 
 ## 数据目录
 
