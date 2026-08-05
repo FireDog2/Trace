@@ -8,6 +8,14 @@ from data_analysis_agent.permissions import ToolAction
 from data_analysis_agent.providers import ModelResponse, ScriptedProvider
 
 
+class RecordingProtector:
+    def protect(self, value: str) -> bytes:
+        return b"protected:" + value.encode("utf-8")
+
+    def unprotect(self, value: bytes) -> str:
+        return value.removeprefix(b"protected:").decode("utf-8")
+
+
 def test_project_dataset_task_lifecycle(api_client, operations_csv) -> None:
     project_response = api_client.post(
         "/api/projects",
@@ -122,3 +130,83 @@ def test_approval_decision_is_visible_and_resumes_configured_agent(settings) -> 
         events = client.get(f"/api/tasks/{task.id}/events").text
         assert "event: approval.decided" in events
         assert '"status": "approved"' in events
+
+
+def test_model_configuration_api_never_returns_key(settings) -> None:
+    with TestClient(
+        create_app(settings, secret_protector=RecordingProtector())
+    ) as client:
+        response = client.put(
+            "/api/model-config",
+            json={
+                "provider": "openai",
+                "model": "gpt-5.6-terra",
+                "api_key": "openai-secret",
+            },
+        )
+
+        assert response.status_code == 200
+        body = client.get("/api/model-config").json()
+        assert body["provider"] == "openai"
+        assert body["base_url"] == "https://api.openai.com/v1"
+        assert body["has_api_key"] is True
+        assert body["configured"] is True
+        assert body["providers"][0]["provider"] == "deepseek"
+        assert "api_key" not in body
+        assert "openai-secret" not in client.get("/api/model-config").text
+
+
+def test_unconfigured_task_is_rejected_before_creation(settings) -> None:
+    with TestClient(
+        create_app(settings, secret_protector=RecordingProtector())
+    ) as client:
+        project = client.post("/api/projects", json={"name": "Review"}).json()
+
+        response = client.post(
+            f"/api/projects/{project['id']}/tasks",
+            json={"objective": "Diagnose profit"},
+        )
+
+        assert response.status_code == 409
+        assert response.json()["detail"]["category"] == "model_not_configured"
+        assert client.get(f"/api/projects/{project['id']}/tasks").json() == []
+
+
+def test_saved_configuration_is_resolved_for_a_new_task(settings) -> None:
+    captured = []
+
+    def provider_factory(credentials, timeout_seconds=60):
+        captured.append((credentials, timeout_seconds))
+        return ScriptedProvider(
+            [ModelResponse(text="Configured model completed.", tool_calls=())]
+        )
+
+    with TestClient(
+        create_app(
+            settings,
+            secret_protector=RecordingProtector(),
+            provider_factory=provider_factory,
+        )
+    ) as client:
+        client.put(
+            "/api/model-config",
+            json={
+                "provider": "custom",
+                "base_url": "https://relay.example/v1/",
+                "model": "relay-model",
+                "api_key": "relay-key",
+            },
+        )
+        project = client.post("/api/projects", json={"name": "Review"}).json()
+
+        task = client.post(
+            f"/api/projects/{project['id']}/tasks",
+            json={"objective": "Diagnose profit"},
+        ).json()
+
+        assert client.get(f"/api/tasks/{task['id']}").json()["status"] == "completed"
+        credentials, timeout_seconds = captured[0]
+        assert credentials.base_url == "https://relay.example/v1"
+        assert credentials.model == "relay-model"
+        assert credentials.api_key == "relay-key"
+        assert timeout_seconds == settings.model_timeout_seconds

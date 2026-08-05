@@ -10,7 +10,9 @@ from data_analysis_agent.providers import (
     ModelRequest,
     OpenAICompatibleProvider,
     ProviderError,
+    provider_from_credentials,
 )
+from data_analysis_agent.model_config import ModelProviderKind, ProviderCredentials
 from data_analysis_agent.tools import ToolSchema
 
 
@@ -114,3 +116,16 @@ def test_openai_adapter_classifies_authentication_failure() -> None:
 
     assert error.value.category == "authentication"
     assert "secret" not in str(error.value)
+
+
+def test_provider_from_credentials_builds_openai_compatible_provider() -> None:
+    provider = provider_from_credentials(
+        ProviderCredentials(
+            provider=ModelProviderKind.CUSTOM,
+            base_url="https://relay.example/v1",
+            model="relay-model",
+            api_key="relay-key",
+        )
+    )
+
+    assert isinstance(provider, OpenAICompatibleProvider)

@@ -13,6 +13,7 @@ from data_analysis_agent.datasets import DatasetService
 from data_analysis_agent.execution import DuckDBExecutor, PythonExecutor
 from data_analysis_agent.domain import ArtifactType
 from data_analysis_agent.permissions import ApprovalRepository, PermissionPolicy
+from data_analysis_agent.providers import ModelResponse, ScriptedProvider
 from data_analysis_agent.reporting import ReportService
 from data_analysis_agent.repositories import (
     ArtifactRepository,
@@ -164,5 +165,8 @@ def tool_context(task) -> ToolContext:
 
 @pytest.fixture
 def api_client(settings: Settings) -> Iterator[TestClient]:
-    with TestClient(create_app(settings)) as client:
+    provider = ScriptedProvider(
+        [ModelResponse(text="Deterministic analysis complete.", tool_calls=())]
+    )
+    with TestClient(create_app(settings, provider)) as client:
         yield client

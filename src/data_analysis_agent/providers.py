@@ -8,6 +8,7 @@ from typing import Any, Protocol
 import httpx
 
 from data_analysis_agent.settings import Settings
+from data_analysis_agent.model_config import ProviderCredentials
 from data_analysis_agent.tools import ToolCall, ToolSchema
 
 
@@ -151,6 +152,18 @@ def provider_from_settings(settings: Settings) -> ModelProvider:
         api_key=settings.model_api_key,
         model=settings.model_name,
         timeout_seconds=settings.model_timeout_seconds,
+    )
+
+
+def provider_from_credentials(
+    credentials: ProviderCredentials,
+    timeout_seconds: int = 60,
+) -> ModelProvider:
+    return OpenAICompatibleProvider(
+        base_url=credentials.base_url,
+        api_key=credentials.api_key,
+        model=credentials.model,
+        timeout_seconds=timeout_seconds,
     )
 
 

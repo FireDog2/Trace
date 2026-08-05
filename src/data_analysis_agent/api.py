@@ -8,7 +8,7 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Annotated, Iterator
+from typing import Annotated, Callable, Iterator
 
 from fastapi import (
     BackgroundTasks,
@@ -29,7 +29,19 @@ from data_analysis_agent.db import connect_database
 from data_analysis_agent.domain import Artifact, Project, Task, TaskStatus
 from data_analysis_agent.execution import DuckDBExecutor, PythonExecutor
 from data_analysis_agent.permissions import ApprovalRepository, PermissionPolicy
-from data_analysis_agent.providers import ModelProvider
+from data_analysis_agent.model_config import (
+    MODEL_PROVIDER_CATALOG,
+    ModelConfigurationError,
+    ModelConfigurationRepository,
+    ProviderCredentials,
+    SecretProtector,
+    SecretStorageUnavailable,
+    WindowsDpapiProtector,
+)
+from data_analysis_agent.providers import (
+    ModelProvider,
+    provider_from_credentials,
+)
 from data_analysis_agent.reporting import ReportService
 from data_analysis_agent.repositories import (
     ArtifactRepository,
@@ -119,6 +131,35 @@ class ApprovalDecisionRequest(ApiModel):
     approved: bool
 
 
+class SaveModelConfigurationRequest(ApiModel):
+    provider: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+    base_url: str | None = None
+    api_key: str | None = None
+
+
+class ProviderDefinitionResponse(ApiModel):
+    provider: str
+    label: str
+    base_url: str | None
+    models: list[str]
+    default_model: str
+    custom_url: bool
+
+
+class ModelConfigurationResponse(ApiModel):
+    provider: str | None
+    base_url: str
+    model: str
+    configured: bool
+    has_api_key: bool
+    updated_at: str | None
+    providers: list[ProviderDefinitionResponse]
+
+
+ProviderFactory = Callable[[ProviderCredentials, int], ModelProvider]
+
+
 @dataclass(slots=True)
 class AppServices:
     settings: Settings
@@ -129,23 +170,34 @@ class AppServices:
     artifacts: ArtifactRepository
     datasets: DatasetService
     approvals: ApprovalRepository
+    model_configs: ModelConfigurationRepository
     tools: ToolRegistry
     provider: ModelProvider | None
+    provider_factory: ProviderFactory
 
     def agent(self) -> AgentRunner:
-        if self.provider is None:
-            raise RuntimeError("No model provider is configured")
         return AgentRunner(
             settings=self.settings,
-            provider=self.provider,
+            provider=self.resolve_provider(),
             tools=self.tools,
             tasks=self.tasks,
+        )
+
+    def resolve_provider(self) -> ModelProvider:
+        if self.provider is not None:
+            return self.provider
+        credentials = self.model_configs.credentials()
+        return self.provider_factory(
+            credentials,
+            self.settings.model_timeout_seconds,
         )
 
 
 def build_services(
     settings: Settings,
     provider: ModelProvider | None = None,
+    secret_protector: SecretProtector | None = None,
+    provider_factory: ProviderFactory = provider_from_credentials,
 ) -> AppServices:
     connection = connect_database(settings)
     workspace = WorkspaceService(settings)
@@ -154,6 +206,10 @@ def build_services(
     artifacts = ArtifactRepository(connection, workspace)
     datasets = DatasetService(workspace, artifacts)
     approvals = ApprovalRepository(connection)
+    model_configs = ModelConfigurationRepository(
+        connection,
+        secret_protector or WindowsDpapiProtector(),
+    )
     reports = ReportService(workspace, artifacts, tasks)
     tools = build_tool_registry(
         datasets=datasets,
@@ -180,16 +236,25 @@ def build_services(
         artifacts=artifacts,
         datasets=datasets,
         approvals=approvals,
+        model_configs=model_configs,
         tools=tools,
         provider=provider,
+        provider_factory=provider_factory,
     )
 
 
 def create_app(
     settings: Settings,
     provider: ModelProvider | None = None,
+    secret_protector: SecretProtector | None = None,
+    provider_factory: ProviderFactory = provider_from_credentials,
 ) -> FastAPI:
-    services = build_services(settings, provider)
+    services = build_services(
+        settings,
+        provider,
+        secret_protector,
+        provider_factory,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -225,6 +290,27 @@ def create_app(
     @app.get("/api/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/api/model-config", response_model=ModelConfigurationResponse)
+    def get_model_configuration() -> ModelConfigurationResponse:
+        return _model_configuration_response(services.model_configs)
+
+    @app.put("/api/model-config", response_model=ModelConfigurationResponse)
+    def save_model_configuration(
+        request: SaveModelConfigurationRequest,
+    ) -> ModelConfigurationResponse:
+        try:
+            services.model_configs.save(
+                request.provider,
+                request.model,
+                request.base_url,
+                request.api_key,
+            )
+        except SecretStorageUnavailable as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+        except ModelConfigurationError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        return _model_configuration_response(services.model_configs)
 
     @app.get("/api/projects", response_model=list[ProjectResponse])
     def list_projects() -> list[ProjectResponse]:
@@ -316,9 +402,9 @@ def create_app(
         background_tasks: BackgroundTasks,
     ) -> TaskResponse:
         services.projects.get(project_id)
+        resolved_provider = _configured_provider_or_409(services)
         task = services.tasks.create(project_id, request.objective)
-        if provider is not None:
-            background_tasks.add_task(_run_task, settings, provider, task.id)
+        background_tasks.add_task(_run_task, settings, resolved_provider, task.id)
         return _task_response(task)
 
     @app.get("/api/tasks/{task_id}", response_model=TaskDetailResponse)
@@ -369,22 +455,15 @@ def create_app(
     ) -> TaskResponse:
         task = services.tasks.get(task_id)
         if task.status in {TaskStatus.NEEDS_INPUT, TaskStatus.COMPLETED}:
-            if provider is None:
-                services.tasks.add_message(task_id, "user", request.content)
-                task = (
-                    services.tasks.reopen_completed(task_id)
-                    if task.status is TaskStatus.COMPLETED
-                    else services.tasks.transition(task_id, TaskStatus.UNDERSTANDING)
-                )
-            else:
-                background_tasks.add_task(
-                    _continue_task,
-                    settings,
-                    provider,
-                    task_id,
-                    request.content,
-                    task.status,
-                )
+            resolved_provider = _configured_provider_or_409(services)
+            background_tasks.add_task(
+                _continue_task,
+                settings,
+                resolved_provider,
+                task_id,
+                request.content,
+                task.status,
+            )
         else:
             services.tasks.add_message(task_id, "user", request.content)
         return _task_response(task)
@@ -401,11 +480,12 @@ def create_app(
             "approval.decided",
             {"approval_id": approval.id, "status": approval.status},
         )
-        if request.approved and provider is not None:
+        if request.approved:
+            resolved_provider = _configured_provider_or_409(services)
             background_tasks.add_task(
                 _resume_approved_task,
                 settings,
-                provider,
+                resolved_provider,
                 approval.task_id,
             )
         return {
@@ -453,6 +533,19 @@ def _event_stream(
             yield ": heartbeat\n\n"
             last_heartbeat = time.monotonic()
         time.sleep(0.25)
+
+
+def _configured_provider_or_409(services: AppServices) -> ModelProvider:
+    try:
+        return services.resolve_provider()
+    except ModelConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "category": "model_not_configured",
+                "message": "Configure a model before starting analysis",
+            },
+        ) from exc
 
 
 def _run_task(settings: Settings, provider: ModelProvider, task_id: str) -> None:
@@ -528,6 +621,31 @@ def _artifact_response(
         content_type=artifact.content_type,
         created_at=artifact.created_at,
         content_url=f"/api/artifacts/{artifact.id}/content",
+    )
+
+
+def _model_configuration_response(
+    repository: ModelConfigurationRepository,
+) -> ModelConfigurationResponse:
+    current = repository.get_public()
+    return ModelConfigurationResponse(
+        provider=current.provider.value if current.provider is not None else None,
+        base_url=current.base_url,
+        model=current.model,
+        configured=current.configured,
+        has_api_key=current.has_api_key,
+        updated_at=current.updated_at,
+        providers=[
+            ProviderDefinitionResponse(
+                provider=definition.kind.value,
+                label=definition.label,
+                base_url=definition.base_url,
+                models=list(definition.models),
+                default_model=definition.default_model,
+                custom_url=definition.custom_url,
+            )
+            for definition in MODEL_PROVIDER_CATALOG
+        ],
     )
 
 
