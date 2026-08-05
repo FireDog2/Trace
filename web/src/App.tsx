@@ -152,7 +152,7 @@ export function App({ api: suppliedApi }: AppProps) {
   }
 
   return (
-    <div className="app-shell">
+    <div className={task ? "app-shell with-conversation" : "app-shell"}>
       <ProjectNav
         projects={projects}
         selectedProjectId={selectedProjectId}
@@ -195,13 +195,14 @@ export function App({ api: suppliedApi }: AppProps) {
         </main>
       )}
 
-      <Conversation
-        messages={task?.messages ?? []}
-        events={events}
-        disabled={!task}
-        onSend={sendMessage}
-        onApproval={decideApproval}
-      />
+      {task && (
+        <Conversation
+          messages={task.messages}
+          events={events}
+          onSend={sendMessage}
+          onApproval={decideApproval}
+        />
+      )}
 
       {modelConfiguration && (
         <ModelSettings

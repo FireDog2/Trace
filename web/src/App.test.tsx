@@ -169,10 +169,23 @@ describe("analysis workbench", () => {
     expect(screen.getByRole("heading", { name: "分析计划" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "分析产物" })).toBeVisible();
     expect(screen.getByRole("textbox", { name: "给分析 Agent 留言" })).toBeVisible();
+    expect(screen.queryByRole("textbox", { name: "分析目标" })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "物流成本趋势" })).toHaveAttribute(
       "href",
       "/api/artifacts/chart-1/content",
     );
+  });
+
+  it("shows only the objective input before a task exists", async () => {
+    const api = fakeApiWithCompletedTask();
+    api.listTasks = async () => [];
+    api.listArtifacts = async () => [];
+    render(<App api={api} />);
+
+    expect(await screen.findByRole("textbox", { name: "分析目标" })).toBeVisible();
+    expect(
+      screen.queryByRole("textbox", { name: "给分析 Agent 留言" }),
+    ).not.toBeInTheDocument();
   });
 
   it("shows approval cards and records a decision", async () => {

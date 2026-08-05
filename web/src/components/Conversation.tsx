@@ -5,7 +5,6 @@ import type { Message, TaskEvent } from "../types";
 interface ConversationProps {
   messages: Message[];
   events: TaskEvent[];
-  disabled?: boolean;
   onSend(content: string): Promise<void>;
   onApproval(approvalId: string, approved: boolean): Promise<void>;
 }
@@ -20,7 +19,6 @@ interface ApprovalView {
 export function Conversation({
   messages,
   events,
-  disabled,
   onSend,
   onApproval,
 }: ConversationProps) {
@@ -111,13 +109,13 @@ export function Conversation({
           id="agent-message"
           aria-label="给分析 Agent 留言"
           value={content}
-          disabled={disabled || sending}
+          disabled={sending}
           placeholder="例如：物流成本按发货日期重新计算"
           onChange={(event) => setContent(event.target.value)}
         />
         <div>
           <span>⌘ ↵</span>
-          <button type="submit" disabled={disabled || sending || !content.trim()}>
+          <button type="submit" disabled={sending || !content.trim()}>
             {sending ? "发送中" : "发送指令"}
           </button>
         </div>
