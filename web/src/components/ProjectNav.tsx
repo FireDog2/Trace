@@ -30,6 +30,7 @@ export function ProjectNav({
   onOpenModelSettings,
 }: ProjectNavProps) {
   const [newProjectName, setNewProjectName] = useState("");
+  const [creatingProject, setCreatingProject] = useState(false);
 
   async function submitProject(event: FormEvent) {
     event.preventDefault();
@@ -37,6 +38,7 @@ export function ProjectNav({
     if (!name) return;
     await onCreateProject(name);
     setNewProjectName("");
+    setCreatingProject(false);
   }
 
   return (
@@ -65,30 +67,54 @@ export function ProjectNav({
         </small>
       </button>
 
-      <section className="rail-section">
-        <div className="section-label">项目</div>
-        {projects.length > 0 && (
-          <select
-            aria-label="当前项目"
-            value={selectedProjectId ?? ""}
-            onChange={(event) => onSelectProject(event.target.value)}
+      <section className="rail-section project-section">
+        <div className="section-heading">
+          <div className="section-label">项目 <span>{projects.length}</span></div>
+          <button
+            type="button"
+            className="section-action"
+            aria-label={creatingProject ? "取消新建项目" : "新建项目"}
+            onClick={() => setCreatingProject((current) => !current)}
           >
-            {projects.map((project) => (
-              <option key={project.id} value={project.id}>
-                {project.name}
-              </option>
-            ))}
-          </select>
+            {creatingProject ? "取消" : "＋ 新建"}
+          </button>
+        </div>
+        {projects.length > 0 ? (
+          <ul className="project-list">
+            {projects.map((project, index) => {
+              const selected = project.id === selectedProjectId;
+              return (
+                <li key={project.id}>
+                  <button
+                    type="button"
+                    className={selected ? "project-link active" : "project-link"}
+                    aria-label={project.name}
+                    aria-current={selected ? "page" : undefined}
+                    onClick={() => onSelectProject(project.id)}
+                  >
+                    <span className="project-index">{String(index + 1).padStart(2, "0")}</span>
+                    <span>{project.name}</span>
+                    <i aria-hidden="true">{selected ? "●" : "○"}</i>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        ) : (
+          <p className="rail-empty">还没有项目，先建立一个分析容器。</p>
         )}
-        <form className="compact-form" onSubmit={submitProject}>
-          <input
-            aria-label="新项目名称"
-            value={newProjectName}
-            placeholder="新建分析项目"
-            onChange={(event) => setNewProjectName(event.target.value)}
-          />
-          <button type="submit" aria-label="创建项目">＋</button>
-        </form>
+        {creatingProject && (
+          <form className="compact-form" onSubmit={submitProject}>
+            <input
+              autoFocus
+              aria-label="新项目名称"
+              value={newProjectName}
+              placeholder="例如：2025 区域经营复盘"
+              onChange={(event) => setNewProjectName(event.target.value)}
+            />
+            <button type="submit" aria-label="创建项目" disabled={!newProjectName.trim()}>创建</button>
+          </form>
+        )}
       </section>
 
       <section className="rail-section">
@@ -104,6 +130,9 @@ export function ProjectNav({
                 <span title={artifact.title}>{artifact.title}</span>
               </li>
             ))}
+          {artifacts.filter((artifact) => artifact.artifact_type.includes("dataset")).length === 0 && (
+            <li className="rail-empty">尚未添加数据</li>
+          )}
         </ul>
         {selectedProjectId && (
           <label className="upload-control">
@@ -135,6 +164,7 @@ export function ProjectNav({
               </button>
             </li>
           ))}
+          {tasks.length === 0 && <li className="rail-empty">从一个经营问题开始</li>}
         </ul>
       </section>
     </nav>

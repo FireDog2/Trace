@@ -32,6 +32,7 @@ export function App({ api: suppliedApi }: AppProps) {
   const [error, setError] = useState<string | null>(null);
   const [modelConfiguration, setModelConfiguration] = useState<ModelConfigurationStatus | null>(null);
   const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
+  const [conversationOpen, setConversationOpen] = useState(true);
 
   useEffect(() => {
     void api
@@ -151,8 +152,12 @@ export function App({ api: suppliedApi }: AppProps) {
     setError(null);
   }
 
+  const shellClassName = task
+    ? `app-shell with-conversation${conversationOpen ? "" : " conversation-collapsed"}`
+    : "app-shell";
+
   return (
-    <div className={task ? "app-shell with-conversation" : "app-shell"}>
+    <div className={shellClassName}>
       <ProjectNav
         projects={projects}
         selectedProjectId={selectedProjectId}
@@ -170,7 +175,12 @@ export function App({ api: suppliedApi }: AppProps) {
       {error && <div className="error-banner" role="alert">{error}</div>}
 
       {task ? (
-        <TaskWorkbench task={task} events={events} />
+        <TaskWorkbench
+          task={task}
+          events={events}
+          conversationOpen={conversationOpen}
+          onOpenConversation={() => setConversationOpen(true)}
+        />
       ) : (
         <main className="task-workbench empty-workbench">
           <div className="empty-sequence">DATA → PLAN → EVIDENCE</div>
@@ -201,6 +211,8 @@ export function App({ api: suppliedApi }: AppProps) {
           events={events}
           onSend={sendMessage}
           onApproval={decideApproval}
+          onCollapse={() => setConversationOpen(false)}
+          hidden={!conversationOpen}
         />
       )}
 

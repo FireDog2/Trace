@@ -7,6 +7,8 @@ interface ConversationProps {
   events: TaskEvent[];
   onSend(content: string): Promise<void>;
   onApproval(approvalId: string, approved: boolean): Promise<void>;
+  onCollapse(): void;
+  hidden?: boolean;
 }
 
 interface ApprovalView {
@@ -21,6 +23,8 @@ export function Conversation({
   events,
   onSend,
   onApproval,
+  onCollapse,
+  hidden = false,
 }: ConversationProps) {
   const [content, setContent] = useState("");
   const [sending, setSending] = useState(false);
@@ -50,10 +54,17 @@ export function Conversation({
   }
 
   return (
-    <aside className="conversation-panel">
+    <aside className="conversation-panel" hidden={hidden} aria-label="分析协作对话">
       <header>
-        <div className="section-label">对话入口</div>
-        <h2>分析协作</h2>
+        <div className="conversation-heading-row">
+          <div>
+            <div className="section-label">对话入口</div>
+            <h2>分析协作</h2>
+          </div>
+          <button type="button" className="conversation-collapse" onClick={onCollapse}>
+            收起对话
+          </button>
+        </div>
         <p>调整目标、补充口径，或继续追问。</p>
       </header>
 
@@ -61,12 +72,23 @@ export function Conversation({
         {messages.length === 0 && (
           <p className="empty-note">对话负责表达意图，正式工作会沉淀到左侧任务中。</p>
         )}
-        {messages.map((message) => (
-          <article key={message.id} className={`message ${message.role}`}>
-            <span>{message.role === "user" ? "你" : message.role === "assistant" ? "Agent" : "执行"}</span>
-            <p>{message.content}</p>
-          </article>
-        ))}
+        {messages.map((message) => {
+          const roleLabel = message.role === "user" ? "你" : message.role === "assistant" ? "Agent" : "执行";
+          if (message.role === "tool") {
+            return (
+              <details key={message.id} className="message tool-message">
+                <summary>{roleLabel} · 查看执行详情</summary>
+                <p>{message.content}</p>
+              </details>
+            );
+          }
+          return (
+            <article key={message.id} className={`message ${message.role}`}>
+              <span>{roleLabel}</span>
+              <p>{message.content}</p>
+            </article>
+          );
+        })}
       </div>
 
       {approvals.length > 0 && (

@@ -3,6 +3,8 @@ import type { TaskDetail, TaskEvent } from "../types";
 interface TaskWorkbenchProps {
   task: TaskDetail;
   events: TaskEvent[];
+  conversationOpen: boolean;
+  onOpenConversation(): void;
 }
 
 const STATUS_LABELS: Record<string, string> = {
@@ -16,7 +18,16 @@ const STATUS_LABELS: Record<string, string> = {
   completed: "分析完成",
 };
 
-export function TaskWorkbench({ task, events }: TaskWorkbenchProps) {
+export function TaskWorkbench({
+  task,
+  events,
+  conversationOpen,
+  onOpenConversation,
+}: TaskWorkbenchProps) {
+  const latestConclusion = [...task.messages]
+    .reverse()
+    .find((message) => message.role === "assistant")?.content;
+
   return (
     <main className="task-workbench">
       <header className="task-heading">
@@ -24,8 +35,35 @@ export function TaskWorkbench({ task, events }: TaskWorkbenchProps) {
           <div className="section-label">当前任务 · {task.plan ? `计划 v${task.plan.revision}` : "尚未规划"}</div>
           <h1>{task.objective}</h1>
         </div>
-        <span className={`task-state ${task.status}`}>{STATUS_LABELS[task.status] ?? task.status}</span>
+        <div className="task-heading-actions">
+          <span className={`task-state ${task.status}`}>{STATUS_LABELS[task.status] ?? task.status}</span>
+          {!conversationOpen && (
+            <button type="button" className="conversation-toggle" onClick={onOpenConversation}>
+              展开对话
+            </button>
+          )}
+        </div>
       </header>
+
+      <section className="analysis-summary" aria-labelledby="current-conclusion-heading">
+        <div className="summary-kicker">LATEST FINDING</div>
+        <h2 id="current-conclusion-heading">当前结论</h2>
+        {latestConclusion ? (
+          latestConclusion.length > 520 ? (
+            <>
+              <p>{latestConclusion.slice(0, 520).trim()}…</p>
+              <details>
+                <summary>展开完整结论</summary>
+                <p>{latestConclusion}</p>
+              </details>
+            </>
+          ) : (
+            <p>{latestConclusion}</p>
+          )
+        ) : (
+          <p className="empty-note">Agent 完成阶段性分析后，最重要的结论会固定在这里。</p>
+        )}
+      </section>
 
       <div className="workbench-grid">
         <section className="analysis-panel plan-panel">

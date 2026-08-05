@@ -269,4 +269,54 @@ describe("analysis workbench", () => {
     fireEvent.click(screen.getByRole("radio", { name: "DeepSeek" }));
     expect(screen.getByLabelText("API Key")).toBeRequired();
   });
+
+  it("shows projects as a directly switchable list", async () => {
+    const api = fakeApiWithCompletedTask();
+    api.listProjects = async () => [
+      {
+        id: "project-1",
+        name: "2026 经营复盘",
+        status: "active",
+        created_at: "2026-08-05T00:00:00Z",
+        updated_at: "2026-08-05T00:00:00Z",
+      },
+      {
+        id: "project-2",
+        name: "渠道增长诊断",
+        status: "active",
+        created_at: "2026-08-05T00:00:00Z",
+        updated_at: "2026-08-05T00:00:00Z",
+      },
+    ];
+    render(<App api={api} />);
+
+    const currentProject = await screen.findByRole("button", { name: "2026 经营复盘" });
+    const nextProject = screen.getByRole("button", { name: "渠道增长诊断" });
+    expect(currentProject).toHaveAttribute("aria-current", "page");
+
+    fireEvent.click(nextProject);
+
+    await waitFor(() => {
+      expect(nextProject).toHaveAttribute("aria-current", "page");
+    });
+  });
+
+  it("surfaces the latest Agent conclusion in the workbench", async () => {
+    render(<App api={fakeApiWithCompletedTask()} />);
+
+    expect(await screen.findByRole("heading", { name: "当前结论" })).toBeVisible();
+    expect(screen.getAllByText("物流成本增长是主要变化。").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("collapses and restores the conversation without leaving the task", async () => {
+    render(<App api={fakeApiWithCompletedTask()} />);
+
+    const collapse = await screen.findByRole("button", { name: "收起对话" });
+    fireEvent.click(collapse);
+
+    expect(screen.queryByRole("textbox", { name: "给分析 Agent 留言" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "展开对话" }));
+
+    expect(screen.getByRole("textbox", { name: "给分析 Agent 留言" })).toBeVisible();
+  });
 });
