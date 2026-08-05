@@ -1,4 +1,12 @@
-import type { Artifact, Project, Task, TaskDetail, TaskEvent, TaskEventType } from "./types";
+import type {
+  ApprovalDecision,
+  Artifact,
+  Project,
+  Task,
+  TaskDetail,
+  TaskEvent,
+  TaskEventType,
+} from "./types";
 
 export interface ApiClient {
   listProjects(): Promise<Project[]>;
@@ -9,11 +17,14 @@ export interface ApiClient {
   createTask(projectId: string, objective: string): Promise<Task>;
   getTask(taskId: string): Promise<TaskDetail>;
   sendMessage(taskId: string, content: string): Promise<Task>;
+  decideApproval(approvalId: string, approved: boolean): Promise<ApprovalDecision>;
   subscribeToTask(taskId: string, onEvent: (event: TaskEvent) => void): () => void;
 }
 
 const EVENT_TYPES: TaskEventType[] = [
   "task.state",
+  "task.reopened",
+  "task.resumed",
   "task.failed",
   "plan.updated",
   "tool.started",
@@ -21,6 +32,7 @@ const EVENT_TYPES: TaskEventType[] = [
   "tool.failed",
   "artifact.created",
   "approval.requested",
+  "approval.decided",
   "message.created",
 ];
 
@@ -73,6 +85,14 @@ export class HttpApiClient implements ApiClient {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ content }),
+    });
+  }
+
+  decideApproval(approvalId: string, approved: boolean): Promise<ApprovalDecision> {
+    return this.request(`/api/approvals/${approvalId}/decision`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approved }),
     });
   }
 

@@ -55,7 +55,12 @@ class DatasetService:
         self._workspace = workspace
         self._artifacts = artifacts
 
-    def add_file(self, project_id: str, source: Path) -> Artifact:
+    def add_file(
+        self,
+        project_id: str,
+        source: Path,
+        display_name: str | None = None,
+    ) -> Artifact:
         extension = source.suffix.lower()
         if extension not in SUPPORTED_EXTENSIONS:
             raise UnsupportedDatasetError(
@@ -67,13 +72,14 @@ class DatasetService:
         except (OSError, ValueError, pl.exceptions.PolarsError) as exc:
             imported.unlink(missing_ok=True)
             raise InvalidDatasetError(f"Could not parse {source.name}") from exc
+        title = Path(display_name).name if display_name else source.name
         return self._artifacts.register(
             project_id=project_id,
             task_id=None,
             artifact_type=ArtifactType.SOURCE_DATASET,
             path=imported,
-            title=source.name,
-            description=f"Imported source dataset {source.name}",
+            title=title,
+            description=f"Imported source dataset {title}",
             producer_execution_id=None,
             input_artifact_ids=(),
         )

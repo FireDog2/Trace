@@ -54,8 +54,16 @@ export interface TaskDetail extends Task {
   artifacts: Artifact[];
 }
 
+export interface ApprovalDecision {
+  id: string;
+  status: string;
+  decided_at: string | null;
+}
+
 export type TaskEventType =
   | "task.state"
+  | "task.reopened"
+  | "task.resumed"
   | "task.failed"
   | "plan.updated"
   | "tool.started"
@@ -63,6 +71,7 @@ export type TaskEventType =
   | "tool.failed"
   | "artifact.created"
   | "approval.requested"
+  | "approval.decided"
   | "message.created";
 
 export interface TaskEvent {

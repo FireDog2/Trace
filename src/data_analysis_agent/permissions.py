@@ -145,14 +145,7 @@ class ApprovalRepository:
             (
                 approval.id,
                 approval.task_id,
-                json.dumps(
-                    {
-                        "tool_name": action.tool_name,
-                        "arguments": action.arguments,
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
+                _action_json(action),
                 approval.reason,
                 approval.status,
                 approval.created_at,
@@ -190,6 +183,23 @@ class ApprovalRepository:
             raise ApprovalAlreadyDecided(approval_id)
         return self.get(approval_id)
 
+    def consume_approved(self, task_id: str, action: ToolAction) -> bool:
+        row = self._connection.execute(
+            "SELECT id FROM approvals "
+            "WHERE task_id = ? AND action_json = ? AND status = 'approved' "
+            "ORDER BY created_at, rowid LIMIT 1",
+            (task_id, _action_json(action)),
+        ).fetchone()
+        if row is None:
+            return False
+        cursor = self._connection.execute(
+            "UPDATE approvals SET status = 'consumed' "
+            "WHERE id = ? AND status = 'approved'",
+            (row["id"],),
+        )
+        self._connection.commit()
+        return cursor.rowcount == 1
+
 
 def _declares_source_mutation(arguments: dict[str, Any]) -> bool:
     outputs = arguments.get("declared_outputs", ())
@@ -200,6 +210,15 @@ def _declares_source_mutation(arguments: dict[str, Any]) -> bool:
         if normalized.parts and normalized.parts[0].lower() == "source":
             return True
     return False
+
+
+def _action_json(action: ToolAction) -> str:
+    return json.dumps(
+        {"tool_name": action.tool_name, "arguments": action.arguments},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def _contains_absolute_path(arguments: dict[str, Any]) -> bool:

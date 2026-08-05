@@ -192,26 +192,32 @@ class ToolRegistry:
                 retryable=False,
             )
         if decision.level is PermissionLevel.REQUIRE_APPROVAL:
-            approval = self._approvals.request(
-                context.task_id,
-                ToolAction(call.name, normalized_arguments),
-                decision.reason,
-            )
-            self._pause_task(context.task_id)
-            self._tasks.append_event(
-                context.task_id,
-                "approval.requested",
-                {"approval_id": approval.id, "tool_name": call.name},
-            )
-            return ToolResult(
-                call_id=call.id,
-                success=False,
-                output={"approval_id": approval.id},
-                error_category="approval_required",
-                message=decision.reason,
-                retryable=False,
-                pauses_task=True,
-            )
+            action = ToolAction(call.name, normalized_arguments)
+            if not self._approvals.consume_approved(context.task_id, action):
+                approval = self._approvals.request(
+                    context.task_id,
+                    action,
+                    decision.reason,
+                )
+                self._pause_task(context.task_id)
+                self._tasks.append_event(
+                    context.task_id,
+                    "approval.requested",
+                    {
+                        "approval_id": approval.id,
+                        "tool_name": call.name,
+                        "reason": decision.reason,
+                    },
+                )
+                return ToolResult(
+                    call_id=call.id,
+                    success=False,
+                    output={"approval_id": approval.id},
+                    error_category="approval_required",
+                    message=decision.reason,
+                    retryable=False,
+                    pauses_task=True,
+                )
 
         execution_id = self._tasks.start_tool_execution(
             context.task_id,

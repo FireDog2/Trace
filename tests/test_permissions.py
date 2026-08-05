@@ -83,3 +83,15 @@ def test_approval_decision_is_persisted_once(
     assert decided.decided_at is not None
     with pytest.raises(ApprovalAlreadyDecided):
         approval_repository.decide(approval.id, approved=False)
+
+
+def test_approved_action_can_be_consumed_only_once(
+    approval_repository: ApprovalRepository,
+    task,
+) -> None:
+    action = ToolAction("overwrite_artifact", {"path": "derived/result.csv"})
+    approval = approval_repository.request(task.id, action, "Replace derived output")
+    approval_repository.decide(approval.id, approved=True)
+
+    assert approval_repository.consume_approved(task.id, action) is True
+    assert approval_repository.consume_approved(task.id, action) is False

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
 import tempfile
 import time
 from contextlib import asynccontextmanager
@@ -121,7 +122,8 @@ class ApprovalDecisionRequest(ApiModel):
 @dataclass(slots=True)
 class AppServices:
     settings: Settings
-    connection: object
+    connection: sqlite3.Connection
+    workspace: WorkspaceService
     projects: ProjectRepository
     tasks: TaskRepository
     artifacts: ArtifactRepository
@@ -172,6 +174,7 @@ def build_services(
     return AppServices(
         settings=settings,
         connection=connection,
+        workspace=workspace,
         projects=projects,
         tasks=tasks,
         artifacts=artifacts,
@@ -270,8 +273,12 @@ def create_app(
             ) as temporary:
                 shutil.copyfileobj(file.file, temporary)
                 temporary_path = Path(temporary.name)
-            artifact = services.datasets.add_file(project_id, temporary_path)
-            return _artifact_response(artifact, title=file.filename or artifact.title)
+            artifact = services.datasets.add_file(
+                project_id,
+                temporary_path,
+                display_name=file.filename,
+            )
+            return _artifact_response(artifact)
         finally:
             file.file.close()
             if temporary_path is not None:
@@ -361,17 +368,22 @@ def create_app(
         background_tasks: BackgroundTasks,
     ) -> TaskResponse:
         task = services.tasks.get(task_id)
-        if task.status.value == "needs_input":
+        if task.status in {TaskStatus.NEEDS_INPUT, TaskStatus.COMPLETED}:
             if provider is None:
                 services.tasks.add_message(task_id, "user", request.content)
-                task = services.tasks.transition(task_id, TaskStatus.UNDERSTANDING)
+                task = (
+                    services.tasks.reopen_completed(task_id)
+                    if task.status is TaskStatus.COMPLETED
+                    else services.tasks.transition(task_id, TaskStatus.UNDERSTANDING)
+                )
             else:
                 background_tasks.add_task(
-                    _resume_task,
+                    _continue_task,
                     settings,
                     provider,
                     task_id,
                     request.content,
+                    task.status,
                 )
         else:
             services.tasks.add_message(task_id, "user", request.content)
@@ -381,8 +393,21 @@ def create_app(
     def decide_approval(
         approval_id: str,
         request: ApprovalDecisionRequest,
+        background_tasks: BackgroundTasks,
     ) -> dict[str, str | None]:
         approval = services.approvals.decide(approval_id, request.approved)
+        services.tasks.append_event(
+            approval.task_id,
+            "approval.decided",
+            {"approval_id": approval.id, "status": approval.status},
+        )
+        if request.approved and provider is not None:
+            background_tasks.add_task(
+                _resume_approved_task,
+                settings,
+                provider,
+                approval.task_id,
+            )
         return {
             "id": approval.id,
             "status": approval.status,
@@ -438,15 +463,31 @@ def _run_task(settings: Settings, provider: ModelProvider, task_id: str) -> None
         services.connection.close()
 
 
-def _resume_task(
+def _continue_task(
     settings: Settings,
     provider: ModelProvider,
     task_id: str,
     content: str,
+    previous_status: TaskStatus,
 ) -> None:
     services = build_services(settings, provider)
     try:
-        services.agent().resume(task_id, content)
+        if previous_status is TaskStatus.COMPLETED:
+            services.agent().follow_up(task_id, content)
+        else:
+            services.agent().resume(task_id, content)
+    finally:
+        services.connection.close()
+
+
+def _resume_approved_task(
+    settings: Settings,
+    provider: ModelProvider,
+    task_id: str,
+) -> None:
+    services = build_services(settings, provider)
+    try:
+        services.agent().resume_approval(task_id)
     finally:
         services.connection.close()
 

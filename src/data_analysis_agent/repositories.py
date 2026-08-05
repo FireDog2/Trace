@@ -197,6 +197,28 @@ class TaskRepository:
             updated_at=updated_at,
         )
 
+    def reopen_completed(self, task_id: str) -> Task:
+        """Start a persisted follow-up cycle without weakening terminal transitions."""
+        current = self.get(task_id)
+        if current.status is not TaskStatus.COMPLETED:
+            raise InvalidTaskTransition(
+                f"Only a completed task can be reopened: {current.status}"
+            )
+        updated_at = utc_now()
+        self._connection.execute(
+            "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
+            (TaskStatus.UNDERSTANDING, updated_at, task_id),
+        )
+        self._connection.commit()
+        return Task(
+            id=current.id,
+            project_id=current.project_id,
+            objective=current.objective,
+            status=TaskStatus.UNDERSTANDING,
+            created_at=current.created_at,
+            updated_at=updated_at,
+        )
+
     def add_message(self, task_id: str, role: str, content: str) -> Message:
         if role not in {"user", "assistant", "assistant_tool_call", "system", "tool"}:
             raise ValueError(f"Unsupported message role: {role}")

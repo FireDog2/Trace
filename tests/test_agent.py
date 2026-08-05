@@ -75,3 +75,25 @@ def test_agent_pauses_for_business_input(
 
     assert paused.status is TaskStatus.NEEDS_INPUT
     assert "profit definition" in task_repository.list_messages(task.id)[0].content
+
+
+def test_agent_resumes_after_approval_without_fake_user_message(
+    settings,
+    task_repository,
+    tool_registry,
+    task,
+) -> None:
+    task_repository.transition(task.id, TaskStatus.NEEDS_INPUT)
+    provider = ScriptedProvider([response_with_text("Approved action completed")])
+
+    completed = AgentRunner(
+        settings=settings,
+        provider=provider,
+        tools=tool_registry,
+        tasks=task_repository,
+    ).resume_approval(task.id)
+
+    assert completed.status is TaskStatus.COMPLETED
+    assert [message.role for message in task_repository.list_messages(task.id)] == [
+        "assistant"
+    ]

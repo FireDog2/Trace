@@ -1,10 +1,17 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import type { ApiClient } from "./api";
 
-function fakeApiWithCompletedTask(): ApiClient {
+function fakeApiWithCompletedTask(
+  approvalEvent = false,
+  decideApproval = vi.fn(async () => ({
+    id: "approval-1",
+    status: "approved",
+    decided_at: "2026-08-05T00:06:00Z",
+  })),
+): ApiClient {
   return {
     listProjects: async () => [
       {
@@ -87,7 +94,21 @@ function fakeApiWithCompletedTask(): ApiClient {
     sendMessage: async () => {
       throw new Error("Not used in this test");
     },
-    subscribeToTask: () => () => undefined,
+    decideApproval,
+    subscribeToTask: (_taskId, onEvent) => {
+      if (approvalEvent) {
+        onEvent({
+          sequence: 12,
+          type: "approval.requested",
+          payload: {
+            approval_id: "approval-1",
+            tool_name: "save_artifact",
+            reason: "覆盖已有产物需要确认",
+          },
+        });
+      }
+      return () => undefined;
+    },
   };
 }
 
@@ -103,5 +124,21 @@ describe("analysis workbench", () => {
       "href",
       "/api/artifacts/chart-1/content",
     );
+  });
+
+  it("shows approval cards and records a decision", async () => {
+    const decideApproval = vi.fn(async () => ({
+      id: "approval-1",
+      status: "approved",
+      decided_at: "2026-08-05T00:06:00Z",
+    }));
+    render(<App api={fakeApiWithCompletedTask(true, decideApproval)} />);
+
+    expect(await screen.findByText("覆盖已有产物需要确认")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "批准操作" }));
+
+    await waitFor(() => {
+      expect(decideApproval).toHaveBeenCalledWith("approval-1", true);
+    });
   });
 });

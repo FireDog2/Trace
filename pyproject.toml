@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "data-analysis-agent"
 version = "0.1.0"
 description = "A local-first, traceable data analysis agent workspace"
+readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "duckdb>=1.1,<2",

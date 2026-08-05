@@ -121,6 +121,11 @@ export function App({ api: suppliedApi }: AppProps) {
     setTask(await api.getTask(selectedTaskId));
   }
 
+  async function decideApproval(approvalId: string, approved: boolean) {
+    await api.decideApproval(approvalId, approved);
+    if (selectedTaskId) setTask(await api.getTask(selectedTaskId));
+  }
+
   return (
     <div className="app-shell">
       <ProjectNav
@@ -165,8 +170,10 @@ export function App({ api: suppliedApi }: AppProps) {
 
       <Conversation
         messages={task?.messages ?? []}
+        events={events}
         disabled={!task}
         onSend={sendMessage}
+        onApproval={decideApproval}
       />
     </div>
   );

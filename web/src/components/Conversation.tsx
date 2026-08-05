@@ -1,16 +1,33 @@
 import { FormEvent, useState } from "react";
 
-import type { Message } from "../types";
+import type { Message, TaskEvent } from "../types";
 
 interface ConversationProps {
   messages: Message[];
+  events: TaskEvent[];
   disabled?: boolean;
   onSend(content: string): Promise<void>;
+  onApproval(approvalId: string, approved: boolean): Promise<void>;
 }
 
-export function Conversation({ messages, disabled, onSend }: ConversationProps) {
+interface ApprovalView {
+  id: string;
+  toolName: string;
+  reason: string;
+  status: string;
+}
+
+export function Conversation({
+  messages,
+  events,
+  disabled,
+  onSend,
+  onApproval,
+}: ConversationProps) {
   const [content, setContent] = useState("");
   const [sending, setSending] = useState(false);
+  const [deciding, setDeciding] = useState<string | null>(null);
+  const approvals = approvalViews(events);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -22,6 +39,15 @@ export function Conversation({ messages, disabled, onSend }: ConversationProps) 
       setContent("");
     } finally {
       setSending(false);
+    }
+  }
+
+  async function decide(approvalId: string, approved: boolean) {
+    setDeciding(approvalId);
+    try {
+      await onApproval(approvalId, approved);
+    } finally {
+      setDeciding(null);
     }
   }
 
@@ -45,6 +71,40 @@ export function Conversation({ messages, disabled, onSend }: ConversationProps) 
         ))}
       </div>
 
+      {approvals.length > 0 && (
+        <section className="approval-stack" aria-label="待审批操作">
+          {approvals.map((approval) => (
+            <article className={`approval-card ${approval.status}`} key={approval.id}>
+              <span className="approval-kicker">PERMISSION · {approval.toolName}</span>
+              <strong>{approval.status === "pending" ? "需要你的批准" : "审批已处理"}</strong>
+              <p>{approval.reason}</p>
+              {approval.status === "pending" ? (
+                <div className="approval-actions">
+                  <button
+                    type="button"
+                    disabled={deciding === approval.id}
+                    aria-label="拒绝操作"
+                    onClick={() => void decide(approval.id, false)}
+                  >
+                    拒绝
+                  </button>
+                  <button
+                    type="button"
+                    disabled={deciding === approval.id}
+                    aria-label="批准操作"
+                    onClick={() => void decide(approval.id, true)}
+                  >
+                    批准一次
+                  </button>
+                </div>
+              ) : (
+                <small>{approval.status === "approved" ? "已批准，任务将继续" : "已拒绝"}</small>
+              )}
+            </article>
+          ))}
+        </section>
+      )}
+
       <form className="message-composer" onSubmit={submit}>
         <label htmlFor="agent-message">给分析 Agent 留言</label>
         <textarea
@@ -64,4 +124,29 @@ export function Conversation({ messages, disabled, onSend }: ConversationProps) 
       </form>
     </aside>
   );
+}
+
+function approvalViews(events: TaskEvent[]): ApprovalView[] {
+  const approvals = new Map<string, ApprovalView>();
+  for (const event of events) {
+    const approvalId = String(event.payload.approval_id ?? "");
+    if (!approvalId) continue;
+    if (event.type === "approval.requested") {
+      approvals.set(approvalId, {
+        id: approvalId,
+        toolName: String(event.payload.tool_name ?? "unknown action"),
+        reason: String(event.payload.reason ?? "该操作超出自动权限边界"),
+        status: "pending",
+      });
+    } else if (event.type === "approval.decided") {
+      const current = approvals.get(approvalId);
+      if (current) {
+        approvals.set(approvalId, {
+          ...current,
+          status: String(event.payload.status ?? "rejected"),
+        });
+      }
+    }
+  }
+  return [...approvals.values()];
 }

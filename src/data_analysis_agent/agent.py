@@ -131,13 +131,47 @@ class AgentRunner:
         task = self._tasks.get(task_id)
         if task.status is not TaskStatus.NEEDS_INPUT:
             raise ValueError("Only a task waiting for input can be resumed")
+        return self._continue(task_id, user_message, task.status)
+
+    def follow_up(self, task_id: str, user_message: str) -> Task:
+        task = self._tasks.get(task_id)
+        if task.status is not TaskStatus.COMPLETED:
+            raise ValueError("Only a completed task accepts a follow-up")
+        return self._continue(task_id, user_message, task.status)
+
+    def resume_approval(self, task_id: str) -> Task:
+        task = self._tasks.get(task_id)
+        if task.status is not TaskStatus.NEEDS_INPUT:
+            raise ValueError("Only a task waiting for approval can be resumed")
+        self._tasks.transition(task_id, TaskStatus.UNDERSTANDING)
+        self._tasks.append_event(
+            task_id,
+            "task.resumed",
+            {"reason": "approval_granted"},
+        )
+        return self.run(task_id)
+
+    def _continue(
+        self,
+        task_id: str,
+        user_message: str,
+        previous_status: TaskStatus,
+    ) -> Task:
         message = self._tasks.add_message(task_id, "user", user_message)
         self._tasks.append_event(
             task_id,
             "message.created",
             {"message_id": message.id, "role": message.role},
         )
-        self._tasks.transition(task_id, TaskStatus.UNDERSTANDING)
+        if previous_status is TaskStatus.COMPLETED:
+            self._tasks.reopen_completed(task_id)
+            self._tasks.append_event(
+                task_id,
+                "task.reopened",
+                {"reason": "follow_up"},
+            )
+        else:
+            self._tasks.transition(task_id, TaskStatus.UNDERSTANDING)
         return self.run(task_id)
 
     def _build_request(self, task_id: str) -> ModelRequest:
