@@ -767,6 +767,18 @@ def test_data_source_policy_and_schema_apis_are_project_scoped(settings) -> None
 
         assert policy.status_code == 200
         assert policy.json()["version"] == 2
+        current_policy = client.get(
+            f"/api/data-sources/{source['id']}/policies"
+        )
+        assert current_policy.status_code == 200
+        assert current_policy.json() == {
+            "data_source_id": source["id"],
+            "version": 2,
+            "rules": [
+                {"table": "orders", "column": None, "access": "allowed"}
+            ],
+        }
+        assert "postgresql://" not in current_policy.text
         schema = client.get(f"/api/data-sources/{source['id']}/schema")
         assert schema.status_code == 200
         assert schema.json()["tables"] == {"orders": ["region", "amount"]}
@@ -819,6 +831,7 @@ def test_missing_data_source_uses_fixed_404_without_identifier(settings) -> None
     with TestClient(create_app(settings, secret_protector=RecordingProtector())) as client:
         for response in (
             client.put(f"/api/data-sources/{hostile_id}/policies", json={"rules": []}),
+            client.get(f"/api/data-sources/{hostile_id}/policies"),
             client.get(f"/api/data-sources/{hostile_id}/schema"),
         ):
             assert response.status_code == 404

@@ -580,6 +580,20 @@ def create_app(
             ) from exc
         return _policy_response(snapshot)
 
+    @app.get(
+        "/api/data-sources/{source_id}/policies",
+        response_model=PolicyResponse,
+    )
+    def get_data_source_policies(source_id: str) -> PolicyResponse:
+        try:
+            snapshot = services.data_sources.policy_snapshot(source_id)
+        except RecordNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Data source not found",
+            ) from exc
+        return _policy_response(snapshot)
+
     @app.get("/api/data-sources/{source_id}/schema")
     def inspect_data_source_schema(source_id: str) -> dict[str, object]:
         try:
