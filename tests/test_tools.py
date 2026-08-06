@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import json
+
+from pydantic import field_validator
+from pydantic_core import PydanticCustomError
 from data_analysis_agent.domain import TaskStatus
 from data_analysis_agent.permissions import ApprovalRepository, PermissionPolicy
 from data_analysis_agent.data_sources import AccessLevel, DataSourceRepository
@@ -95,6 +100,14 @@ def test_query_database_returns_structured_gateway_outcome(
     assert result.output["artifact_id"]
     assert "dsn" not in result.output
     assert "secret" not in str(result)
+    audit = db_connection.execute(
+        "SELECT arguments_json FROM tool_executions WHERE task_id = ?",
+        (tool_context.task_id,),
+    ).fetchone()[0]
+    assert json.loads(audit) == {
+        "data_source_id_hash": hashlib.sha256(source.id.encode("utf-8")).hexdigest(),
+        "sql_hash": hashlib.sha256("SELECT region FROM orders".encode("utf-8")).hexdigest(),
+    }
 
 
 def test_inspect_dataset_tool_returns_real_profile(
@@ -148,7 +161,7 @@ def test_tool_validation_never_reflects_sensitive_input(tool_registry, tool_cont
     assert result.error_category == "validation_error"
     assert secret not in str(result)
     assert result.diagnostics is not None
-    assert result.diagnostics == {"error_count": 2, "types": ["extra_forbidden", "string_too_long"]}
+    assert result.diagnostics == {"error_count": 2, "types": ["validation_error"]}
 
 
 def test_tool_validation_never_reflects_sensitive_argument_name(tool_registry, tool_context) -> None:
@@ -164,7 +177,37 @@ def test_tool_validation_never_reflects_sensitive_argument_name(tool_registry, t
 
     assert result.error_category == "validation_error"
     assert secret_key not in str(result)
-    assert result.diagnostics == {"error_count": 1, "types": ["extra_forbidden"]}
+    assert result.diagnostics == {"error_count": 1, "types": ["validation_error"]}
+
+
+def test_tool_validation_never_reflects_custom_pydantic_error_type(
+    tool_context,
+    task_repository,
+    artifact_repository,
+    db_connection,
+) -> None:
+    class SecretTypeInput(ToolInput):
+        value: str
+
+        @field_validator("value")
+        @classmethod
+        def reject_value(cls, value: str) -> str:
+            raise PydanticCustomError("SECRET", "secret")
+
+    registry = ToolRegistry(
+        (ToolDefinition("query_data", "test", SecretTypeInput, lambda *_: None),),
+        PermissionPolicy(),
+        ApprovalRepository(db_connection),
+        task_repository,
+        artifact_repository,
+    )
+    result = registry.execute(
+        ToolCall(id="custom-validation", name="query_data", arguments={"value": "x"}),
+        tool_context,
+    )
+
+    assert "SECRET" not in str(result)
+    assert result.diagnostics == {"error_count": 1, "types": ["validation_error"]}
 
 
 def test_tool_handler_error_never_reflects_or_persists_secret_diagnostics(
@@ -190,7 +233,7 @@ def test_tool_handler_error_never_reflects_or_persists_secret_diagnostics(
         ToolCall(id="unsafe-call", name="query_data", arguments={}), tool_context
     )
 
-    assert result.error_category == "unsafe_category"
+    assert result.error_category == "internal_tool_error"
     assert secret not in str(result)
     assert result.message == "Tool failed"
     assert result.diagnostics is None
@@ -198,6 +241,12 @@ def test_tool_handler_error_never_reflects_or_persists_secret_diagnostics(
         "SELECT error_message FROM tool_executions WHERE task_id = ?", (tool_context.task_id,)
     ).fetchone()[0]
     assert stored == "Tool failed"
+    assert db_connection.execute(
+        "SELECT error_category FROM tool_executions WHERE task_id = ?", (tool_context.task_id,)
+    ).fetchone()[0] == "internal_tool_error"
+    assert "unsafe_category" not in db_connection.execute(
+        "SELECT payload_json FROM task_events WHERE task_id = ?", (tool_context.task_id,)
+    ).fetchone()[0]
 
 
 def test_tool_rejects_cross_project_context_before_execution(

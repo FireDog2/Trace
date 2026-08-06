@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -189,7 +190,7 @@ class ToolRegistry:
                 retryable=True,
                 diagnostics={
                     "error_count": len(exc.errors()),
-                    "types": sorted({str(error["type"]) for error in exc.errors()}),
+                    "types": ["validation_error"],
                 },
             )
 
@@ -251,7 +252,7 @@ class ToolRegistry:
         execution_id = self._tasks.start_tool_execution(
             context.task_id,
             call.name,
-            normalized_arguments,
+            _audit_arguments(call.name, normalized_arguments),
         )
         self._tasks.append_event(
             context.task_id,
@@ -278,11 +279,12 @@ class ToolRegistry:
                 pauses_task=handled.pauses_task,
             )
         except ToolHandlerError as exc:
-            message = _public_tool_message(exc.category)
+            category = _safe_tool_category(exc.category)
+            message = _public_tool_message(category)
             self._tasks.finish_tool_execution(
                 execution_id,
                 "failed",
-                exc.category,
+                category,
                 message,
             )
             self._tasks.append_event(
@@ -291,17 +293,17 @@ class ToolRegistry:
                 {
                     "execution_id": execution_id,
                     "tool_name": call.name,
-                    "error_category": exc.category,
+                    "error_category": category,
                 },
             )
             return ToolResult(
                 call_id=call.id,
                 success=False,
                 output={},
-                error_category=exc.category,
+                error_category=category,
                 message=message,
                 retryable=exc.retryable,
-                diagnostics=_safe_tool_diagnostics(exc.category),
+                diagnostics=_safe_tool_diagnostics(category),
                 pauses_task=exc.pauses_task,
             )
         except Exception:
@@ -619,6 +621,45 @@ _TOOL_PUBLIC_MESSAGES = {
     "connection_error": "Database query could not be completed",
 }
 
+_TOOL_CATEGORIES = frozenset(
+    {
+        "approval_required",
+        "approval_rejected",
+        "credential_error",
+        "policy_denied",
+        "resource_not_found",
+        "project_scope_denied",
+        "unsupported_database",
+        "unsafe_statement",
+        "read_only_required",
+        "parse_error",
+        "exactly_one_statement",
+        "unresolved_table",
+        "unresolved_column",
+        "ambiguous_column",
+        "unresolved_star",
+        "qualified_table_not_allowed",
+        "unsafe_function",
+        "unsafe_cast",
+        "extreme_query_risk",
+        "query_budget_exhausted",
+        "query_timeout",
+        "connection_error",
+        "explain_error",
+        "query_error",
+        "result_limit",
+        "result_serialization_error",
+        "artifact_write_error",
+        "artifact_registration_error",
+        "policy_changed",
+        "permission_denied",
+        "validation_error",
+        "internal_tool_error",
+        "failed",
+        "timed_out",
+    }
+)
+
 _DATABASE_REASON_CODES = frozenset(
     {
         "credential_error",
@@ -639,10 +680,27 @@ def _public_tool_message(category: str) -> str:
     return _TOOL_PUBLIC_MESSAGES.get(category, "Tool failed")
 
 
+def _safe_tool_category(category: str) -> str:
+    return category if category in _TOOL_CATEGORIES else "internal_tool_error"
+
+
 def _safe_tool_diagnostics(category: str) -> dict[str, str] | None:
     if category in _DATABASE_REASON_CODES:
         return {"reason_code": category}
     return None
+
+
+def _audit_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[str, object]:
+    if tool_name != "query_database":
+        return arguments
+    return {
+        "data_source_id_hash": _sha256(str(arguments["data_source_id"])),
+        "sql_hash": _sha256(str(arguments["sql"])),
+    }
+
+
+def _sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _ensure_running(tasks: TaskRepository, task_id: str) -> None:

@@ -371,7 +371,10 @@ def create_app(
                 request.api_key,
             )
         except SecretStorageUnavailable as exc:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Secure storage is unavailable",
+            ) from exc
         except ModelConfigurationError as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,

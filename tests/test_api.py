@@ -400,6 +400,27 @@ def test_unavailable_secret_storage_returns_service_unavailable(settings) -> Non
         assert response.json()["detail"] == "Secure storage is unavailable"
 
 
+def test_secret_storage_error_never_reflects_secret(settings) -> None:
+    secret = "postgresql://analyst:password@host/ciphertext"
+
+    class SecretProtector:
+        def protect(self, value: str) -> bytes:
+            raise SecretStorageUnavailable(secret)
+
+        def unprotect(self, value: bytes) -> str:
+            return value.decode()
+
+    with TestClient(create_app(settings, secret_protector=SecretProtector())) as client:
+        response = client.put(
+            "/api/model-config",
+            json={"provider": "openai", "model": "gpt-5.6-terra", "api_key": "key"},
+        )
+
+    assert response.status_code == 503
+    assert secret not in response.text
+    assert response.json() == {"detail": "Secure storage is unavailable"}
+
+
 def test_data_source_api_never_returns_dsn(settings) -> None:
     with TestClient(
         create_app(settings, secret_protector=RecordingProtector())
