@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from uuid import uuid4
 
 from data_analysis_agent.db import sqlite_connection_guarded, sqlite_connection_lock, utc_now
-from data_analysis_agent.providers import ModelMessage, ModelProvider, ModelRequest
-from data_analysis_agent.tracing import TraceRepository
+from data_analysis_agent.providers import ModelMessage, ModelProvider, ModelRequest, ProviderError
+from data_analysis_agent.team import AgentRun, AgentRunStatus, TeamRepository
+from data_analysis_agent.tracing import TraceContext, TraceRecorder, TraceRepository
 
 class SkillEligibilityError(ValueError): pass
 class InvalidSkillCandidate(ValueError): pass
@@ -23,9 +25,24 @@ class SkillCandidateRepository:
         if row is None: raise ValueError("Skill candidate not found")
         return _candidate(row)
     @sqlite_connection_guarded
+    def get_for_run(self, run_id: str) -> SkillCandidate:
+        row = self._connection.execute(
+            "SELECT * FROM skill_candidates WHERE source_run_id=? ORDER BY created_at,rowid LIMIT 1",
+            (run_id,),
+        ).fetchone()
+        if row is None: raise ValueError("Skill candidate not found")
+        return _candidate(row)
+    @sqlite_connection_guarded
     def create(self, run_id: str, name: str, markdown: str, model: str) -> SkillCandidate:
         try:
             self._connection.execute("BEGIN IMMEDIATE")
+            existing = self._connection.execute(
+                "SELECT * FROM skill_candidates WHERE source_run_id=? ORDER BY created_at,rowid LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            if existing is not None:
+                self._connection.commit()
+                return _candidate(existing)
             version = int(self._connection.execute("SELECT COALESCE(MAX(version),0)+1 FROM skill_candidates WHERE name=?", (name,)).fetchone()[0])
             candidate = SkillCandidate(str(uuid4()),run_id,name,version,markdown,"candidate",False,model,None,utc_now())
             self._connection.execute("INSERT INTO skill_candidates VALUES (?,?,?,?,?,?,?,?,?,?)", (candidate.id,candidate.source_run_id,candidate.name,candidate.version,candidate.markdown,candidate.status,0,candidate.generated_by_model,None,candidate.created_at)); self._connection.commit(); return candidate
@@ -48,10 +65,117 @@ class WorkflowCurator:
     def create_candidate(self, run_id: str, model_name: str) -> SkillCandidate:
         run = self.traces.get_run(run_id); events = self.traces.events_for_run(run_id)
         if run.status != "completed" or not run.accepted: raise SkillEligibilityError("Run must be completed and accepted")
-        if any(event.status == "failed" for event in events) or not any(event.event_type == "tool.completed" and event.status == "completed" for event in events): raise SkillEligibilityError("Run lacks successful trace evidence")
+        if not any(event.event_type == "tool.completed" and event.status == "completed" for event in events): raise SkillEligibilityError("Run lacks successful trace evidence")
         summaries = "\n".join(f"- {event.event_type}: {event.status}" for event in events[:50])
         request = ModelRequest(system="Create a safe reusable workflow skill from these redacted event summaries only.", objective="safe SQL diagnostic", messages=(ModelMessage("user", summaries),), tools=())
         markdown = self.provider.complete(request).text.strip(); self.validator.validate(markdown)
         return self.candidates.create(run_id, "safe-sql-diagnostic", markdown, model_name)
+
+
+class CuratorAgent:
+    """Durable, zero-tool worker that turns accepted redacted traces into candidates."""
+
+    def __init__(
+        self, *, traces: TraceRepository, candidates: SkillCandidateRepository,
+        provider: ModelProvider, teams: TeamRepository, model_name: str,
+    ) -> None:
+        self.traces = traces
+        self.candidates = candidates
+        self.provider = provider
+        self.teams = teams
+        self.model_name = model_name
+        self.validator = SkillStaticValidator()
+        self.recorder = TraceRecorder(traces)
+
+    def run(self, agent_run_id: str) -> AgentRun:
+        run = self.teams.get_run(agent_run_id)
+        if run.status in {
+            AgentRunStatus.COMPLETED, AgentRunStatus.FAILED, AgentRunStatus.CANCELLED
+        }:
+            return run
+        if run.role.value != "curator" or run.trace_run_id is None:
+            return self.teams.fail_run(run.id, "skill_ineligible")
+        if self.teams.cancel_requested(run.id):
+            return self.teams.transition_run(run.id, AgentRunStatus.CANCELLED)
+        if run.status is AgentRunStatus.CREATED:
+            run = self.teams.transition_run(run.id, AgentRunStatus.WORKING)
+        context = TraceContext(
+            run.trace_run_id, run.task_id, agent_id=run.id,
+            parent_event_id=run.parent_event_id,
+        )
+        self._trace(context, "curator.started", "running", {})
+        try:
+            source = self.traces.get_run(run.trace_run_id)
+            events = self.traces.events_for_run(source.id)
+            if source.status != "completed" or not source.accepted:
+                raise SkillEligibilityError("Run must be completed and accepted")
+            if not any(
+                event.event_type == "tool.completed" and event.status == "completed"
+                for event in events
+            ):
+                raise SkillEligibilityError("Run lacks successful trace evidence")
+            try:
+                candidate = self.candidates.get_for_run(source.id)
+            except ValueError:
+                summaries = "\n".join(
+                    f"- {event.event_type}: {event.status}"
+                    for event in events[:50]
+                )
+                response = self.provider.complete(
+                    ModelRequest(
+                        system=(
+                            "Create a safe reusable workflow skill from redacted event "
+                            "summaries only. You have no tools."
+                        ),
+                        objective="safe SQL diagnostic",
+                        messages=(ModelMessage("user", summaries),),
+                        tools=(),
+                    )
+                )
+                markdown = response.text.strip()
+                self.validator.validate(markdown)
+                candidate = self.candidates.create(
+                    source.id, "safe-sql-diagnostic", markdown, self.model_name
+                )
+            result = json.dumps(
+                {"candidate_id": candidate.id, "version": candidate.version},
+                separators=(",", ":"),
+            )
+            completed = self.teams.complete_run(run.id, result)
+            self._trace(
+                context,
+                "curator.completed",
+                "completed",
+                {"candidate_id": candidate.id, "version": candidate.version},
+            )
+            return completed
+        except SkillEligibilityError:
+            self._trace(context, "curator.completed", "failed", {"category": "skill_ineligible"})
+            return self.teams.fail_run(run.id, "skill_ineligible")
+        except InvalidSkillCandidate:
+            self._trace(context, "curator.completed", "failed", {"category": "invalid_skill_candidate"})
+            return self.teams.fail_run(run.id, "invalid_skill_candidate")
+        except ProviderError:
+            self._trace(context, "curator.completed", "failed", {"category": "provider_error"})
+            return self.teams.fail_run(run.id, "provider_error")
+        except Exception:
+            self._trace(context, "curator.completed", "failed", {"category": "curator_error"})
+            return self.teams.fail_run(run.id, "curator_error")
+
+    def _trace(
+        self, context: TraceContext, event_type: str, status: str,
+        payload: dict[str, object],
+    ) -> None:
+        try:
+            self.recorder.event(context, event_type, status, payload)
+        except Exception:
+            try:
+                self.teams._event_publisher and self.teams._event_publisher(
+                    context.task_id,
+                    "trace.recording_failed",
+                    {"event_type": event_type, "agent_id": context.agent_id},
+                )
+            except Exception:
+                pass
 
 def _candidate(row: sqlite3.Row) -> SkillCandidate: return SkillCandidate(row["id"],row["source_run_id"],row["name"],row["version"],row["markdown"],row["status"],bool(row["enabled"]),row["generated_by_model"],row["reviewed_at"],row["created_at"])

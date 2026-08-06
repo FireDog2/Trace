@@ -112,6 +112,9 @@ _SAFE_ERROR_MESSAGES = {
     "provider_error": "The model provider failed",
     "tool_error": "A teammate tool failed unexpectedly",
     "message_persistence_error": "Protected teammate message storage is unavailable",
+    "skill_ineligible": "The source run is not eligible for skill curation",
+    "invalid_skill_candidate": "The generated skill candidate failed safety validation",
+    "curator_error": "The skill curator failed safely",
 }
 
 ROLE_TOOLS: dict[AgentRole, frozenset[str]] = {
@@ -234,6 +237,15 @@ class TeamRepository:
         except Exception:
             self._connection.rollback()
             raise
+
+    @sqlite_connection_guarded
+    def find_curator(self, trace_run_id: str) -> AgentRun | None:
+        row = self._connection.execute(
+            "SELECT * FROM agent_runs WHERE role='curator' AND trace_run_id=? "
+            "ORDER BY created_at,rowid LIMIT 1",
+            (trace_run_id,),
+        ).fetchone()
+        return _run_from_row(row) if row is not None else None
 
     @sqlite_connection_guarded
     def active_count(self, task_id: str) -> int:
@@ -839,6 +851,8 @@ class TeamManager:
         self, task_id: str, role: AgentRole, objective: str,
         *, trace_context: TraceContext | None = None,
     ) -> AgentRun:
+        if AgentRole(role) is AgentRole.CURATOR:
+            raise ValueError("Curator agents can only be started from accepted runs")
         with self._lock:
             if self._closed:
                 raise TeamManagerClosed("Team manager is shut down")
@@ -861,6 +875,34 @@ class TeamManager:
 
     def list(self, task_id: str) -> tuple[AgentRun, ...]:
         return self._repository.list_runs(task_id)
+
+    def ensure_curator(self, task_id: str, trace_run_id: str) -> AgentRun:
+        with self._lock:
+            if self._closed:
+                raise TeamManagerClosed("Team manager is shut down")
+            existing = self._repository.find_curator(trace_run_id)
+            if existing is not None:
+                return existing
+            run = self._repository.create_run(
+                task_id,
+                AgentRole.CURATOR,
+                "Curate accepted analysis run",
+                trace_context=TraceContext(trace_run_id, task_id),
+            )
+            event = Event()
+            self._cancel_events[run.id] = event
+            try:
+                future = self._executor.submit(
+                    self._execute, run.id, AgentRole.CURATOR, event
+                )
+            except BaseException:
+                self._cancel_events.pop(run.id, None)
+                return self._repository.fail_run(run.id, "provider_error")
+            self._futures[run.id] = future
+        future.add_done_callback(
+            lambda completed, run_id=run.id: self._cleanup_done(run_id, completed)
+        )
+        return run
 
     def await_runs(self, run_ids: tuple[str, ...], timeout_seconds: int) -> tuple[AgentRun, ...]:
         if not 1 <= timeout_seconds <= 120:

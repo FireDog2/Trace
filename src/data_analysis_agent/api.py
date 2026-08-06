@@ -64,7 +64,12 @@ from data_analysis_agent.tracing import (
     TraceRecorder,
     TraceRepository,
 )
-from data_analysis_agent.skills import SkillCandidate, SkillCandidateRepository, WorkflowCurator
+from data_analysis_agent.skills import (
+    CuratorAgent,
+    SkillCandidate,
+    SkillCandidateRepository,
+    WorkflowCurator,
+)
 from data_analysis_agent.workspace import WorkspaceError, WorkspaceService
 
 
@@ -384,11 +389,26 @@ def _build_services(
             try:
                 worker = build_services(
                     settings,
-                    teammate_provider_factory() if teammate_provider_factory is not None else None,
+                    (
+                        provider
+                        if role is AgentRole.CURATOR and provider is not None
+                        else teammate_provider_factory()
+                        if teammate_provider_factory is not None
+                        else None
+                    ),
                     protector,
                     provider_factory,
                     with_team_manager=False,
                 )
+                if role is AgentRole.CURATOR:
+                    public_model = worker.model_configs.get_public()
+                    return CuratorAgent(
+                        traces=worker.traces,
+                        candidates=worker.skill_candidates,
+                        provider=worker.resolve_provider(),
+                        teams=worker.team_repository,
+                        model_name=public_model.model or "runtime-provider",
+                    ).run(run_id)
                 return TeammateRunner(
                     settings=settings,
                     provider=worker.resolve_provider(),
@@ -766,13 +786,18 @@ def create_app(
 
     @app.post("/api/runs/{run_id}/accept", response_model=AnalysisRunResponse)
     def accept_trace_run(run_id: str) -> AnalysisRunResponse:
-        try: return _analysis_run_response(services.traces.accept_run(run_id))
+        try:
+            accepted = services.traces.accept_run(run_id)
+            if services.team_manager is not None:
+                services.team_manager.ensure_curator(accepted.task_id, accepted.id)
+            return _analysis_run_response(accepted)
         except ValueError as exc: raise HTTPException(status_code=409, detail="Run cannot be accepted") from exc
 
     @app.post("/api/runs/{run_id}/skill-candidates", status_code=status.HTTP_201_CREATED)
     def create_skill_candidate(run_id: str):
         try:
-            candidate = WorkflowCurator(services.traces, services.skill_candidates, services.resolve_provider()).create_candidate(run_id, services.settings.model)
+            model_name = services.model_configs.get_public().model or "runtime-provider"
+            candidate = WorkflowCurator(services.traces, services.skill_candidates, services.resolve_provider()).create_candidate(run_id, model_name)
             return _skill_candidate_response(candidate)
         except ValueError as exc: raise HTTPException(status_code=409, detail="Run cannot produce a skill candidate") from exc
 

@@ -349,6 +349,8 @@ DROP TABLE agent_runs;
 ALTER TABLE agent_runs_v13 RENAME TO agent_runs;
 CREATE INDEX IF NOT EXISTS idx_agent_runs_task_status_created
 ON agent_runs(task_id, status, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_one_curator_per_trace
+ON agent_runs(trace_run_id) WHERE role = 'curator';
 """
 
 
@@ -487,6 +489,10 @@ def migrate(connection: sqlite3.Connection) -> None:
                 connection.executescript(MIGRATION_13_SQL)
             finally:
                 connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_one_curator_per_trace "
+            "ON agent_runs(trace_run_id) WHERE role = 'curator'"
+        )
         connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (13, utc_now()))
     connection.execute("PRAGMA foreign_keys = ON")
     connection.commit()

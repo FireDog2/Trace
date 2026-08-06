@@ -33,7 +33,22 @@ def test_build_services_closes_open_connection_when_construction_fails(settings,
 
 
 def test_trace_routes_replay_without_execution_and_accept_completed_run(settings) -> None:
-    app = create_app(settings, ScriptedProvider(()))
+    skill = """---
+name: safe-sql-diagnostic
+description: Safe workflow.
+---
+## When to use
+For analysis.
+## Inputs
+A question.
+## Workflow
+Analyze safely.
+## Safety gates
+Keep approvals.
+## Failure recovery
+Return a safe summary.
+"""
+    app = create_app(settings, ScriptedProvider([ModelResponse(skill, ())]))
     services = app.state.services
     project = services.projects.create("Trace route")
     task = services.tasks.create(project.id, "Replay safely")
@@ -43,11 +58,21 @@ def test_trace_routes_replay_without_execution_and_accept_completed_run(settings
     with TestClient(app) as client:
         replay = client.get(f"/api/runs/{run.id}/trace")
         accepted = client.post(f"/api/runs/{run.id}/accept")
+        accepted_again = client.post(f"/api/runs/{run.id}/accept")
         runs = client.get(f"/api/tasks/{task.id}/runs")
+        curator_runs = services.team_repository.list_runs(task.id)
+        assert len(curator_runs) == 1
+        services.team_manager.await_runs((curator_runs[0].id,), 2)  # type: ignore[union-attr]
+        curator = services.team_repository.list_runs(task.id)[0]
+        candidate = services.skill_candidates.get_for_run(run.id)
     assert replay.status_code == 200 and replay.json()[0]["sequence"] == 1
     assert "secret" not in replay.text
     assert accepted.status_code == 200 and accepted.json()["accepted"] is True
+    assert accepted_again.status_code == 200
     assert runs.json()[0]["id"] == run.id
+    assert curator.role is AgentRole.CURATOR
+    assert curator.status is AgentRunStatus.COMPLETED
+    assert candidate.enabled is False
 
 
 @pytest.mark.parametrize("failure", ("provider", "runner_constructor", "runner_run"))
