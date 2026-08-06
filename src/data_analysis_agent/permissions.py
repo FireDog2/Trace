@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 from dataclasses import dataclass
 from enum import StrEnum
@@ -17,6 +16,7 @@ AUTOMATIC_TOOLS = frozenset(
         "inspect_workspace",
         "inspect_dataset",
         "query_data",
+        "query_database",
         "run_python",
         "save_artifact",
         "write_report",
@@ -33,9 +33,6 @@ APPROVAL_TOOLS = frozenset(
         "overwrite_artifact",
     }
 )
-
-READ_ONLY_SQL_PREFIXES = frozenset({"select", "with", "describe", "summarize", "explain"})
-
 
 class PermissionLevel(StrEnum):
     ALLOW = "allow"
@@ -84,13 +81,6 @@ class PermissionPolicy:
             return PermissionDecision(
                 PermissionLevel.DENY,
                 "Source datasets are immutable",
-            )
-        if action.tool_name == "query_data" and not _is_read_only_sql(
-            str(action.arguments.get("sql", "SELECT 1"))
-        ):
-            return PermissionDecision(
-                PermissionLevel.DENY,
-                "Only read-only SQL is allowed",
             )
         if _contains_absolute_path(action.arguments):
             return PermissionDecision(
@@ -228,15 +218,6 @@ def _contains_absolute_path(arguments: dict[str, Any]) -> bool:
         if Path(value).is_absolute():
             return True
     return False
-
-
-def _is_read_only_sql(sql: str) -> bool:
-    without_comments = re.sub(r"/\*.*?\*/|--[^\r\n]*", " ", sql, flags=re.DOTALL)
-    statements = [part.strip() for part in without_comments.split(";") if part.strip()]
-    if len(statements) != 1:
-        return False
-    first_word = statements[0].split(maxsplit=1)[0].lower()
-    return first_word in READ_ONLY_SQL_PREFIXES
 
 
 def _approval_from_row(row: sqlite3.Row) -> Approval:

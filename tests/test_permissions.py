@@ -27,6 +27,7 @@ def approval_repository(db_connection) -> ApprovalRepository:
         "inspect_workspace",
         "inspect_dataset",
         "query_data",
+        "query_database",
         "run_python",
         "save_artifact",
         "write_report",
@@ -59,12 +60,14 @@ def test_source_overwrite_is_denied(policy: PermissionPolicy) -> None:
     assert decision.level is PermissionLevel.DENY
 
 
-def test_destructive_sql_is_denied(policy: PermissionPolicy) -> None:
+def test_query_database_sql_is_deferred_to_the_gateway(
+    policy: PermissionPolicy,
+) -> None:
     decision = policy.classify(
-        ToolAction("query_data", {"sql": "DROP TABLE operations"})
+        ToolAction("query_database", {"sql": "DROP TABLE operations"})
     )
 
-    assert decision.level is PermissionLevel.DENY
+    assert decision.level is PermissionLevel.ALLOW
 
 
 def test_approval_decision_is_persisted_once(
