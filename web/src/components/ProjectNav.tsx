@@ -14,6 +14,8 @@ interface ProjectNavProps {
   onUpload(file: File): Promise<void>;
   modelConfiguration: ModelConfigurationStatus | null;
   onOpenModelSettings(): void;
+  drawerOpen: boolean;
+  onClose(): void;
 }
 
 export function ProjectNav({
@@ -28,6 +30,8 @@ export function ProjectNav({
   onUpload,
   modelConfiguration,
   onOpenModelSettings,
+  drawerOpen,
+  onClose,
 }: ProjectNavProps) {
   const [newProjectName, setNewProjectName] = useState("");
   const [creatingProject, setCreatingProject] = useState(false);
@@ -42,11 +46,12 @@ export function ProjectNav({
   }
 
   return (
-    <nav className="project-rail" aria-label="分析项目">
+    <nav className={drawerOpen ? "project-rail drawer-open" : "project-rail"} aria-label="分析项目">
       <header className="brand-block">
         <span className="brand-index">LOCAL ANALYSIS SYSTEM</span>
         <strong>TRACE</strong>
         <p>每个结论，都有来路。</p>
+        <button type="button" className="rail-close" aria-label="关闭项目导航" onClick={onClose}>×</button>
       </header>
 
       <button

@@ -33,6 +33,7 @@ export function App({ api: suppliedApi }: AppProps) {
   const [modelConfiguration, setModelConfiguration] = useState<ModelConfigurationStatus | null>(null);
   const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
   const [conversationOpen, setConversationOpen] = useState(true);
+  const [projectNavOpen, setProjectNavOpen] = useState(false);
 
   useEffect(() => {
     void api
@@ -158,18 +159,40 @@ export function App({ api: suppliedApi }: AppProps) {
 
   return (
     <div className={shellClassName}>
+      <button
+        type="button"
+        className="project-drawer-toggle"
+        aria-label="打开项目导航"
+        aria-expanded={projectNavOpen}
+        onClick={() => {
+          setConversationOpen(false);
+          setProjectNavOpen(true);
+        }}
+      >
+        <span aria-hidden="true">TRACE</span>
+        项目
+      </button>
+
       <ProjectNav
         projects={projects}
         selectedProjectId={selectedProjectId}
         artifacts={artifacts}
         tasks={tasks}
         selectedTaskId={selectedTaskId}
-        onSelectProject={setSelectedProjectId}
-        onSelectTask={setSelectedTaskId}
+        onSelectProject={(id) => {
+          setSelectedProjectId(id);
+          setProjectNavOpen(false);
+        }}
+        onSelectTask={(id) => {
+          setSelectedTaskId(id);
+          setProjectNavOpen(false);
+        }}
         onCreateProject={createProject}
         onUpload={uploadDataset}
         modelConfiguration={modelConfiguration}
         onOpenModelSettings={() => setModelSettingsOpen(true)}
+        drawerOpen={projectNavOpen}
+        onClose={() => setProjectNavOpen(false)}
       />
 
       {error && <div className="error-banner" role="alert">{error}</div>}

@@ -173,6 +173,21 @@ describe("analysis workbench", () => {
     expect(screen.getByRole("heading", { name: "连接配置" })).toBeVisible();
   });
 
+  it("opens and closes the project console for narrow screens", async () => {
+    render(<App api={fakeApiWithCompletedTask()} />);
+
+    const toggle = await screen.findByRole("button", { name: "打开项目导航" });
+    expect(await screen.findByRole("textbox", { name: "给分析 Agent 留言" })).toBeVisible();
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.queryByRole("textbox", { name: "给分析 Agent 留言" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "关闭项目导航" }));
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+  });
+
   it("keeps conversation separate from durable task artifacts", async () => {
     render(<App api={fakeApiWithCompletedTask()} />);
 
