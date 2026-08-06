@@ -67,6 +67,12 @@ export interface AgentRun {
   completed_at: string | null;
 }
 
+export type AccessLevel = "allowed" | "approval_required" | "denied";
+export interface DataSource { id: string; project_id: string; name: string; dialect: "postgres"; policy_version: number; created_at: string; updated_at: string; }
+export interface PolicyRule { table: string; column: string | null; access: AccessLevel; }
+export interface PolicySnapshot { data_source_id: string; version: number; rules: PolicyRule[]; }
+export interface DatabaseSchema { tables: Record<string, string[]>; }
+
 export interface AnalysisRun {
   id: string; task_id: string; status: "running" | "completed" | "failed" | "cancelled";
   accepted: boolean; started_at: string; completed_at: string | null; error_category: string | null;

@@ -138,6 +138,16 @@ function fakeApiWithCompletedTask(
         },
       ],
     }),
+    listDataSources: async () => [],
+    createDataSource: async () => { throw new Error("Not used in this test"); },
+    getDataSourceSchema: async () => ({ tables: {} }),
+    replaceDataSourcePolicies: async () => ({ data_source_id: "source-1", version: 1, rules: [] }),
+    listAgents: async () => [],
+    listRuns: async () => [],
+    getTrace: async () => [],
+    acceptRun: async () => { throw new Error("Not used in this test"); },
+    createSkillCandidate: async () => { throw new Error("Not used in this test"); },
+    decideSkillCandidate: async () => { throw new Error("Not used in this test"); },
     sendMessage: async () => {
       throw new Error("Not used in this test");
     },

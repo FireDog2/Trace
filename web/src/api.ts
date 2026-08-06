@@ -22,6 +22,10 @@ export interface ApiClient {
   listTasks(projectId: string): Promise<Task[]>;
   createTask(projectId: string, objective: string): Promise<Task>;
   getTask(taskId: string): Promise<TaskDetail>;
+  listDataSources(projectId: string): Promise<import("./types").DataSource[]>;
+  createDataSource(projectId: string, input: { name: string; dsn: string }): Promise<import("./types").DataSource>;
+  getDataSourceSchema(sourceId: string): Promise<import("./types").DatabaseSchema>;
+  replaceDataSourcePolicies(sourceId: string, rules: import("./types").PolicyRule[]): Promise<import("./types").PolicySnapshot>;
   listAgents(taskId: string): Promise<AgentRun[]>;
   listRuns(taskId: string): Promise<AnalysisRun[]>;
   getTrace(runId: string): Promise<TraceEvent[]>;
@@ -97,6 +101,10 @@ export class HttpApiClient implements ApiClient {
   getTask(taskId: string): Promise<TaskDetail> {
     return this.request(`/api/tasks/${taskId}`);
   }
+  listDataSources(projectId: string): Promise<import("./types").DataSource[]> { return this.request(`/api/projects/${projectId}/data-sources`); }
+  createDataSource(projectId: string, input: { name: string; dsn: string }): Promise<import("./types").DataSource> { return this.request(`/api/projects/${projectId}/data-sources`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }); }
+  getDataSourceSchema(sourceId: string): Promise<import("./types").DatabaseSchema> { return this.request(`/api/data-sources/${sourceId}/schema`); }
+  replaceDataSourcePolicies(sourceId: string, rules: import("./types").PolicyRule[]): Promise<import("./types").PolicySnapshot> { return this.request(`/api/data-sources/${sourceId}/policies`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rules }) }); }
 
   listAgents(taskId: string): Promise<AgentRun[]> {
     return this.request(`/api/tasks/${taskId}/agents`);
