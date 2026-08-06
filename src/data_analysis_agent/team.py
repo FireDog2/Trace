@@ -721,15 +721,10 @@ class TeamManager:
         with self._lock:
             if self._closed:
                 raise TeamManagerClosed("Team manager is shut down")
-        run = self._repository.create_run_if_capacity(
-            task_id, role, objective, max_active=self._settings.max_active_teammates
-        )
-        event = Event()
-        with self._lock:
-            # A shutdown racing after the first check is handled as a queued cancellation.
-            if self._closed:
-                self._repository.request_cancel(run.id)
-                return self._repository.transition_run(run.id, AgentRunStatus.CANCELLED)
+            run = self._repository.create_run_if_capacity(
+                task_id, role, objective, max_active=self._settings.max_active_teammates
+            )
+            event = Event()
             self._cancel_events[run.id] = event
             try:
                 future = self._executor.submit(self._execute, run.id, AgentRole(role), event)
@@ -737,7 +732,8 @@ class TeamManager:
                 self._cancel_events.pop(run.id, None)
                 return self._repository.fail_run(run.id, "provider_error")
             self._futures[run.id] = future
-            future.add_done_callback(lambda completed, run_id=run.id: self._cleanup_done(run_id, completed))
+        # A completed future may invoke callbacks synchronously; register only after lock release.
+        future.add_done_callback(lambda completed, run_id=run.id: self._cleanup_done(run_id, completed))
         return run
 
     def list(self, task_id: str) -> tuple[AgentRun, ...]:

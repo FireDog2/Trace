@@ -18,3 +18,9 @@ Verification: `G:\data-analysis-agent\.venv\Scripts\python.exe -m pytest tests/t
 - Role input is the shared `AgentRole` enum, and teammate identifiers have bounded list and item lengths.
 
 Round verification: focused suite 84 passed; full suite 230 passed, 1 PostgreSQL integration test skipped because `TEST_POSTGRES_DSN` is unset.
+
+## Fix round 2
+
+`spawn()` now holds the manager lock from closed-state check through durable capacity admission, submit, and future registration. `shutdown()` therefore either observes and cancels that registered future, or wins first and causes `TeamManagerClosed` before repository access. Done callbacks are registered after releasing the lock to avoid synchronous-completion lock re-entry.
+
+Round verification: focused manager suite 3 passed; full suite 232 passed, 1 PostgreSQL integration test skipped because `TEST_POSTGRES_DSN` is unset.
