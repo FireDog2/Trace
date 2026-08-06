@@ -13,6 +13,7 @@ from data_analysis_agent.model_config import SecretStorageUnavailable
 from data_analysis_agent.permissions import ToolAction
 from data_analysis_agent.providers import ModelResponse, ScriptedProvider
 from data_analysis_agent.team import AgentRole, AgentRunStatus
+from data_analysis_agent.tools import ToolCall, ToolContext
 
 
 def test_build_services_closes_open_connection_when_construction_fails(settings, monkeypatch) -> None:
@@ -147,6 +148,96 @@ def test_production_worker_failure_handler_closes_fresh_connection_on_repository
     assert main.connection.execute("SELECT 1").fetchone()[0] == 1
     main.team_manager.shutdown()  # type: ignore[union-attr]
     main.connection.close()
+
+
+@pytest.mark.parametrize("helper,arguments,method", [
+    ("_run_task", ("task-1",), "run"),
+    ("_continue_task", ("task-1", "follow up", TaskStatus.COMPLETED), "follow_up"),
+    ("_resume_approved_task", ("task-1",), "resume_approval"),
+])
+def test_background_helpers_shutdown_teammates_before_closing_connection(
+    settings, monkeypatch, helper, arguments, method
+) -> None:
+    events: list[str] = []
+
+    class Connection:
+        def close(self):
+            events.append("connection.close")
+
+    class Manager:
+        def shutdown(self):
+            events.append("manager.shutdown")
+
+    class Agent:
+        def __getattr__(self, name):
+            if name != method:
+                raise AttributeError(name)
+            return lambda *args: events.append(f"agent.{name}")
+
+    class Services:
+        connection = Connection()
+        team_manager = Manager()
+        def agent(self):
+            return Agent()
+
+    monkeypatch.setattr(api_module, "build_services", lambda *args, **kwargs: Services())
+    getattr(api_module, helper)(settings, ScriptedProvider(()), *arguments)
+
+    assert events == [f"agent.{method}", "manager.shutdown", "connection.close"]
+
+
+def test_production_lead_rejects_database_query_but_sql_worker_keeps_it(settings) -> None:
+    protector = RecordingProtector()
+    lead = api_module.build_services(settings, ScriptedProvider(()), protector)
+    try:
+        project = lead.projects.create("Role boundary")
+        task = lead.tasks.create(project.id, "No direct SQL")
+        lead_names = {schema.name for schema in lead.tools.schemas()}
+        assert "query_database" not in lead_names
+        rejected = lead.tools.execute(
+            ToolCall("lead-query", "query_database", {"data_source_id": "source", "sql": "SELECT 1"}),
+            ToolContext(project.id, task.id),
+        )
+        assert rejected.error_category == "unknown_tool"
+
+        worker = api_module.build_services(
+            settings, secret_protector=protector, with_team_manager=False,
+        )
+        try:
+            assert "query_database" in {schema.name for schema in worker.tools.schemas()}
+        finally:
+            worker.connection.close()
+    finally:
+        lead.team_manager.shutdown()  # type: ignore[union-attr]
+        lead.connection.close()
+
+
+def test_explicit_teammate_provider_factory_creates_fresh_workers_without_model_config(settings) -> None:
+    created: list[ScriptedProvider] = []
+
+    def teammate_provider_factory() -> ScriptedProvider:
+        provider = ScriptedProvider([ModelResponse('{"summary":"done"}', ())])
+        created.append(provider)
+        return provider
+
+    app = create_app(
+        settings,
+        secret_protector=RecordingProtector(),
+        teammate_provider_factory=teammate_provider_factory,
+    )
+    services = app.state.services
+    try:
+        project = services.projects.create("Factory")
+        task = services.tasks.create(project.id, "Delegate")
+        first = services.team_manager.spawn(task.id, AgentRole.KNOWLEDGE, "One")  # type: ignore[union-attr]
+        second = services.team_manager.spawn(task.id, AgentRole.REPORT, "Two")  # type: ignore[union-attr]
+        completed = services.team_manager.await_runs((first.id, second.id), 2)  # type: ignore[union-attr]
+        assert {run.status for run in completed} == {AgentRunStatus.COMPLETED}
+        assert len(created) == 2
+        assert created[0] is not created[1]
+    finally:
+        services.team_manager.shutdown()  # type: ignore[union-attr]
+        services.connection.close()
 
 
 class RecordingProtector:

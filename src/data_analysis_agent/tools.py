@@ -388,6 +388,7 @@ def build_tool_registry(
     approvals: ApprovalRepository,
     sql_gateway: SqlSafetyGateway | None = None,
     include_coordination_tools: bool = False,
+    include_database_query: bool = True,
 ) -> ToolRegistry:
     coordinator: dict[str, Any] = {}
     def inspect_workspace(
@@ -645,12 +646,6 @@ def build_tool_registry(
             query_data,
         ),
         ToolDefinition(
-            "query_database",
-            "Run a governed, read-only PostgreSQL query against a configured data source.",
-            QueryDatabaseInput,
-            query_database,
-        ),
-        ToolDefinition(
             "run_python",
             "Run contained Python analysis and register declared output files.",
             RunPythonInput,
@@ -681,6 +676,15 @@ def build_tool_registry(
             request_user_input,
         ),
     )
+    if include_database_query:
+        definitions = definitions[:3] + (
+            ToolDefinition(
+                "query_database",
+                "Run a governed, read-only PostgreSQL query against a configured data source.",
+                QueryDatabaseInput,
+                query_database,
+            ),
+        ) + definitions[3:]
     if include_coordination_tools:
         definitions += (
             ToolDefinition("spawn_teammate", "Start one role-scoped teammate.", SpawnTeammateInput, spawn_teammate),

@@ -30,3 +30,12 @@ Round verification: focused manager suite 3 passed; full suite 232 passed, 1 Pos
 Service construction now owns the SQLite connection before constructing dependent services and closes it on every construction failure. The worker wrapper already closes its independently constructed runtime after provider resolution, runner construction, success, or failure. The spawn/shutdown race test now explicitly verifies that shutdown cannot return while a spawn has passed its initial closed check but remains inside capacity admission; this is a RED regression against the pre-linearization implementation.
 
 Round verification: focused manager/API suite 23 passed; full suite 232 passed, 1 PostgreSQL integration test skipped because `TEST_POSTGRES_DSN` is unset.
+
+## Final runtime-boundary fix
+
+- `src/data_analysis_agent/api.py:804`, `:824`, and `:851` now shut down every local `TeamManager` before closing its SQLite connection, including successful lead runs and lead exceptions. The nested `finally` preserves connection closure even if shutdown raises.
+- `src/data_analysis_agent/api.py:197` defines an explicit `TeammateProviderFactory`. `create_app` forwards it through every background-task helper and each worker invokes the factory inside its own fresh service runtime (`:343`), so workers do not share a mutable provider or depend on the lead's provider instance. Without an explicit factory, workers continue to resolve the persisted model configuration independently.
+- `src/data_analysis_agent/api.py:312` builds the lead registry without `query_database`; worker service construction retains it. `src/data_analysis_agent/tools.py:391` and `:679` make that registry boundary explicit rather than removing the SQL definition globally.
+- `tests/test_api.py` adds real regression coverage for all three background helpers, lead schema/execution denial versus SQL-worker availability, and two independent injected providers completing teammate work with no saved API key.
+
+Final verification: focused 80-test runtime suite passed; full suite passed with 254 tests, 1 explicitly skipped PostgreSQL integration test (`TEST_POSTGRES_DSN` unset). The two manager race checks also passed for 20 consecutive runs without time-based waits. Remaining risk: a live PostgreSQL DSN is still required to exercise the opt-in integration test against a real server.

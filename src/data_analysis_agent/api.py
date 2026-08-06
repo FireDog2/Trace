@@ -194,6 +194,7 @@ class ModelConfigurationResponse(ApiModel):
 
 
 ProviderFactory = Callable[[ProviderCredentials, int], ModelProvider]
+TeammateProviderFactory = Callable[[], ModelProvider]
 
 
 @dataclass(slots=True)
@@ -241,12 +242,14 @@ def build_services(
     secret_protector: SecretProtector | None = None,
     provider_factory: ProviderFactory = provider_from_credentials,
     with_team_manager: bool = True,
+    teammate_provider_factory: TeammateProviderFactory | None = None,
 ) -> AppServices:
     """Build services without leaking a newly opened SQLite connection on setup failure."""
     connection = connect_database(settings)
     try:
         return _build_services(
-            settings, connection, provider, secret_protector, provider_factory, with_team_manager
+            settings, connection, provider, secret_protector, provider_factory, with_team_manager,
+            teammate_provider_factory,
         )
     except BaseException:
         connection.close()
@@ -260,6 +263,7 @@ def _build_services(
     secret_protector: SecretProtector | None = None,
     provider_factory: ProviderFactory = provider_from_credentials,
     with_team_manager: bool = True,
+    teammate_provider_factory: TeammateProviderFactory | None = None,
 ) -> AppServices:
     workspace = WorkspaceService(settings)
     projects = ProjectRepository(connection)
@@ -305,6 +309,7 @@ def _build_services(
         approvals=approvals,
         sql_gateway=sql_gateway,
         include_coordination_tools=True,
+        include_database_query=not with_team_manager,
     )
     team_repository = TeamRepository(connection)
     services = AppServices(
@@ -333,7 +338,13 @@ def _build_services(
         def run_and_close(run_id: str):
             worker = None
             try:
-                worker = build_services(settings, None, protector, provider_factory, with_team_manager=False)
+                worker = build_services(
+                    settings,
+                    teammate_provider_factory() if teammate_provider_factory is not None else None,
+                    protector,
+                    provider_factory,
+                    with_team_manager=False,
+                )
                 return TeammateRunner(
                     settings=settings,
                     provider=worker.resolve_provider(),
@@ -372,12 +383,14 @@ def create_app(
     provider: ModelProvider | None = None,
     secret_protector: SecretProtector | None = None,
     provider_factory: ProviderFactory = provider_from_credentials,
+    teammate_provider_factory: TeammateProviderFactory | None = None,
 ) -> FastAPI:
     services = build_services(
         settings,
         provider,
         secret_protector,
         provider_factory,
+        teammate_provider_factory=teammate_provider_factory,
     )
 
     @asynccontextmanager
@@ -632,7 +645,10 @@ def create_app(
         services.projects.get(project_id)
         resolved_provider = _configured_provider_or_409(services)
         task = services.tasks.create(project_id, request.objective)
-        background_tasks.add_task(_run_task, settings, resolved_provider, task.id)
+        background_tasks.add_task(
+            _run_task, settings, resolved_provider, task.id, services.secret_protector,
+            services.provider_factory, teammate_provider_factory,
+        )
         return _task_response(task)
 
     @app.get("/api/tasks/{task_id}", response_model=TaskDetailResponse)
@@ -691,6 +707,9 @@ def create_app(
                 task_id,
                 request.content,
                 task.status,
+                services.secret_protector,
+                services.provider_factory,
+                teammate_provider_factory,
             )
         else:
             services.tasks.add_message(task_id, "user", request.content)
@@ -718,6 +737,9 @@ def create_app(
                 settings,
                 resolved_provider,
                 approval.task_id,
+                services.secret_protector,
+                services.provider_factory,
+                teammate_provider_factory,
             )
         return {
             "id": approval.id,
@@ -779,12 +801,24 @@ def _configured_provider_or_409(services: AppServices) -> ModelProvider:
         ) from exc
 
 
-def _run_task(settings: Settings, provider: ModelProvider, task_id: str) -> None:
-    services = build_services(settings, provider)
+def _run_task(
+    settings: Settings, provider: ModelProvider, task_id: str,
+    secret_protector: SecretProtector | None = None,
+    provider_factory: ProviderFactory = provider_from_credentials,
+    teammate_provider_factory: TeammateProviderFactory | None = None,
+) -> None:
+    services = build_services(
+        settings, provider, secret_protector, provider_factory,
+        teammate_provider_factory=teammate_provider_factory,
+    )
     try:
         services.agent().run(task_id)
     finally:
-        services.connection.close()
+        try:
+            if services.team_manager is not None:
+                services.team_manager.shutdown()
+        finally:
+            services.connection.close()
 
 
 def _continue_task(
@@ -793,27 +827,47 @@ def _continue_task(
     task_id: str,
     content: str,
     previous_status: TaskStatus,
+    secret_protector: SecretProtector | None = None,
+    provider_factory: ProviderFactory = provider_from_credentials,
+    teammate_provider_factory: TeammateProviderFactory | None = None,
 ) -> None:
-    services = build_services(settings, provider)
+    services = build_services(
+        settings, provider, secret_protector, provider_factory,
+        teammate_provider_factory=teammate_provider_factory,
+    )
     try:
         if previous_status is TaskStatus.COMPLETED:
             services.agent().follow_up(task_id, content)
         else:
             services.agent().resume(task_id, content)
     finally:
-        services.connection.close()
+        try:
+            if services.team_manager is not None:
+                services.team_manager.shutdown()
+        finally:
+            services.connection.close()
 
 
 def _resume_approved_task(
     settings: Settings,
     provider: ModelProvider,
     task_id: str,
+    secret_protector: SecretProtector | None = None,
+    provider_factory: ProviderFactory = provider_from_credentials,
+    teammate_provider_factory: TeammateProviderFactory | None = None,
 ) -> None:
-    services = build_services(settings, provider)
+    services = build_services(
+        settings, provider, secret_protector, provider_factory,
+        teammate_provider_factory=teammate_provider_factory,
+    )
     try:
         services.agent().resume_approval(task_id)
     finally:
-        services.connection.close()
+        try:
+            if services.team_manager is not None:
+                services.team_manager.shutdown()
+        finally:
+            services.connection.close()
 
 
 def _project_response(project: Project) -> ProjectResponse:
