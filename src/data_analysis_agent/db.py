@@ -288,6 +288,36 @@ ALTER TABLE agent_runs ADD COLUMN worker_token TEXT;
 ALTER TABLE agent_runs ADD COLUMN worker_claimed_at TEXT;
 """
 
+MIGRATION_11_SQL = """
+CREATE TABLE IF NOT EXISTS analysis_runs (
+    id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),
+    status TEXT NOT NULL CHECK(status IN ('running','completed','failed','cancelled')),
+    accepted INTEGER NOT NULL DEFAULT 0 CHECK(accepted IN (0,1)),
+    started_at TEXT NOT NULL, completed_at TEXT, error_category TEXT
+);
+CREATE TABLE IF NOT EXISTS trace_events (
+    id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES analysis_runs(id),
+    task_id TEXT NOT NULL REFERENCES tasks(id), agent_id TEXT,
+    parent_event_id TEXT REFERENCES trace_events(id), sequence INTEGER NOT NULL,
+    event_type TEXT NOT NULL, status TEXT NOT NULL, payload_json TEXT NOT NULL,
+    started_at TEXT NOT NULL, finished_at TEXT, duration_ms INTEGER,
+    attempt INTEGER NOT NULL DEFAULT 1, error_category TEXT,
+    artifact_ids_json TEXT NOT NULL DEFAULT '[]', UNIQUE(run_id, sequence)
+);
+CREATE INDEX IF NOT EXISTS idx_trace_events_run_sequence ON trace_events(run_id, sequence);
+"""
+
+MIGRATION_12_SQL = """
+CREATE TABLE IF NOT EXISTS skill_candidates (
+    id TEXT PRIMARY KEY, source_run_id TEXT NOT NULL REFERENCES analysis_runs(id),
+    name TEXT NOT NULL, version INTEGER NOT NULL, markdown TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('candidate','approved','rejected')),
+    enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)),
+    generated_by_model TEXT NOT NULL, reviewed_at TEXT, created_at TEXT NOT NULL,
+    UNIQUE(name, version)
+);
+"""
+
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
@@ -409,6 +439,12 @@ def migrate(connection: sqlite3.Connection) -> None:
         except Exception:
             connection.rollback()
             raise
+    if 11 not in applied:
+        connection.executescript(MIGRATION_11_SQL)
+        connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (11, utc_now()))
+    if 12 not in applied:
+        connection.executescript(MIGRATION_12_SQL)
+        connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (12, utc_now()))
     connection.execute("PRAGMA foreign_keys = ON")
     connection.commit()
 
