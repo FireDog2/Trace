@@ -6,9 +6,9 @@ from data_analysis_agent.domain import ArtifactType
 from data_analysis_agent.permissions import ApprovalRepository
 from data_analysis_agent.providers import ModelResponse, ScriptedProvider
 from data_analysis_agent.reporting import ReportService
-from data_analysis_agent.skills import SkillCandidateRepository, WorkflowCurator
+from data_analysis_agent.skills import CuratorAgent, SkillCandidateRepository
 from data_analysis_agent.team import AgentRole, AgentRunStatus, ROLE_TOOLS, TeamRepository
-from data_analysis_agent.tracing import TraceRepository
+from data_analysis_agent.tracing import TraceContext, TraceRepository
 
 _SKILL = """---
 name: safe-sql-diagnostic
@@ -74,9 +74,26 @@ def test_portfolio_golden_path_is_safe_observable_and_replayable(
     traces = TraceRepository(db_connection)
     run = traces.start_run(task.id)
     traces.append(run.id, task.id, "agent.started", "completed", {"role": "lead"})
-    traces.append(run.id, task.id, "tool.completed", "completed", {"tool": "query_database"}, attempt=2)
     traces.append(run.id, task.id, "tool.completed", "retryable_error", {"tool": "query_database"}, attempt=1, error_category="query_timeout")
+    traces.append(run.id, task.id, "tool.retry", "retrying", {"tool": "query_database", "remaining": 1}, attempt=1, error_category="query_timeout")
+    traces.append(run.id, task.id, "tool.completed", "completed", {"tool": "query_database"}, attempt=2, artifact_ids=(retry.artifact_id,))
     traces.finish_run(run.id, "completed")
     accepted = traces.accept_run(run.id)
-    candidate = WorkflowCurator(traces, SkillCandidateRepository(db_connection), ScriptedProvider([ModelResponse(_SKILL, ())])).create_candidate(accepted.id, "deterministic-curator")
-    assert accepted.accepted and candidate.enabled is False and candidate.status == "candidate"
+    curator_run = team.create_run(
+        task.id,
+        AgentRole.CURATOR,
+        "Curate accepted workflow",
+        trace_context=TraceContext(accepted.id, task.id),
+    )
+    candidates = SkillCandidateRepository(db_connection)
+    curated = CuratorAgent(
+        traces=traces,
+        candidates=candidates,
+        provider=ScriptedProvider([ModelResponse(_SKILL, ())]),
+        teams=team,
+        model_name="deterministic-curator",
+    ).run(curator_run.id)
+    candidate = candidates.get_for_run(accepted.id)
+    assert accepted.accepted and curated.status is AgentRunStatus.COMPLETED
+    assert curated.trace_run_id == accepted.id and ROLE_TOOLS[AgentRole.CURATOR] == frozenset()
+    assert candidate.enabled is False and candidate.status == "candidate"
