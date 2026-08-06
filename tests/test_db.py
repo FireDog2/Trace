@@ -28,15 +28,31 @@ def test_migrate_creates_versioned_core_tables(db_connection) -> None:
         "data_sources",
         "data_access_policies",
         "task_query_budget",
+        "agent_runs",
+        "agent_messages",
     } <= names
     assert db_connection.execute(
         "SELECT version FROM schema_migrations ORDER BY version"
-    ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,)]
+    ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,)]
     for table in ("data_access_policies", "database_query_attempts"):
         assert any(
             row[2] == "data_sources"
             for row in db_connection.execute(f"PRAGMA foreign_key_list({table})")
         )
+
+
+def test_team_migration_replays_after_missing_version_record(db_connection) -> None:
+    db_connection.execute("DELETE FROM schema_migrations WHERE version = 7")
+    db_connection.commit()
+
+    migrate(db_connection)
+
+    assert db_connection.execute(
+        "SELECT version FROM schema_migrations WHERE version = 7"
+    ).fetchone() == (7,)
+    assert {row[0] for row in db_connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'"
+    )} >= {"agent_runs", "agent_messages"}
 
 
 def test_data_source_migration_stores_encrypted_credentials_only(db_connection) -> None:

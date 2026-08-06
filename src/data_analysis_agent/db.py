@@ -238,6 +238,38 @@ CREATE INDEX IF NOT EXISTS idx_database_query_attempts_source_status
 ON database_query_attempts(data_source_id, status, started_at);
 """
 
+MIGRATION_7_SQL = """
+CREATE TABLE IF NOT EXISTS agent_runs (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK(role IN ('knowledge', 'sql', 'report')),
+    objective TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN (
+        'created', 'working', 'waiting', 'completed', 'failed', 'cancelled'
+    )),
+    result_json TEXT,
+    error_category TEXT,
+    error_message TEXT,
+    cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancel_requested IN (0, 1)),
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS agent_messages (
+    id TEXT PRIMARY KEY,
+    agent_run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_runs_task_status_created
+ON agent_runs(task_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_agent_messages_run_created
+ON agent_messages(agent_run_id, created_at);
+"""
+
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
@@ -305,6 +337,20 @@ def migrate(connection: sqlite3.Connection) -> None:
             connection.execute(
                 "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                 (6, utc_now()),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+    if 7 not in applied:
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for statement in (item.strip() for item in MIGRATION_7_SQL.split(";")):
+                if statement:
+                    connection.execute(statement)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                (7, utc_now()),
             )
             connection.commit()
         except Exception:
