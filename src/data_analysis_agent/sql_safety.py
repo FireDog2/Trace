@@ -160,6 +160,7 @@ def _base_references(
     references: list[SqlReference] = []
     seen_tables: set[str] = set()
     seen_references: set[tuple[str, str]] = set()
+    handled_stars: set[int] = set()
 
     for scope in traverse_scope(statement):
         base_sources: dict[str, tuple[str, dict[str, str]]] = {}
@@ -188,6 +189,36 @@ def _base_references(
                 references.append(SqlReference(*key))
                 seen_references.add(key)
 
+        for star_reference in scope.stars:
+            if not isinstance(star_reference, exp.Column) or not isinstance(
+                star_reference.this, exp.Star
+            ):
+                raise SqlValidationError(
+                    "unresolved_star", "Star reference could not be resolved safely"
+                )
+            source = base_sources.get(star_reference.table)
+            if source is not None:
+                table_name, columns = source
+                for column_name in columns.values():
+                    key = (table_name, column_name)
+                    if key not in seen_references:
+                        references.append(SqlReference(*key))
+                        seen_references.add(key)
+            elif not isinstance(scope.sources.get(star_reference.table), Scope):
+                raise SqlValidationError(
+                    "unresolved_star", "Star reference could not be resolved safely"
+                )
+            handled_stars.add(id(star_reference.this))
+
+    for star in statement.find_all(exp.Star):
+        if id(star) in handled_stars:
+            continue
+        if isinstance(star.parent, exp.Count) and star.parent.this is star:
+            continue
+        raise SqlValidationError(
+            "unresolved_star", "Star reference could not be resolved safely"
+        )
+
     return tuple(tables), tuple(references)
 
 
@@ -195,6 +226,11 @@ def _resolve_table(
     table: exp.Table,
     catalog_index: dict[str, tuple[str, dict[str, str]]],
 ) -> tuple[str, dict[str, str]]:
+    if table.args.get("db") is not None or table.args.get("catalog") is not None:
+        raise SqlValidationError(
+            "qualified_table_not_allowed",
+            "Schema- and catalog-qualified table names are not supported",
+        )
     table_name = _identifier(table.this)
     try:
         return catalog_index[table_name]

@@ -133,6 +133,53 @@ def test_validator_expands_qualified_star_through_cte() -> None:
     assert result.access_level is AccessLevel.APPROVAL_REQUIRED
 
 
+def test_validator_expands_nested_qualified_star_before_policy_check() -> None:
+    result = SqlAstValidator().validate(
+        "SELECT row_to_json(o.*) FROM orders AS o", CATALOG, POLICY
+    )
+
+    assert result.access_level is AccessLevel.APPROVAL_REQUIRED
+    assert {(item.table, item.column) for item in result.references} == {
+        ("orders", "id"),
+        ("orders", "region"),
+        ("orders", "amount"),
+        ("orders", "customer_email"),
+    }
+
+
+def test_validator_allows_count_star_without_column_access() -> None:
+    result = SqlAstValidator().validate("SELECT count(*) FROM orders", CATALOG, POLICY)
+
+    assert result.access_level is AccessLevel.ALLOWED
+    assert result.references == ()
+
+
+def test_validator_rejects_unqualified_nested_star() -> None:
+    with pytest.raises(SqlValidationError) as error:
+        SqlAstValidator().validate("SELECT row_to_json(*) FROM orders", CATALOG, POLICY)
+
+    assert error.value.code == "unresolved_star"
+
+
+def test_validator_rejects_unresolved_whole_row_reference() -> None:
+    with pytest.raises(SqlValidationError):
+        SqlAstValidator().validate("SELECT row_to_json(o) FROM orders AS o", CATALOG, POLICY)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT * FROM reporting.orders",
+        "SELECT * FROM analytics.reporting.orders",
+    ],
+)
+def test_validator_rejects_qualified_relation_names(sql: str) -> None:
+    with pytest.raises(SqlValidationError) as error:
+        SqlAstValidator().validate(sql, CATALOG, POLICY)
+
+    assert error.value.code == "qualified_table_not_allowed"
+
+
 def test_validator_preserves_quoted_mixed_case_identifier_markers() -> None:
     catalog = {'"OrderLines"': ('"ItemID"', '"UnitPrice"')}
     policy = PolicySnapshot(
