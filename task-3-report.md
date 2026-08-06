@@ -24,3 +24,9 @@ Round verification: focused suite 84 passed; full suite 230 passed, 1 PostgreSQL
 `spawn()` now holds the manager lock from closed-state check through durable capacity admission, submit, and future registration. `shutdown()` therefore either observes and cancels that registered future, or wins first and causes `TeamManagerClosed` before repository access. Done callbacks are registered after releasing the lock to avoid synchronous-completion lock re-entry.
 
 Round verification: focused manager suite 3 passed; full suite 232 passed, 1 PostgreSQL integration test skipped because `TEST_POSTGRES_DSN` is unset.
+
+## Fix round 3
+
+Service construction now owns the SQLite connection before constructing dependent services and closes it on every construction failure. The worker wrapper already closes its independently constructed runtime after provider resolution, runner construction, success, or failure. The spawn/shutdown race test now explicitly verifies that shutdown cannot return while a spawn has passed its initial closed check but remains inside capacity admission; this is a RED regression against the pre-linearization implementation.
+
+Round verification: focused manager/API suite 23 passed; full suite 232 passed, 1 PostgreSQL integration test skipped because `TEST_POSTGRES_DSN` is unset.

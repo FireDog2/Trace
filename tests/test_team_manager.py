@@ -61,11 +61,15 @@ def test_spawn_shutdown_are_linearized_before_repository_create(tmp_path, settin
     thread = Thread(target=lambda: outcome.append(manager.spawn(task.id, AgentRole.SQL, "Race")))
     thread.start()
     assert entered.wait(2)
-    shutdown_thread = Thread(target=manager.shutdown)
+    shutdown_returned = Event()
+    shutdown_thread = Thread(target=lambda: (manager.shutdown(), shutdown_returned.set()))
     shutdown_thread.start()
+    # Regression guard: the pre-linearization implementation returned here.
+    assert not shutdown_returned.wait(0.05)
     release.set()
     thread.join(2)
     shutdown_thread.join(2)
+    assert shutdown_returned.is_set()
 
     try:
         assert len(repository.list_runs(task.id)) == 1

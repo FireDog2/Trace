@@ -242,7 +242,25 @@ def build_services(
     provider_factory: ProviderFactory = provider_from_credentials,
     with_team_manager: bool = True,
 ) -> AppServices:
+    """Build services without leaking a newly opened SQLite connection on setup failure."""
     connection = connect_database(settings)
+    try:
+        return _build_services(
+            settings, connection, provider, secret_protector, provider_factory, with_team_manager
+        )
+    except BaseException:
+        connection.close()
+        raise
+
+
+def _build_services(
+    settings: Settings,
+    connection: sqlite3.Connection,
+    provider: ModelProvider | None = None,
+    secret_protector: SecretProtector | None = None,
+    provider_factory: ProviderFactory = provider_from_credentials,
+    with_team_manager: bool = True,
+) -> AppServices:
     workspace = WorkspaceService(settings)
     projects = ProjectRepository(connection)
     tasks = TaskRepository(connection)
