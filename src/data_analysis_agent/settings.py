@@ -11,6 +11,13 @@ class Settings:
     python_timeout_seconds: int = 30
     max_tool_actions: int = 40
     model_timeout_seconds: int = 60
+    postgres_statement_timeout_ms: int = 8_000
+    postgres_lock_timeout_ms: int = 1_000
+    postgres_max_rows: int = 1_000
+    postgres_max_result_bytes: int = 2_000_000
+    postgres_max_queries_per_task: int = 8
+    postgres_high_cost: float = 100_000.0
+    postgres_extreme_cost: float = 1_000_000.0
 
     @classmethod
     def local(cls, data_dir: Path | None = None) -> "Settings":

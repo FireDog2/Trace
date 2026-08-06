@@ -154,6 +154,13 @@ class ApprovalRepository:
             raise ApprovalNotFound(approval_id)
         return _approval_from_row(row)
 
+    def list_for_task(self, task_id: str) -> tuple[Approval, ...]:
+        rows = self._connection.execute(
+            "SELECT * FROM approvals WHERE task_id = ? ORDER BY created_at, rowid",
+            (task_id,),
+        ).fetchall()
+        return tuple(_approval_from_row(row) for row in rows)
+
     def decide(self, approval_id: str, approved: bool) -> Approval:
         decided_at = utc_now()
         status = "approved" if approved else "rejected"
