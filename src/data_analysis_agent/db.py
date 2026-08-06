@@ -300,11 +300,15 @@ def connect_database(settings: Settings) -> sqlite3.Connection:
         timeout=30,
         check_same_thread=False,
     )
-    connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute("PRAGMA journal_mode = WAL")
-    connection.row_factory = sqlite3.Row
-    migrate(connection)
-    return connection
+    try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.row_factory = sqlite3.Row
+        migrate(connection)
+        return connection
+    except BaseException:
+        connection.close()
+        raise
 
 
 def migrate(connection: sqlite3.Connection) -> None:

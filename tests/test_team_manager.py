@@ -1,5 +1,6 @@
 from threading import Event, Thread
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -76,3 +77,25 @@ def test_spawn_shutdown_are_linearized_before_repository_create(tmp_path, settin
         assert repository.get_run(outcome[0].id).status.value == "cancelled"
     finally:
         connection.close()
+
+
+def test_submit_failure_is_terminal_and_releases_capacity(task, db_connection, settings) -> None:
+    """A rejected executor submission cannot strand a durable active row."""
+    repository = TeamRepository(db_connection)
+    manager = TeamManager(repository, settings, lambda role, event: None)
+
+    class RejectingExecutor:
+        def submit(self, *args, **kwargs):
+            raise RuntimeError("executor rejected work")
+
+        def shutdown(self, **kwargs):
+            return None
+
+    manager._executor = RejectingExecutor()  # type: ignore[assignment]
+    rejected = manager.spawn(task.id, AgentRole.SQL, "Will not run")
+
+    assert repository.get_run(rejected.id).status.value == "failed"
+    manager._executor = ThreadPoolExecutor(max_workers=1)  # type: ignore[assignment]
+    next_run = manager.spawn(task.id, AgentRole.SQL, "Capacity is available")
+    assert next_run.status.value == "created"
+    manager.shutdown()

@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import sqlite3
+
+import pytest
+
+from data_analysis_agent import db
 from data_analysis_agent.db import migrate
 
 
@@ -138,3 +143,39 @@ def test_query_attempt_migration_is_replay_safe_and_records_durable_state(
     assert db_connection.execute(
         "SELECT version FROM schema_migrations WHERE version = 4"
     ).fetchone() == (4,)
+
+
+@pytest.mark.parametrize("failure", ("pragma", "migrate"))
+def test_connect_database_closes_connection_when_initialization_fails(
+    settings, monkeypatch, failure
+) -> None:
+    """A successfully opened connection is never leaked by setup failures."""
+    raw = sqlite3.connect(":memory:")
+
+    class TrackingConnection:
+        closed = False
+
+        def execute(self, statement, *args):
+            if failure == "pragma" and statement == "PRAGMA foreign_keys = ON":
+                raise sqlite3.DatabaseError("initialization failed")
+            return raw.execute(statement, *args)
+
+        def close(self):
+            self.closed = True
+            raw.close()
+
+        def __getattr__(self, name):
+            return getattr(raw, name)
+
+    connection = TrackingConnection()
+    monkeypatch.setattr(db.sqlite3, "connect", lambda *args, **kwargs: connection)
+    if failure == "migrate":
+        def fail_migrate(_: object) -> None:
+            raise sqlite3.DatabaseError("migration failed")
+
+        monkeypatch.setattr(db, "migrate", fail_migrate)
+
+    with pytest.raises(sqlite3.DatabaseError):
+        db.connect_database(settings)
+
+    assert connection.closed is True

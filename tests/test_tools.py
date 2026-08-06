@@ -18,6 +18,7 @@ from data_analysis_agent.tools import (
     ToolRegistry,
     build_tool_registry,
 )
+from data_analysis_agent.team import AgentRole, TeamRepository
 
 
 def test_registry_exposes_exact_mvp_tool_set(tool_registry) -> None:
@@ -32,6 +33,53 @@ def test_registry_exposes_exact_mvp_tool_set(tool_registry) -> None:
         "update_plan",
         "request_user_input",
     }
+
+
+def test_lead_coordination_tools_execute_with_real_registry_and_enforce_ownership(
+    tool_context, db_connection, task_repository, project_repository, dataset_service,
+    duckdb_executor, python_executor, workspace, artifact_repository, report_service
+) -> None:
+    repository = TeamRepository(db_connection)
+    tool_registry = build_tool_registry(
+        datasets=dataset_service, duckdb_executor=duckdb_executor,
+        python_executor=python_executor, workspace=workspace,
+        artifacts=artifact_repository, reports=report_service, tasks=task_repository,
+        permission_policy=PermissionPolicy(), approvals=ApprovalRepository(db_connection),
+        include_coordination_tools=True,
+    )
+
+    class Coordinator:
+        def spawn(self, task_id, role, objective):
+            return repository.create_run(task_id, role, objective)
+        def list(self, task_id):
+            return repository.list_runs(task_id)
+        def await_runs(self, run_ids, timeout_seconds):
+            return tuple(repository.get_run(run_id) for run_id in run_ids)
+        def cancel(self, run_id):
+            return repository.request_cancel(run_id)
+
+    tool_registry.configure_team(Coordinator(), repository)
+    spawn = tool_registry.execute(ToolCall("spawn", "spawn_teammate", {"role": "sql", "objective": "Bounded query"}), tool_context)
+    assert spawn.success and spawn.output["agent_id"]
+    run_id = spawn.output["agent_id"]
+    listed = tool_registry.execute(ToolCall("list", "list_teammates", {}), tool_context)
+    awaited = tool_registry.execute(ToolCall("await", "await_teammates", {"agent_ids": [run_id], "timeout_seconds": 1}), tool_context)
+    cancelled = tool_registry.execute(ToolCall("cancel", "cancel_teammate", {"agent_id": run_id}), tool_context)
+    assert listed.success and listed.output["agents"][0]["agent_id"] == run_id
+    assert awaited.success and awaited.output["agents"][0]["agent_id"] == run_id
+    assert cancelled.success and cancelled.output["status"] == "created"
+
+    other_project = project_repository.create("Other")
+    other_task = task_repository.create(other_project.id, "Other task")
+    foreign = repository.create_run(other_task.id, AgentRole.SQL, "Foreign")
+    rejected = tool_registry.execute(ToolCall("foreign", "cancel_teammate", {"agent_id": foreign.id}), tool_context)
+    assert rejected.error_category == "permission_denied"
+
+    restricted = tool_registry.restrict(frozenset({"inspect_workspace"}))
+    assert {schema.name for schema in restricted.schemas()} == {"inspect_workspace"}
+    unknown = restricted.execute(ToolCall("no-op", "spawn_teammate", {}), tool_context)
+    assert unknown.error_category == "unknown_tool"
+    assert repository.get_run(foreign.id).cancel_requested is False
 
 
 def test_registry_exposes_database_query_tool(tool_registry) -> None:
