@@ -126,13 +126,21 @@ ROLE_PROMPTS: dict[AgentRole, str] = {
 _MAX_HANDOFF_BYTES = 64_000
 
 
+TaskEventPublisher = Callable[[str, str, dict[str, object]], object]
+
+
 class TeamRepository:
     """Durable, connection-serialized teammate run persistence."""
 
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        event_publisher: TaskEventPublisher | None = None,
+    ) -> None:
         connection.row_factory = sqlite3.Row
         self._connection = connection
         self._lock = sqlite_connection_lock(connection)
+        self._event_publisher = event_publisher
 
     @sqlite_connection_guarded
     def create_run(self, task_id: str, role: AgentRole, objective: str) -> AgentRun:
@@ -179,6 +187,7 @@ class TeamRepository:
                 ),
             )
             self._connection.commit()
+            self._publish_created(run)
             return run
         except Exception:
             self._connection.rollback()
@@ -280,6 +289,7 @@ class TeamRepository:
             self._connection.execute("BEGIN IMMEDIATE")
             run = self._transition_in_transaction(agent_run_id, AgentRunStatus(target))
             self._connection.commit()
+            self._publish_state(run)
             return run
         except Exception:
             self._connection.rollback()
@@ -302,6 +312,7 @@ class TeamRepository:
                 (message.id, message.agent_run_id, message.role, message.content, message.created_at),
             )
             self._connection.commit()
+            self._publish_message(message)
             return message
         except Exception:
             self._connection.rollback()
@@ -330,6 +341,7 @@ class TeamRepository:
                 (message.id, sqlite3.Binary(protected_content), message.created_at),
             )
             self._connection.commit()
+            self._publish_message(message)
             return message
         except Exception:
             self._connection.rollback()
@@ -389,6 +401,7 @@ class TeamRepository:
                 agent_run_id, AgentRunStatus.FAILED, error_category=error_category, error_message=message
             )
             self._connection.commit()
+            self._publish_state(run)
             return run
         except Exception:
             self._connection.rollback()
@@ -402,6 +415,7 @@ class TeamRepository:
                 agent_run_id, AgentRunStatus.COMPLETED, result_json=result_json
             )
             self._connection.commit()
+            self._publish_state(run)
             return run
         except Exception:
             self._connection.rollback()
@@ -437,6 +451,29 @@ class TeamRepository:
         if row is None:
             raise KeyError("Agent run not found")
         return row
+
+    def _publish_created(self, run: AgentRun) -> None:
+        self._publish(run.task_id, "agent.created", _agent_event_payload(run))
+
+    def _publish_state(self, run: AgentRun) -> None:
+        payload = _agent_event_payload(run)
+        self._publish(run.task_id, "agent.state", payload)
+        if run.status in {AgentRunStatus.COMPLETED, AgentRunStatus.FAILED, AgentRunStatus.CANCELLED}:
+            self._publish(run.task_id, "agent.completed", payload)
+
+    def _publish_message(self, message: AgentMessage) -> None:
+        if self._event_publisher is None:
+            return
+        run = self._read_run(message.agent_run_id)
+        self._publish(
+            run.task_id,
+            "agent.message",
+            {"agent_id": run.id, "role": message.role, "created_at": message.created_at},
+        )
+
+    def _publish(self, task_id: str, event_type: str, payload: dict[str, object]) -> None:
+        if self._event_publisher is not None:
+            self._event_publisher(task_id, event_type, payload)
 
     def _transition_in_transaction(
         self, agent_run_id: str, target: AgentRunStatus, *, result_json: str | None = None,
@@ -475,6 +512,18 @@ def _run_from_row(row: sqlite3.Row) -> AgentRun:
         turns_used=int(row["turns_used"]), deadline_at=row["deadline_at"],
         worker_token=row["worker_token"], worker_claimed_at=row["worker_claimed_at"],
     )
+
+
+def _agent_event_payload(run: AgentRun) -> dict[str, object]:
+    return {
+        "agent_id": run.id,
+        "role": run.role.value,
+        "status": run.status.value,
+        "created_at": run.created_at,
+        "started_at": run.started_at,
+        "completed_at": run.completed_at,
+        "error_category": run.error_category,
+    }
 
 
 class _ProtectedAgentMessageRepository:
@@ -566,7 +615,9 @@ class TeammateRunner:
                 return terminal
             if not response.tool_calls:
                 try:
-                    return self._repository.complete_run(run.id, self._parse_handoff(response.text))
+                    handoff = self._parse_handoff(response.text)
+                    self._repository.append_message(run.id, "assistant", handoff)
+                    return self._repository.complete_run(run.id, handoff)
                 except ValueError:
                     return self._repository.fail_run(run.id, "invalid_handoff")
             failure = self._record_and_execute_calls(run, tools, response.tool_calls)

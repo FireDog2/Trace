@@ -1,5 +1,6 @@
 import type {
   ApprovalDecision,
+  AgentRun,
   Artifact,
   Project,
   Task,
@@ -18,6 +19,7 @@ export interface ApiClient {
   listTasks(projectId: string): Promise<Task[]>;
   createTask(projectId: string, objective: string): Promise<Task>;
   getTask(taskId: string): Promise<TaskDetail>;
+  listAgents(taskId: string): Promise<AgentRun[]>;
   sendMessage(taskId: string, content: string): Promise<Task>;
   decideApproval(approvalId: string, approved: boolean): Promise<ApprovalDecision>;
   getModelConfiguration(): Promise<ModelConfigurationStatus>;
@@ -38,6 +40,10 @@ const EVENT_TYPES: TaskEventType[] = [
   "approval.requested",
   "approval.decided",
   "message.created",
+  "agent.created",
+  "agent.state",
+  "agent.message",
+  "agent.completed",
 ];
 
 export class HttpApiClient implements ApiClient {
@@ -82,6 +88,10 @@ export class HttpApiClient implements ApiClient {
 
   getTask(taskId: string): Promise<TaskDetail> {
     return this.request(`/api/tasks/${taskId}`);
+  }
+
+  listAgents(taskId: string): Promise<AgentRun[]> {
+    return this.request(`/api/tasks/${taskId}/agents`);
   }
 
   sendMessage(taskId: string, content: string): Promise<Task> {

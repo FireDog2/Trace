@@ -54,6 +54,19 @@ export interface TaskDetail extends Task {
   artifacts: Artifact[];
 }
 
+export interface AgentRun {
+  id: string;
+  task_id: string;
+  role: "knowledge" | "sql" | "report";
+  objective: string;
+  status: "created" | "working" | "waiting" | "completed" | "failed" | "cancelled";
+  result_summary: string | null;
+  error_category: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
 export interface ApprovalDecision {
   id: string;
   status: string;
@@ -72,7 +85,11 @@ export type TaskEventType =
   | "artifact.created"
   | "approval.requested"
   | "approval.decided"
-  | "message.created";
+  | "message.created"
+  | "agent.created"
+  | "agent.state"
+  | "agent.message"
+  | "agent.completed";
 
 export interface TaskEvent {
   sequence: number;

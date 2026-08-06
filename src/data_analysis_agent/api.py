@@ -159,6 +159,19 @@ class TaskDetailResponse(TaskResponse):
     artifacts: list[ArtifactResponse]
 
 
+class AgentRunResponse(ApiModel):
+    id: str
+    task_id: str
+    role: str
+    objective: str
+    status: str
+    result_summary: str | None
+    error_category: str | None
+    created_at: str
+    started_at: str | None
+    completed_at: str | None
+
+
 class SendMessageRequest(ApiModel):
     content: str = Field(min_length=1, max_length=20_000)
 
@@ -311,7 +324,7 @@ def _build_services(
         include_coordination_tools=True,
         include_database_query=not with_team_manager,
     )
-    team_repository = TeamRepository(connection)
+    team_repository = TeamRepository(connection, tasks.append_event)
     services = AppServices(
         settings=settings,
         connection=connection,
@@ -362,7 +375,7 @@ def _build_services(
     def worker_failure_handler(run_id: str):
         worker_connection = connect_database(settings)
         try:
-            worker_repository = TeamRepository(worker_connection)
+            worker_repository = TeamRepository(worker_connection, TaskRepository(worker_connection).append_event)
             current = worker_repository.get_run(run_id)
             return (
                 worker_repository.fail_run(run_id, "provider_error")
@@ -691,6 +704,11 @@ def create_app(
             ],
         )
 
+    @app.get("/api/tasks/{task_id}/agents", response_model=list[AgentRunResponse])
+    def list_agents(task_id: str) -> list[AgentRunResponse]:
+        services.tasks.get(task_id)
+        return [_agent_run_response(run) for run in services.team_repository.list_runs(task_id)]
+
     @app.post("/api/tasks/{task_id}/messages", response_model=TaskResponse)
     def send_message(
         task_id: str,
@@ -912,6 +930,34 @@ def _task_response(task: Task) -> TaskResponse:
         created_at=task.created_at,
         updated_at=task.updated_at,
     )
+
+
+def _agent_run_response(run) -> AgentRunResponse:
+    return AgentRunResponse(
+        id=run.id,
+        task_id=run.task_id,
+        role=run.role.value,
+        objective=run.objective,
+        status=run.status.value,
+        result_summary=_result_summary(run.result_json),
+        error_category=run.error_category,
+        created_at=run.created_at,
+        started_at=run.started_at,
+        completed_at=run.completed_at,
+    )
+
+
+def _result_summary(result_json: str | None) -> str | None:
+    if result_json is None:
+        return None
+    try:
+        result = json.loads(result_json)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(result, dict):
+        return None
+    summary = result.get("summary")
+    return summary[:500] if isinstance(summary, str) else None
 
 
 def _artifact_response(

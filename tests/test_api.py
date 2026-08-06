@@ -313,6 +313,57 @@ def test_events_endpoint_replays_after_sequence(api_client) -> None:
     assert "id: 1" not in response.text
 
 
+def test_agents_endpoint_exposes_safe_state_and_lifecycle_events(settings) -> None:
+    app = create_app(
+        settings,
+        teammate_provider_factory=lambda: ScriptedProvider(
+            [ModelResponse(text='{"summary":"Profit is revenue minus cost"}', tool_calls=())]
+        ),
+    )
+    services = app.state.services
+    try:
+        project = services.projects.create("Agent visibility")
+        task = services.tasks.create(project.id, "Delegate a safe SQL summary")
+        run = services.team_manager.spawn(task.id, AgentRole.SQL, "Aggregate profit")  # type: ignore[union-attr]
+        services.team_manager.await_runs((run.id,), 2)  # type: ignore[union-attr]
+
+        with TestClient(app) as client:
+            response = client.get(f"/api/tasks/{task.id}/agents")
+            events = client.get(f"/api/tasks/{task.id}/events").text
+
+        assert response.status_code == 200
+        assert response.json() == [
+            {
+                "id": run.id,
+                "task_id": task.id,
+                "role": "sql",
+                "objective": "Aggregate profit",
+                "status": "completed",
+                "result_summary": "Profit is revenue minus cost",
+                "error_category": None,
+                "created_at": response.json()[0]["created_at"],
+                "started_at": response.json()[0]["started_at"],
+                "completed_at": response.json()[0]["completed_at"],
+            }
+        ]
+        assert "messages" not in response.text
+        assert "credentials" not in response.text
+        assert 'event: agent.created' in events
+        assert 'event: agent.state' in events
+        assert 'event: agent.message' in events
+        assert 'event: agent.completed' in events
+        assert events.index('event: agent.created') < events.index('event: agent.completed')
+        assert run.id in events
+    finally:
+        services.team_manager.shutdown()  # type: ignore[union-attr]
+        services.connection.close()
+
+
+def test_agents_endpoint_returns_not_found_for_unknown_task(api_client) -> None:
+    response = api_client.get("/api/tasks/missing-task/agents")
+    assert response.status_code == 404
+
+
 def test_completed_task_accepts_follow_up_after_application_restart(settings) -> None:
     provider = ScriptedProvider(
         [
