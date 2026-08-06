@@ -1,12 +1,77 @@
 from __future__ import annotations
 
+from threading import Event
+
+import pytest
 from fastapi.testclient import TestClient
 
+import data_analysis_agent.api as api_module
 from data_analysis_agent.api import create_app
 from data_analysis_agent.domain import TaskStatus
 from data_analysis_agent.model_config import SecretStorageUnavailable
 from data_analysis_agent.permissions import ToolAction
 from data_analysis_agent.providers import ModelResponse, ScriptedProvider
+from data_analysis_agent.team import AgentRole
+
+
+def test_build_services_closes_open_connection_when_construction_fails(settings, monkeypatch) -> None:
+    class Connection:
+        closed = False
+        def close(self):
+            self.closed = True
+
+    connection = Connection()
+    monkeypatch.setattr(api_module, "connect_database", lambda _: connection)
+    monkeypatch.setattr(api_module, "_build_services", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("builder failed")))
+
+    with pytest.raises(RuntimeError, match="builder failed"):
+        api_module.build_services(settings)
+    assert connection.closed is True
+
+
+@pytest.mark.parametrize("failure", ("provider", "runner_constructor", "runner_run"))
+def test_worker_runner_factory_closes_fresh_worker_on_each_failure(
+    settings, monkeypatch, failure
+) -> None:
+    main = api_module.build_services(settings, ScriptedProvider(()))
+    project = main.projects.create("Worker lifecycle")
+    # Create the task through the real main services; workers must never close this connection.
+    task = main.tasks.create(project.id, "Probe")
+    run = main.team_repository.create_run(task.id, AgentRole.SQL, "Probe")
+
+    class WorkerConnection:
+        closed = False
+        def close(self):
+            self.closed = True
+
+    worker_connection = WorkerConnection()
+    class Worker:
+        connection = worker_connection
+        team_repository = main.team_repository
+        tools = main.tools
+        def resolve_provider(self):
+            if failure == "provider":
+                raise RuntimeError("provider failed")
+            return ScriptedProvider(())
+
+    monkeypatch.setattr(api_module, "build_services", lambda *args, **kwargs: Worker())
+    if failure == "runner_constructor":
+        monkeypatch.setattr(api_module, "TeammateRunner", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("ctor failed")))
+    elif failure == "runner_run":
+        class FailingRunner:
+            def __init__(self, **kwargs):
+                pass
+            def run(self, run_id):
+                raise RuntimeError("run failed")
+        monkeypatch.setattr(api_module, "TeammateRunner", FailingRunner)
+
+    runner = main.team_manager._runner_factory(AgentRole.SQL, Event())  # type: ignore[union-attr]
+    with pytest.raises(RuntimeError):
+        runner.run(run.id)
+    assert worker_connection.closed is True
+    assert main.connection.execute("SELECT 1").fetchone()[0] == 1
+    main.team_manager.shutdown()  # type: ignore[union-attr]
+    main.connection.close()
 
 
 class RecordingProtector:

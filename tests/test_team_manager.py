@@ -1,10 +1,11 @@
 from threading import Event, Thread
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 
 import pytest
 
-from data_analysis_agent.team import AgentRole, TeamManager, TeamManagerClosed, TeamRepository
+from data_analysis_agent.team import AgentRole, AgentRunStatus, TeamManager, TeamManagerClosed, TeamRepository
 from data_analysis_agent.db import migrate
 from data_analysis_agent.repositories import ProjectRepository, TaskRepository
 
@@ -99,3 +100,65 @@ def test_submit_failure_is_terminal_and_releases_capacity(task, db_connection, s
     next_run = manager.spawn(task.id, AgentRole.SQL, "Capacity is available")
     assert next_run.status.value == "created"
     manager.shutdown()
+
+
+@pytest.mark.parametrize("failure", ("factory", "runner"))
+def test_manager_converts_worker_construction_and_run_failures_to_terminal_rows(
+    tmp_path, settings, failure
+) -> None:
+    connection = sqlite3.connect(tmp_path / "worker-failure.sqlite", check_same_thread=False)
+    migrate(connection)
+    project = ProjectRepository(connection).create("Worker failure")
+    task = TaskRepository(connection).create(project.id, "Failure")
+    repository = TeamRepository(connection)
+
+    def factory(role, event):
+        del role, event
+        if failure == "factory":
+            raise RuntimeError("factory failure")
+        class Runner:
+            def run(self, run_id):
+                del run_id
+                raise RuntimeError("runner failure")
+        return Runner()
+
+    manager = TeamManager(repository, settings, factory)
+    run = manager.spawn(task.id, AgentRole.SQL, "Fails safely")
+    terminal = manager.await_runs((run.id,), 1)[0]
+    assert terminal.status is AgentRunStatus.FAILED
+    assert terminal.error_category == "provider_error"
+    manager.shutdown()
+    connection.close()
+
+
+def test_shutdown_cancels_queued_work_and_running_work_cooperates(tmp_path, settings) -> None:
+    connection = sqlite3.connect(tmp_path / "shutdown.sqlite", check_same_thread=False)
+    migrate(connection)
+    project = ProjectRepository(connection).create("Shutdown")
+    task = TaskRepository(connection).create(project.id, "Shutdown")
+    repository = TeamRepository(connection)
+    started, release = Event(), Event()
+    constrained = replace(settings, max_active_teammates=2)
+
+    class Runner:
+        def __init__(self, event):
+            self.event = event
+        def run(self, run_id):
+            started.set()
+            assert release.wait(2)
+            return repository.transition_run(run_id, AgentRunStatus.CANCELLED)
+
+    manager = TeamManager(repository, constrained, lambda role, event: Runner(event))
+    manager._executor.shutdown(wait=False, cancel_futures=True)
+    manager._executor = ThreadPoolExecutor(max_workers=1)  # type: ignore[assignment]
+    first = manager.spawn(task.id, AgentRole.SQL, "Running")
+    assert started.wait(2)
+    second = manager.spawn(task.id, AgentRole.REPORT, "Queued")
+    manager.shutdown()
+    release.set()
+    assert manager.await_runs((first.id, second.id), 1)[0].status is AgentRunStatus.CANCELLED
+    assert repository.get_run(second.id).status is AgentRunStatus.CANCELLED
+    manager.shutdown()
+    with pytest.raises(TeamManagerClosed):
+        manager.spawn(task.id, AgentRole.SQL, "Closed")
+    connection.close()
