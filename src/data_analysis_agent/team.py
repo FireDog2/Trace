@@ -237,12 +237,11 @@ class TeamRepository:
             current = _run_from_row(self._get_row(agent_run_id))
             now = _utc_datetime(utc_now())
             deadline_at = current.deadline_at or (now + timedelta(seconds=timeout_seconds)).isoformat()
-            if current.deadline_at is None:
-                self._connection.execute("UPDATE agent_runs SET deadline_at = ? WHERE id = ?", (deadline_at, agent_run_id))
             cursor = self._connection.execute(
-                "UPDATE agent_runs SET turns_used = turns_used + 1 WHERE id = ? AND worker_token = ? "
-                "AND turns_used < ? AND deadline_at > ?",
-                (agent_run_id, token, max_turns, now.isoformat()),
+                "UPDATE agent_runs SET deadline_at = COALESCE(deadline_at, ?), turns_used = turns_used + 1 "
+                "WHERE id = ? AND worker_token = ? AND turns_used < ? "
+                "AND (deadline_at IS NULL OR deadline_at > ?)",
+                (deadline_at, agent_run_id, token, max_turns, now.isoformat()),
             )
             self._connection.commit()
             return replace(current, turns_used=current.turns_used + 1, deadline_at=deadline_at) if cursor.rowcount == 1 else None
@@ -418,10 +417,12 @@ class TeamRepository:
         now = utc_now()
         started_at = current.started_at or (now if target is AgentRunStatus.WORKING else None)
         completed_at = now if target in {AgentRunStatus.COMPLETED, AgentRunStatus.FAILED, AgentRunStatus.CANCELLED} else None
+        release = target in {AgentRunStatus.WAITING, AgentRunStatus.COMPLETED, AgentRunStatus.FAILED, AgentRunStatus.CANCELLED}
         self._connection.execute(
             "UPDATE agent_runs SET status = ?, result_json = ?, error_category = ?, error_message = ?, "
-            "started_at = ?, completed_at = ? WHERE id = ?",
-            (target, result_json, error_category, error_message, started_at, completed_at, agent_run_id),
+            "started_at = ?, completed_at = ?, worker_token = CASE WHEN ? THEN NULL ELSE worker_token END, "
+            "worker_claimed_at = CASE WHEN ? THEN NULL ELSE worker_claimed_at END WHERE id = ?",
+            (target, result_json, error_category, error_message, started_at, completed_at, int(release), int(release), agent_run_id),
         )
         return AgentRun(
             id=current.id, task_id=current.task_id, role=current.role, objective=current.objective,
@@ -429,7 +430,7 @@ class TeamRepository:
             error_message=error_message, cancel_requested=current.cancel_requested,
             created_at=current.created_at, started_at=started_at, completed_at=completed_at,
             turns_used=current.turns_used, deadline_at=current.deadline_at,
-            worker_token=current.worker_token, worker_claimed_at=current.worker_claimed_at,
+            worker_token=None if release else current.worker_token, worker_claimed_at=None if release else current.worker_claimed_at,
         )
 
 

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+
 from concurrent.futures import ThreadPoolExecutor
 import sqlite3
 
@@ -11,6 +15,8 @@ from data_analysis_agent.team import (
     InvalidAgentRunTransition,
     TeamRepository,
 )
+from data_analysis_agent.db import migrate
+from data_analysis_agent.repositories import ProjectRepository, TaskRepository
 from data_analysis_agent.db import migrate
 from data_analysis_agent.repositories import ProjectRepository, TaskRepository
 
@@ -120,3 +126,38 @@ def test_reserve_turn_returns_explicit_claim_or_none(db_connection, task) -> Non
 
     assert claimed is not None and claimed.turns_used == 1
     assert rejected is None
+
+
+def test_terminal_and_waiting_transitions_release_worker_lease(db_connection, task) -> None:
+    repository = TeamRepository(db_connection)
+    run = repository.create_run(task.id, AgentRole.KNOWLEDGE, "Lease release")
+    repository.claim_worker(run.id, "first")
+    repository.transition_run(run.id, AgentRunStatus.WORKING)
+    waiting = repository.transition_run(run.id, AgentRunStatus.WAITING)
+    assert waiting.worker_token is None
+    assert repository.claim_worker(run.id, "second") is not None
+    repository.transition_run(run.id, AgentRunStatus.WORKING)
+    completed = repository.complete_run(run.id, '{"ok":true}')
+    assert completed.worker_token is None
+
+
+def test_two_sqlite_connections_allow_exactly_one_worker_claim(tmp_path) -> None:
+    path = tmp_path / "team.sqlite"
+    first = sqlite3.connect(path, check_same_thread=False)
+    second = sqlite3.connect(path, check_same_thread=False)
+    migrate(first); migrate(second)
+    project = ProjectRepository(first).create("Concurrent")
+    task = TaskRepository(first).create(project.id, "Concurrent run")
+    one, two = TeamRepository(first), TeamRepository(second)
+    run = one.create_run(task.id, AgentRole.KNOWLEDGE, "Claim once")
+    barrier = Barrier(2)
+
+    def claim(repository, token):
+        barrier.wait()
+        return repository.claim_worker(run.id, token)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(lambda pair: claim(*pair), ((one, "one"), (two, "two"))))
+    assert sum(item is not None for item in outcomes) == 1
+    assert one.get_run(run.id).worker_token in {"one", "two"}
+    first.close(); second.close()

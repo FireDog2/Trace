@@ -57,3 +57,10 @@ Verification (shared `G:\data-analysis-agent\.venv`):
   without changing state or invoking a provider.
 - Turn reservation is bound to the worker token; startup interruption clears
   persisted leases.
+
+## Fix round 5/5
+
+- `reserve_turn` now establishes the deadline and increments turns in one
+  owner-guarded conditional update. Waiting and terminal transitions atomically
+  release leases; `finally` is only an idempotent fallback.
+- Added a real two-connection SQLite claim race regression test.
