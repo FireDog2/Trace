@@ -126,6 +126,7 @@ class ExplainRiskPolicy:
             or estimated_rows >= 1_000_000
             or sequential_scans >= 4
             or join_count >= 6
+            or (missing_filter and missing_join_constraint and total_cost >= self._settings.postgres_high_cost / 10)
         ):
             level = "high"
             reason = "The query plan requires one-time approval"
@@ -134,6 +135,8 @@ class ExplainRiskPolicy:
             or estimated_rows >= 100_000
             or sequential_scans >= 1
             or join_count >= 3
+            or missing_filter
+            or missing_join_constraint
         ):
             level = "medium"
             reason = "The query plan has bounded elevated cost"
@@ -762,12 +765,22 @@ def _csv_bytes(
 
 
 def _disambiguate_columns(columns: tuple[str, ...]) -> tuple[str, ...]:
-    seen: dict[str, int] = {}
+    seen: set[str] = set()
+    next_suffix: dict[str, int] = {}
     output: list[str] = []
     for column in columns:
-        count = seen.get(column, 0) + 1
-        seen[column] = count
-        output.append(column if count == 1 else f"{column}_{count}")
+        if column not in seen:
+            candidate = column
+            next_suffix[column] = 2
+        else:
+            suffix = next_suffix.get(column, 2)
+            candidate = f"{column}_{suffix}"
+            while candidate in seen:
+                suffix += 1
+                candidate = f"{column}_{suffix}"
+            next_suffix[column] = suffix + 1
+        seen.add(candidate)
+        output.append(candidate)
     return tuple(output)
 
 

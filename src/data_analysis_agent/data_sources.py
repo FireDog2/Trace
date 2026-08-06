@@ -82,6 +82,10 @@ class DataSourceRepository:
         source_id = str(uuid4())
         now = utc_now()
         try:
+            protected_dsn = self._secret_protector.protect(normalized_dsn)
+        except BaseException:
+            raise CredentialError("Data source credentials are unavailable") from None
+        try:
             self._connection.execute(
                 "INSERT INTO data_sources("
                 "id, project_id, name, dialect, protected_dsn, policy_version, "
@@ -91,7 +95,7 @@ class DataSourceRepository:
                     source_id,
                     project_id,
                     name,
-                    sqlite3.Binary(self._secret_protector.protect(normalized_dsn)),
+                    sqlite3.Binary(protected_dsn),
                     now,
                     now,
                 ),

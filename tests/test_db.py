@@ -31,7 +31,12 @@ def test_migrate_creates_versioned_core_tables(db_connection) -> None:
     } <= names
     assert db_connection.execute(
         "SELECT version FROM schema_migrations ORDER BY version"
-    ).fetchall() == [(1,), (2,), (3,), (4,)]
+    ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,)]
+    for table in ("data_access_policies", "database_query_attempts"):
+        assert any(
+            row[2] == "data_sources"
+            for row in db_connection.execute(f"PRAGMA foreign_key_list({table})")
+        )
 
 
 def test_data_source_migration_stores_encrypted_credentials_only(db_connection) -> None:

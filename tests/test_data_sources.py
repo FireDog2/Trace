@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from data_analysis_agent.data_sources import AccessLevel, DataSourceRepository
+from data_analysis_agent.data_sources import AccessLevel, CredentialError, DataSourceRepository
 from data_analysis_agent.db import migrate
 from data_analysis_agent.repositories import ProjectRepository, RepositoryError
 
@@ -298,9 +298,22 @@ def test_duplicate_data_source_name_rolls_back_and_raises_repository_error(
         repository.create(
             project.id, "Warehouse", "postgresql://localhost/duplicate"
         )
-
     assert repository.list_for_project(project.id) == (first,)
-    second = repository.create(
-        project.id, "Ledger", "postgresql://localhost/secondary"
-    )
+    second = repository.create(project.id, "Ledger", "postgresql://localhost/secondary")
     assert repository.list_for_project(project.id) == (first, second)
+
+
+def test_create_never_reflects_protector_failure_or_dsn(db_connection, project) -> None:
+    secret = "postgresql://analyst:secret@localhost/portfolio"
+
+    class BrokenProtector:
+        def protect(self, value: str) -> bytes:
+            raise RuntimeError(f"broken {value}")
+
+        def unprotect(self, value: bytes) -> str:
+            return value.decode()
+
+    with pytest.raises(CredentialError) as error:
+        DataSourceRepository(db_connection, BrokenProtector()).create(project.id, "Warehouse", secret)
+
+    assert secret not in str(error.value)

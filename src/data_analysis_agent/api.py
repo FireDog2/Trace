@@ -26,7 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from data_analysis_agent.agent import AgentRunner
 from data_analysis_agent.datasets import DatasetError, DatasetService
-from data_analysis_agent.data_sources import AccessLevel, DataSource, DataSourceRepository, PolicySnapshot
+from data_analysis_agent.data_sources import AccessLevel, CredentialError, DataSource, DataSourceRepository, PolicySnapshot
 from data_analysis_agent.db import connect_database
 from data_analysis_agent.domain import Artifact, Project, Task, TaskStatus
 from data_analysis_agent.execution import DuckDBExecutor, PythonExecutor
@@ -211,6 +211,7 @@ class AppServices:
     tools: ToolRegistry
     provider: ModelProvider | None
     provider_factory: ProviderFactory
+    secret_protector: SecretProtector
 
     def agent(self) -> AgentRunner:
         return AgentRunner(
@@ -218,6 +219,7 @@ class AppServices:
             provider=self.resolve_provider(),
             tools=self.tools,
             tasks=self.tasks,
+            secret_protector=self.secret_protector,
         )
 
     def resolve_provider(self) -> ModelProvider:
@@ -296,6 +298,7 @@ def build_services(
         tools=tools,
         provider=provider,
         provider_factory=provider_factory,
+        secret_protector=protector,
     )
 
 
@@ -423,6 +426,11 @@ def create_app(
         services.projects.get(project_id)
         try:
             source = services.data_sources.create(project_id, request.name, request.dsn)
+        except CredentialError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Secure storage is unavailable",
+            ) from exc
         except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,

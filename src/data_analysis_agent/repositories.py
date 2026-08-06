@@ -26,6 +26,7 @@ from data_analysis_agent.domain import (
     TaskStatus,
 )
 from data_analysis_agent.workspace import WorkspaceService
+from data_analysis_agent.model_config import SecretProtector
 
 
 class RepositoryError(RuntimeError):
@@ -46,6 +47,45 @@ class InvalidArtifactError(RepositoryError):
 
 class InvalidTaskTransition(RepositoryError):
     """Raised when a task state change violates the lifecycle."""
+
+
+class ProtectedMessageError(RepositoryError):
+    """Protected agent message content cannot be stored or recovered safely."""
+
+
+class ProtectedToolMessageRepository:
+    def __init__(self, connection: sqlite3.Connection, protector: SecretProtector) -> None:
+        self._connection = connection
+        self._lock = sqlite_connection_lock(connection)
+        self._protector = protector
+
+    @sqlite_connection_guarded
+    def store(self, message_id: str, content: str) -> None:
+        try:
+            protected = self._protector.protect(content)
+        except BaseException:
+            raise ProtectedMessageError("Protected tool message storage is unavailable") from None
+        try:
+            self._connection.execute(
+                "INSERT INTO protected_tool_message_payloads(message_id, protected_content, created_at) VALUES (?, ?, ?)",
+                (message_id, sqlite3.Binary(protected), utc_now()),
+            )
+            self._connection.commit()
+        except sqlite3.Error:
+            self._connection.rollback()
+            raise ProtectedMessageError("Protected tool message storage is unavailable") from None
+
+    @sqlite_connection_guarded
+    def get(self, message_id: str) -> str | None:
+        row = self._connection.execute(
+            "SELECT protected_content FROM protected_tool_message_payloads WHERE message_id = ?", (message_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return self._protector.unprotect(bytes(row["protected_content"]))
+        except BaseException:
+            raise ProtectedMessageError("Protected tool message recovery is unavailable") from None
 
 
 TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {

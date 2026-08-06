@@ -10,7 +10,12 @@ from data_analysis_agent.providers import (
     ModelRequest,
     ProviderError,
 )
-from data_analysis_agent.repositories import TaskRepository
+from data_analysis_agent.model_config import SecretProtector
+from data_analysis_agent.repositories import (
+    ProtectedMessageError,
+    ProtectedToolMessageRepository,
+    TaskRepository,
+)
 from data_analysis_agent.settings import Settings
 from data_analysis_agent.tools import ToolContext, ToolRegistry, ToolResult
 
@@ -30,11 +35,16 @@ class AgentRunner:
         provider: ModelProvider,
         tools: ToolRegistry,
         tasks: TaskRepository,
+        secret_protector: SecretProtector | None = None,
     ) -> None:
         self._settings = settings
         self._provider = provider
         self._tools = tools
         self._tasks = tasks
+        self._protected_messages = (
+            ProtectedToolMessageRepository(tasks._connection, secret_protector)
+            if secret_protector is not None else None
+        )
 
     def run(self, task_id: str) -> Task:
         task = self._tasks.get(task_id)
@@ -49,14 +59,10 @@ class AgentRunner:
         action_count = 0
         last_signature = ""
         repeated_count = 0
-        # Rich database SQL/results exist only for this live loop.  The durable
-        # conversation deliberately contains audit-safe summaries instead.
-        overlay: dict[str, str] = {}
-
         while action_count < self._settings.max_tool_actions:
             try:
-                response = self._provider.complete(self._build_request(task_id, overlay))
-            except ProviderError as exc:
+                response = self._provider.complete(self._build_request(task_id))
+            except (ProviderError, ProtectedMessageError) as exc:
                 return self._fail_task(task_id, "provider_error", str(exc))
 
             if response.text.strip():
@@ -91,16 +97,20 @@ class AgentRunner:
                     separators=(",", ":"),
                 ),
             )
-            overlay[tool_call_message.id] = json.dumps(
-                raw_tool_calls, ensure_ascii=False, separators=(",", ":")
-            )
+            if any(call.name == "query_database" for call in response.tool_calls):
+                if self._protected_messages is None:
+                    return self._fail_task(task_id, "message_protection_error", "Protected tool message storage is unavailable")
+                try:
+                    self._protected_messages.store(tool_call_message.id, json.dumps(raw_tool_calls, ensure_ascii=False, separators=(",", ":")))
+                except ProtectedMessageError:
+                    return self._fail_task(task_id, "message_protection_error", "Protected tool message storage is unavailable")
             self._tasks.append_event(
                 task_id,
                 "message.created",
                 {"message_id": tool_call_message.id, "role": tool_call_message.role},
             )
 
-            for call in response.tool_calls:
+            for call_index, call in enumerate(response.tool_calls):
                 action_count += 1
                 signature = json.dumps(
                     {"name": call.name, "arguments": call.arguments},
@@ -121,9 +131,20 @@ class AgentRunner:
                     )
 
                 result = self._tools.execute(call, context)
-                message = self._record_tool_result(task_id, result)
-                overlay[message.id] = _tool_result_json(result)
+                message = self._record_tool_result(task_id, result, call.name)
+                if call.name == "query_database":
+                    assert self._protected_messages is not None
+                    try:
+                        self._protected_messages.store(message.id, _tool_result_json(result))
+                    except ProtectedMessageError:
+                        return self._fail_task(task_id, "message_protection_error", "Protected tool message storage is unavailable")
                 if result.pauses_task:
+                    for cancelled in response.tool_calls[call_index + 1:]:
+                        self._record_tool_result(
+                            task_id,
+                            ToolResult(call_id=cancelled.id, success=False, output={}, error_category="cancelled_due_to_pause", message="Cancelled because an earlier tool call paused the task", retryable=False),
+                            cancelled.name,
+                        )
                     return self._tasks.get(task_id)
                 if action_count >= self._settings.max_tool_actions:
                     break
@@ -181,10 +202,10 @@ class AgentRunner:
             self._tasks.transition(task_id, TaskStatus.UNDERSTANDING)
         return self.run(task_id)
 
-    def _build_request(self, task_id: str, overlay: dict[str, str] | None = None) -> ModelRequest:
+    def _build_request(self, task_id: str) -> ModelRequest:
         task = self._tasks.get(task_id)
         messages = tuple(
-            ModelMessage(role=message.role, content=(overlay or {}).get(message.id, message.content))
+            ModelMessage(role=message.role, content=self._provider_content(message.id, message.content))
             for message in self._tasks.list_messages(task_id)
         )
         return ModelRequest(
@@ -194,8 +215,13 @@ class AgentRunner:
             tools=self._tools.schemas(),
         )
 
-    def _record_tool_result(self, task_id: str, result: ToolResult):
-        content = _safe_tool_result_json(result)
+    def _provider_content(self, message_id: str, safe_content: str) -> str:
+        if self._protected_messages is None:
+            return safe_content
+        return self._protected_messages.get(message_id) or safe_content
+
+    def _record_tool_result(self, task_id: str, result: ToolResult, tool_name: str):
+        content = _safe_tool_result_json(result, tool_name)
         message = self._tasks.add_message(task_id, "tool", content)
         self._tasks.append_event(
             task_id,
@@ -253,10 +279,10 @@ def _tool_result_json(result: ToolResult) -> str:
     return json.dumps(_tool_result_payload(result), ensure_ascii=False, separators=(",", ":"))
 
 
-def _safe_tool_result_json(result: ToolResult) -> str:
+def _safe_tool_result_json(result: ToolResult, tool_name: str) -> str:
     payload = _tool_result_payload(result)
     output = result.output if isinstance(result.output, dict) else {}
-    if "query_hash" not in output and "artifact_id" not in output:
+    if tool_name != "query_database":
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     payload["output"] = {key: output.get(key) for key in
                          ("status", "query_hash", "row_count", "risk", "artifact_id") if key in output}

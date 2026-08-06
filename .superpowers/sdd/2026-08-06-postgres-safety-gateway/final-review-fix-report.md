@@ -32,3 +32,13 @@
 Migration 4 is `CREATE TABLE IF NOT EXISTS` plus a recorded migration version, so rerunning after a missing version record is safe. The in-flight policy fence is intentionally source-scoped and has bounded stale recovery; a live process that exceeds twice its configured statement timeout can be treated as stale, so deployments should retain a timeout appropriate for their database/network envelope. The integration coverage deliberately does not discover a DSN or connect to any default/local database.
 
 Implementation commit: `93a502a`.
+
+## Round 2/5
+
+- **E:** migration 5 adds `protected_tool_message_payloads`, keyed by message id. Database assistant tool calls and tool results retain only safe summaries in `messages`; encrypted raw provider content is replayed on every request, including after approval resume. A pausing call emits `cancelled_due_to_pause` result envelopes for its unexecuted siblings.
+- **G:** source creation now converts any `protect()` failure to `CredentialError` without retaining the DSN or original exception; the POST route maps it to the fixed secure-storage 503.
+- **F/J:** unbounded index scans and unconstrained joins raise plan risk to at least medium; derived limits reach the driver. Column disambiguation is globally collision-free and settings reject row limits outside 1..10000.
+- **H:** the opt-in integration test now uses an explicit DSN only, creates uniquely named public/schema/sequence objects, invokes both driver and gateway behavior, and always drops the objects.
+- **A:** migrations 5/6 are replay-safe; migration 6 repairs the source foreign keys for earlier version-3/4 databases and fresh migration definitions include those FKs.
+
+Round-2 verification: focused agent/gateway tests passed (44); default suite passed (196) with the one explicit `TEST_POSTGRES_DSN` skip. No test DSN was present, so no live connection was made.

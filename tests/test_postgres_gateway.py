@@ -106,8 +106,8 @@ def test_restricted_query_uses_exact_one_time_approval_and_persists_csv(
     )
     assert fake_driver.queried_sql[-1] == (
         "SELECT region, customer_email FROM orders",
-        8_000,
-        1_001,
+        4_000,
+        501,
     )
 
     third = sql_gateway.execute(task.id, task.project_id, source.id, sql)
@@ -534,6 +534,11 @@ def _build_threaded_gateway(tmp_path, fake_driver, rules):
         created_at="now",
         updated_at="now",
     )
+    connection.execute(
+        "INSERT INTO data_sources(id, project_id, name, dialect, protected_dsn, policy_version, created_at, updated_at) VALUES (?, ?, ?, 'postgres', ?, 1, ?, ?)",
+        (source.id, project.id, source.name, b"test", "now", "now"),
+    )
+    connection.commit()
     sources = StaticSourceRepository(
         source,
         PolicySnapshot(
@@ -1072,6 +1077,11 @@ def test_concurrent_gateway_calls_cannot_exceed_shared_connection_budget(
         created_at="now",
         updated_at="now",
     )
+    connection.execute(
+        "INSERT INTO data_sources(id, project_id, name, dialect, protected_dsn, policy_version, created_at, updated_at) VALUES (?, ?, ?, 'postgres', ?, 1, ?, ?)",
+        (source.id, project.id, source.name, b"test", "now", "now"),
+    )
+    connection.commit()
     sources = StaticSourceRepository(
         source,
         PolicySnapshot(
@@ -1301,7 +1311,7 @@ def test_concurrent_registration_failure_never_deletes_successful_artifact(
     [
         (
             {"Plan": {"Total Cost": 42, "Plan Rows": 12, "Node Type": "Index Scan"}},
-            "low",
+                "medium",
         ),
         (
             {
@@ -1344,7 +1354,7 @@ def test_explain_risk_uses_cost_rows_scans_and_joins(settings, plan, expected) -
 
     assert risk.level == expected
     assert risk.total_cost == float(plan["Plan"]["Total Cost"])
-    if expected == "medium":
+    if risk.sequential_scans:
         assert risk.sequential_scans == 2
         assert risk.join_count == 1
 

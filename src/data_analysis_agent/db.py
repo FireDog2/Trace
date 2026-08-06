@@ -167,7 +167,7 @@ CREATE TABLE IF NOT EXISTS data_sources (
 
 CREATE TABLE IF NOT EXISTS data_access_policies (
     id TEXT PRIMARY KEY,
-    data_source_id TEXT NOT NULL,
+    data_source_id TEXT NOT NULL REFERENCES data_sources(id),
     table_name TEXT NOT NULL,
     column_name TEXT,
     access_level TEXT NOT NULL CHECK(
@@ -189,7 +189,7 @@ MIGRATION_4_SQL = """
 CREATE TABLE IF NOT EXISTS database_query_attempts (
     id TEXT PRIMARY KEY,
     task_id TEXT NOT NULL REFERENCES tasks(id),
-    data_source_id TEXT NOT NULL,
+    data_source_id TEXT NOT NULL REFERENCES data_sources(id),
     policy_version INTEGER NOT NULL,
     sql_hash TEXT NOT NULL,
     approval_id TEXT REFERENCES approvals(id),
@@ -198,6 +198,42 @@ CREATE TABLE IF NOT EXISTS database_query_attempts (
     started_at TEXT NOT NULL,
     completed_at TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_database_query_attempts_source_status
+ON database_query_attempts(data_source_id, status, started_at);
+"""
+
+MIGRATION_5_SQL = """
+CREATE TABLE IF NOT EXISTS protected_tool_message_payloads (
+    message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    protected_content BLOB NOT NULL,
+    created_at TEXT NOT NULL
+);
+"""
+
+# Repair version-3/4 tables created by the first final-review pass without
+# source foreign keys.  New databases already have the constraints above.
+MIGRATION_6_SQL = """
+CREATE TABLE data_access_policies_repaired (
+    id TEXT PRIMARY KEY,
+    data_source_id TEXT NOT NULL REFERENCES data_sources(id),
+    table_name TEXT NOT NULL, column_name TEXT,
+    access_level TEXT NOT NULL CHECK(access_level IN ('allowed','approval_required','denied')),
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    UNIQUE(data_source_id, table_name, column_name)
+);
+INSERT INTO data_access_policies_repaired SELECT * FROM data_access_policies;
+DROP TABLE data_access_policies;
+ALTER TABLE data_access_policies_repaired RENAME TO data_access_policies;
+CREATE TABLE database_query_attempts_repaired (
+    id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),
+    data_source_id TEXT NOT NULL REFERENCES data_sources(id), policy_version INTEGER NOT NULL,
+    sql_hash TEXT NOT NULL, approval_id TEXT REFERENCES approvals(id),
+    status TEXT NOT NULL CHECK(status IN ('in_flight','completed','failed')),
+    error_category TEXT, started_at TEXT NOT NULL, completed_at TEXT
+);
+INSERT INTO database_query_attempts_repaired SELECT * FROM database_query_attempts;
+DROP TABLE database_query_attempts;
+ALTER TABLE database_query_attempts_repaired RENAME TO database_query_attempts;
 CREATE INDEX IF NOT EXISTS idx_database_query_attempts_source_status
 ON database_query_attempts(data_source_id, status, started_at);
 """
@@ -255,4 +291,10 @@ def migrate(connection: sqlite3.Connection) -> None:
             "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
             (4, utc_now()),
         )
+    if 5 not in applied:
+        connection.executescript(MIGRATION_5_SQL)
+        connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (5, utc_now()))
+    if 6 not in applied:
+        connection.executescript(MIGRATION_6_SQL)
+        connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (6, utc_now()))
     connection.commit()
