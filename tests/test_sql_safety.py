@@ -308,6 +308,21 @@ def test_validator_continues_to_allow_unquoted_reviewed_builtins() -> None:
 
 @pytest.mark.parametrize(
     "sql",
+    (
+        "SELECT region FROM orders FOR UPDATE",
+        "WITH selected AS (SELECT region FROM orders FOR SHARE) SELECT * FROM selected",
+        "SELECT region FROM orders WHERE region = 'East' FOR NO KEY UPDATE",
+    ),
+)
+def test_validator_rejects_postgres_locking_clauses_everywhere(sql: str) -> None:
+    with pytest.raises(SqlValidationError) as error:
+        SqlAstValidator().validate(sql, CATALOG, POLICY)
+
+    assert error.value.code == "locking_clause_not_allowed"
+
+
+@pytest.mark.parametrize(
+    "sql",
     [
         "SELECT region::evil.custom_type FROM orders",
         "SELECT CAST(region AS custom_type) FROM orders",

@@ -199,6 +199,7 @@ class SqlAstValidator:
         statement = _parse_one_statement(sql)
         catalog_index = _catalog_index(catalog)
         _deny_nested_writes(statement)
+        _deny_locking_clauses(statement)
         _validate_safe_casts(statement)
         _validate_safe_functions(statement)
         _validate_catalog_tables(statement, catalog_index)
@@ -249,6 +250,14 @@ def _deny_nested_writes(statement: exp.Query) -> None:
             raise SqlValidationError(
                 "unsafe_statement", f"{denied_type.__name__} is denied"
             )
+
+
+def _deny_locking_clauses(statement: exp.Query) -> None:
+    if next(statement.find_all(exp.Lock), None) is not None:
+        raise SqlValidationError(
+            "locking_clause_not_allowed",
+            "PostgreSQL locking clauses are not allowed",
+        )
 
 
 def _validate_safe_functions(statement: exp.Query) -> None:

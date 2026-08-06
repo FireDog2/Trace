@@ -248,7 +248,11 @@ def build_services(
         connection,
         protector,
     )
-    data_sources = DataSourceRepository(connection, protector)
+    data_sources = DataSourceRepository(
+        connection,
+        protector,
+        attempt_stale_after_seconds=(settings.postgres_statement_timeout_ms / 1000) * 2,
+    )
     reports = ReportService(workspace, artifacts, tasks)
     sql_gateway = SqlSafetyGateway(
         connection=connection,

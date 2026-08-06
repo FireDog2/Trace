@@ -167,7 +167,7 @@ CREATE TABLE IF NOT EXISTS data_sources (
 
 CREATE TABLE IF NOT EXISTS data_access_policies (
     id TEXT PRIMARY KEY,
-    data_source_id TEXT NOT NULL REFERENCES data_sources(id),
+    data_source_id TEXT NOT NULL,
     table_name TEXT NOT NULL,
     column_name TEXT,
     access_level TEXT NOT NULL CHECK(
@@ -183,6 +183,23 @@ CREATE TABLE IF NOT EXISTS task_query_budget (
     attempts INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL
 );
+"""
+
+MIGRATION_4_SQL = """
+CREATE TABLE IF NOT EXISTS database_query_attempts (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id),
+    data_source_id TEXT NOT NULL,
+    policy_version INTEGER NOT NULL,
+    sql_hash TEXT NOT NULL,
+    approval_id TEXT REFERENCES approvals(id),
+    status TEXT NOT NULL CHECK(status IN ('in_flight', 'completed', 'failed')),
+    error_category TEXT,
+    started_at TEXT NOT NULL,
+    completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_database_query_attempts_source_status
+ON database_query_attempts(data_source_id, status, started_at);
 """
 
 
@@ -231,5 +248,11 @@ def migrate(connection: sqlite3.Connection) -> None:
         connection.execute(
             "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
             (3, utc_now()),
+        )
+    if 4 not in applied:
+        connection.executescript(MIGRATION_4_SQL)
+        connection.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+            (4, utc_now()),
         )
     connection.commit()

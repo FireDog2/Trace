@@ -31,7 +31,7 @@ def test_migrate_creates_versioned_core_tables(db_connection) -> None:
     } <= names
     assert db_connection.execute(
         "SELECT version FROM schema_migrations ORDER BY version"
-    ).fetchall() == [(1,), (2,), (3,)]
+    ).fetchall() == [(1,), (2,), (3,), (4,)]
 
 
 def test_data_source_migration_stores_encrypted_credentials_only(db_connection) -> None:
@@ -84,3 +84,24 @@ def test_data_source_migration_recovers_after_version_record_is_missing(
     assert db_connection.execute(
         "SELECT version FROM schema_migrations WHERE version = 3"
     ).fetchone() == (3,)
+
+
+def test_query_attempt_migration_is_replay_safe_and_records_durable_state(
+    db_connection,
+) -> None:
+    db_connection.execute("DELETE FROM schema_migrations WHERE version = 4")
+    db_connection.commit()
+
+    migrate(db_connection)
+
+    columns = {
+        row[1]
+        for row in db_connection.execute("PRAGMA table_info(database_query_attempts)")
+    }
+    assert {
+        "id", "task_id", "data_source_id", "policy_version", "sql_hash",
+        "approval_id", "status", "error_category", "started_at", "completed_at",
+    } <= columns
+    assert db_connection.execute(
+        "SELECT version FROM schema_migrations WHERE version = 4"
+    ).fetchone() == (4,)

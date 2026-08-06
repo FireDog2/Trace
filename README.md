@@ -100,6 +100,13 @@ npm --prefix web test -- --run
 npm --prefix web run build
 ```
 
+### Optional live PostgreSQL checks
+
+The normal suite does not connect to PostgreSQL. To run the opt-in checks against
+an explicitly supplied disposable test database, set `TEST_POSTGRES_DSN` and run
+`python -m pytest tests/test_postgres_integration.py -v`. The test never prints
+the DSN and skips cleanly when the variable is absent.
+
 端到端验收会导入经营数据、执行分析代码、生成派生 CSV 和图表，并发布含有效证据关系的 Markdown 报告。
 
 ## MVP 边界

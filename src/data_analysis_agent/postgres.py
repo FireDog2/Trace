@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import csv
 import io
 import re
@@ -7,8 +8,12 @@ import sqlite3
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import date, datetime, time
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
+from uuid import uuid4
+from uuid import UUID
 
 import psycopg
 
@@ -63,6 +68,8 @@ class ExplainRisk:
     estimated_rows: int
     sequential_scans: int
     join_count: int
+    missing_filter: bool
+    missing_join_constraint: bool
     reason: str
 
 
@@ -95,6 +102,16 @@ class ExplainRiskPolicy:
             for node in nodes
         )
         join_count = sum(_is_join_node(node) for node in nodes)
+        missing_filter = any(
+            str(node.get("Node Type", "")).lower() in {"seq scan", "index scan"}
+            and not any(key in node for key in ("Filter", "Index Cond", "Recheck Cond"))
+            for node in nodes
+        )
+        missing_join_constraint = any(
+            _is_join_node(node)
+            and not any(key in node for key in ("Hash Cond", "Merge Cond", "Join Filter"))
+            for node in nodes
+        )
 
         if (
             total_cost >= self._settings.postgres_extreme_cost
@@ -130,6 +147,8 @@ class ExplainRiskPolicy:
             estimated_rows=estimated_rows,
             sequential_scans=sequential_scans,
             join_count=join_count,
+            missing_filter=missing_filter,
+            missing_join_constraint=missing_join_constraint,
             reason=reason,
         )
 
@@ -156,10 +175,13 @@ class PsycopgDriver:
                         lock_timeout_ms=self._lock_timeout_ms,
                     )
                     cursor.execute(
-                        "SELECT table_name, column_name "
-                        "FROM information_schema.columns "
-                        "WHERE table_schema = ANY (current_schemas(false)) "
-                        "ORDER BY table_name, ordinal_position"
+                        "SELECT c.relname, a.attname "
+                        "FROM pg_catalog.pg_attribute AS a "
+                        "JOIN pg_catalog.pg_class AS c ON c.oid = a.attrelid "
+                        "WHERE a.attnum > 0 AND NOT a.attisdropped "
+                        "AND c.relkind IN ('r', 'p', 'v', 'm') "
+                        "AND pg_catalog.pg_table_is_visible(c.oid) "
+                        "ORDER BY c.relname, a.attnum"
                     )
                     rows = cursor.fetchall()
         catalog: dict[str, list[str]] = {}
@@ -385,31 +407,46 @@ class SqlSafetyGateway:
                             query_hash=validated.sql_hash,
                             risk=risk,
                         )
+                    attempt_id = self._create_attempt_in_transaction(
+                        task_id=task_id,
+                        data_source_id=data_source_id,
+                        policy_version=policy.version,
+                        sql_hash=validated.sql_hash,
+                        approval_id=(
+                            resolution.approval.id
+                            if approval_reason is not None and resolution.status == "authorized"
+                            else None
+                        ),
+                    )
+                    # The policy check, approval consumption, budget increment, and
+                    # in-flight record must survive every post-dispatch outcome.
+                    self._connection.commit()
                     try:
+                        timeout_ms, row_limit, byte_limit = _execution_limits(
+                            self.settings, risk.level
+                        )
                         raw_columns, raw_rows = self.driver.query(
                             credentials.dsn,
                             validated.normalized_sql,
-                            statement_timeout_ms=(
-                                self.settings.postgres_statement_timeout_ms
-                            ),
-                            row_limit=self.settings.postgres_max_rows,
+                            statement_timeout_ms=timeout_ms,
+                            row_limit=row_limit + 1,
                         )
                     except BaseException as exc:
-                        self._connection.rollback()
+                        self._finish_attempt(attempt_id, "failed", _driver_error(exc).error_category)
                         return _driver_error(
                             exc,
                             query_hash=validated.sql_hash,
                             risk=risk,
                         )
-                    columns = tuple(str(column) for column in raw_columns)
+                    columns = _disambiguate_columns(tuple(str(column) for column in raw_columns))
                     rows = tuple(tuple(row) for row in raw_rows)
-                    if len(rows) > self.settings.postgres_max_rows:
-                        self._connection.rollback()
+                    if len(rows) > row_limit:
+                        self._finish_attempt(attempt_id, "failed", "result_limit")
                         return _result_limit(validated.sql_hash, risk)
                     try:
                         serialized = _csv_bytes(columns, rows)
                     except (csv.Error, UnicodeError, TypeError, ValueError):
-                        self._connection.rollback()
+                        self._finish_attempt(attempt_id, "failed", "result_serialization_error")
                         return SqlGatewayOutcome(
                             status="retryable_error",
                             query_hash=validated.sql_hash,
@@ -420,8 +457,8 @@ class SqlSafetyGateway:
                             ),
                             retryable=True,
                         )
-                    if len(serialized) > self.settings.postgres_max_result_bytes:
-                        self._connection.rollback()
+                    if len(serialized) > byte_limit:
+                        self._finish_attempt(attempt_id, "failed", "result_limit")
                         return _result_limit(validated.sql_hash, risk)
 
                     try:
@@ -432,7 +469,7 @@ class SqlSafetyGateway:
                         path.parent.mkdir(parents=True, exist_ok=True)
                         path.write_bytes(serialized)
                     except OSError:
-                        self._connection.rollback()
+                        self._finish_attempt(attempt_id, "failed", "artifact_write_error")
                         if path is not None:
                             with suppress(OSError):
                                 path.unlink(missing_ok=True)
@@ -449,6 +486,7 @@ class SqlSafetyGateway:
                         )
 
                     try:
+                        self._connection.execute("BEGIN IMMEDIATE")
                         artifact = self.artifacts.register_in_transaction(
                             project_id=project_id,
                             task_id=task_id,
@@ -463,8 +501,10 @@ class SqlSafetyGateway:
                             producer_execution_id=None,
                             input_artifact_ids=(),
                         )
+                        self._connection.commit()
                     except Exception:
                         self._connection.rollback()
+                        self._finish_attempt(attempt_id, "failed", "artifact_registration_error")
                         with suppress(OSError):
                             path.unlink(missing_ok=True)
                         return SqlGatewayOutcome(
@@ -480,7 +520,10 @@ class SqlSafetyGateway:
                         )
 
                     preview = tuple(
-                        dict(zip(columns, row, strict=True))
+                        {
+                            column: _json_safe_value(value)
+                            for column, value in zip(columns, row, strict=True)
+                        }
                         for row in rows[: min(len(rows), 20)]
                     )
                     outcome = SqlGatewayOutcome(
@@ -492,7 +535,7 @@ class SqlSafetyGateway:
                         preview=preview,
                         row_count=len(rows),
                     )
-                    self._connection.commit()
+                    self._finish_attempt(attempt_id, "completed", None)
                     return outcome
             except BaseException:
                 self._connection.rollback()
@@ -524,6 +567,39 @@ class SqlSafetyGateway:
             except Exception:
                 self._connection.rollback()
                 raise
+
+    def _create_attempt_in_transaction(
+        self,
+        *,
+        task_id: str,
+        data_source_id: str,
+        policy_version: int,
+        sql_hash: str,
+        approval_id: str | None,
+    ) -> str:
+        attempt_id = str(uuid4())
+        self._connection.execute(
+            "INSERT INTO database_query_attempts("
+            "id, task_id, data_source_id, policy_version, sql_hash, approval_id, "
+            "status, error_category, started_at, completed_at"
+            ") VALUES (?, ?, ?, ?, ?, ?, 'in_flight', NULL, ?, NULL)",
+            (attempt_id, task_id, data_source_id, policy_version, sql_hash, approval_id, utc_now()),
+        )
+        return attempt_id
+
+    def _finish_attempt(
+        self,
+        attempt_id: str,
+        status: str,
+        error_category: str | None,
+    ) -> None:
+        with self._metadata_lock:
+            self._connection.execute(
+                "UPDATE database_query_attempts SET status = ?, error_category = ?, "
+                "completed_at = ? WHERE id = ? AND status = 'in_flight'",
+                (status, error_category, utc_now(), attempt_id),
+            )
+            self._connection.commit()
 
     def _consume_budget_in_transaction(self, task_id: str) -> bool:
         row = self._connection.execute(
@@ -589,6 +665,12 @@ def _configure_read_only(
     lock_timeout_ms: int,
 ) -> None:
     cursor.execute("SET TRANSACTION READ ONLY")
+    # set_config is parameterized; search_path is fixed so the catalog, explain,
+    # and query phases resolve precisely the same unqualified identities.
+    cursor.execute(
+        "SELECT set_config('search_path', %s, true)",
+        ("pg_catalog, public",),
+    )
     cursor.execute(
         "SELECT set_config('statement_timeout', %s, true)",
         (str(statement_timeout_ms),),
@@ -651,6 +733,20 @@ def _approval_reason(validated: ValidatedSql, risk: ExplainRisk) -> str | None:
     return None
 
 
+def _execution_limits(settings: Settings, risk: str) -> tuple[int, int, int]:
+    if risk == "high":
+        divisor = 4
+    elif risk == "medium":
+        divisor = 2
+    else:
+        divisor = 1
+    return (
+        max(1, settings.postgres_statement_timeout_ms // divisor),
+        max(1, settings.postgres_max_rows // divisor),
+        max(1, settings.postgres_max_result_bytes // divisor),
+    )
+
+
 def _csv_bytes(
     columns: tuple[str, ...],
     rows: tuple[tuple[Any, ...], ...],
@@ -663,6 +759,40 @@ def _csv_bytes(
             raise ValueError("PostgreSQL result row does not match its columns")
         writer.writerow(row)
     return buffer.getvalue().encode("utf-8")
+
+
+def _disambiguate_columns(columns: tuple[str, ...]) -> tuple[str, ...]:
+    seen: dict[str, int] = {}
+    output: list[str] = []
+    for column in columns:
+        count = seen.get(column, 0) + 1
+        seen[column] = count
+        output.append(column if count == 1 else f"{column}_{count}")
+    return tuple(output)
+
+
+def _json_safe_value(value: Any, *, depth: int = 0) -> Any:
+    """Return a bounded, deterministic JSON representation of a PostgreSQL value."""
+    if depth >= 8:
+        return "<max-depth>"
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, datetime | date | time):
+        return value.isoformat()
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, bytes | bytearray | memoryview):
+        return "base64:" + base64.b64encode(bytes(value)).decode("ascii")
+    if isinstance(value, Mapping):
+        return {
+            str(key): _json_safe_value(item, depth=depth + 1)
+            for key, item in value.items()
+        }
+    if isinstance(value, tuple | list):
+        return [_json_safe_value(item, depth=depth + 1) for item in value]
+    return str(value)
 
 
 def _result_limit(sql_hash: str, risk: ExplainRisk) -> SqlGatewayOutcome:

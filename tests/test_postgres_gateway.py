@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import replace
+from datetime import date, datetime, time, timezone
+from decimal import Decimal
 from pathlib import Path
 import sqlite3
 import threading
+from uuid import UUID
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -103,7 +107,7 @@ def test_restricted_query_uses_exact_one_time_approval_and_persists_csv(
     assert fake_driver.queried_sql[-1] == (
         "SELECT region, customer_email FROM orders",
         8_000,
-        1_000,
+        1_001,
     )
 
     third = sql_gateway.execute(task.id, task.project_id, source.id, sql)
@@ -311,6 +315,26 @@ def test_timeout_is_structured_retryable_and_redacts_credentials(
     assert "postgresql://" not in repr(outcome)
 
 
+def test_postgres_preview_recursively_normalizes_json_unsafe_values(
+    sql_gateway, source_repository, fake_driver, task
+) -> None:
+    source = _create_source(source_repository, task.project_id)
+    fake_driver.columns = ("value",)
+    fake_driver.rows = (({
+        "decimal": Decimal("2.50"), "date": date(2026, 8, 6),
+        "time": time(12, 30), "datetime": datetime(2026, 8, 6, tzinfo=timezone.utc),
+        "uuid": UUID(int=1), "bytes": bytes((0, 255)), "nested": (Decimal("1"),),
+    },),)
+
+    outcome = sql_gateway.execute(task.id, task.project_id, source.id, "SELECT region FROM orders")
+
+    assert json.dumps(outcome.preview)
+    value = outcome.preview[0]["value"]
+    assert value["decimal"] == "2.50"
+    assert value["bytes"] == "base64:AP8="
+    assert value["nested"] == ["1"]
+
+
 def test_result_byte_limit_returns_structured_error_without_artifact(
     sql_gateway,
     db_connection,
@@ -334,8 +358,8 @@ def test_result_byte_limit_returns_structured_error_without_artifact(
     assert outcome.status == "retryable_error"
     assert outcome.error_category == "result_limit"
     assert outcome.retryable is True
-    assert approval_repository.get(first.approval_id).status == "approved"
-    assert _budget_attempts(db_connection, task.id) == before_attempts
+    assert approval_repository.get(first.approval_id).status == "consumed"
+    assert _budget_attempts(db_connection, task.id) == before_attempts + 1
     assert artifact_repository.list_for_task(task.id) == ()
 
 
@@ -369,8 +393,8 @@ def test_artifact_write_error_is_structured_and_removes_reserved_path(
     assert outcome.status == "retryable_error"
     assert outcome.error_category == "artifact_write_error"
     assert outcome.retryable is True
-    assert approval_repository.get(first.approval_id).status == "approved"
-    assert _budget_attempts(db_connection, task.id) == before_attempts
+    assert approval_repository.get(first.approval_id).status == "consumed"
+    assert _budget_attempts(db_connection, task.id) == before_attempts + 1
     assert artifact_repository.list_for_task(task.id) == ()
     derived = workspace.resolve_inside(task.project_id, "derived")
     assert tuple(derived.glob("postgres-query-*.csv")) == ()
@@ -718,8 +742,8 @@ def test_result_row_limit_rolls_back_budget_and_approved_grant(
 
     assert outcome.status == "retryable_error"
     assert outcome.error_category == "result_limit"
-    assert state.approvals.get(first.approval_id).status == "approved"
-    assert _budget_attempts(state.connection, state.task.id) == before_attempts
+    assert state.approvals.get(first.approval_id).status == "consumed"
+    assert _budget_attempts(state.connection, state.task.id) == before_attempts + 1
     assert state.artifacts.list_for_task(state.task.id) == ()
     state.connection.close()
 
@@ -750,8 +774,8 @@ def test_result_serialization_error_rolls_back_budget_and_approved_grant(
 
     assert outcome.status == "retryable_error"
     assert outcome.error_category == "result_serialization_error"
-    assert state.approvals.get(first.approval_id).status == "approved"
-    assert _budget_attempts(state.connection, state.task.id) == before_attempts
+    assert state.approvals.get(first.approval_id).status == "consumed"
+    assert _budget_attempts(state.connection, state.task.id) == before_attempts + 1
     assert state.artifacts.list_for_task(state.task.id) == ()
     state.connection.close()
 
@@ -782,8 +806,8 @@ def test_artifact_registration_error_rolls_back_metadata_and_removes_file(
     assert outcome.status == "retryable_error"
     assert outcome.error_category == "artifact_registration_error"
     assert outcome.retryable is True
-    assert state.approvals.get(first.approval_id).status == "approved"
-    assert _budget_attempts(state.connection, state.task.id) == before_attempts
+    assert state.approvals.get(first.approval_id).status == "consumed"
+    assert _budget_attempts(state.connection, state.task.id) == before_attempts + 1
     assert state.artifacts.list_for_task(state.task.id) == ()
     derived = state.workspace.resolve_inside(state.project.id, "derived")
     assert tuple(derived.glob("postgres-query-*.csv")) == ()
@@ -857,8 +881,8 @@ def test_query_failure_rolls_back_budget_and_approved_grant(
 
     assert outcome.status == "retryable_error"
     assert outcome.error_category == expected_category
-    assert _budget_attempts(state.connection, state.task.id) == before_attempts
-    assert state.approvals.get(first.approval_id).status == "approved"
+    assert _budget_attempts(state.connection, state.task.id) == before_attempts + 1
+    assert state.approvals.get(first.approval_id).status == "consumed"
     state.connection.close()
 
 
@@ -911,13 +935,31 @@ def test_cross_connection_policy_replacement_waits_for_query_fence(
     )
 
     assert outcome.status == "succeeded"
-    assert blocked_during_query == [True]
+    assert blocked_during_query == [False]
     assert replacement_done.wait(timeout=5)
     for thread in replacement_threads:
         thread.join(timeout=5)
-    assert replacement_errors == []
-    assert replacement_sources.get_public(state.source.id).policy_version == 3
+    assert len(replacement_errors) == 1
+    assert replacement_sources.get_public(state.source.id).policy_version == 2
     replacement_connection.close()
+    state.connection.close()
+
+
+def test_policy_replacement_recovers_a_stale_durable_attempt(tmp_path, fake_driver) -> None:
+    state = _build_real_gateway(tmp_path, fake_driver)
+    state.connection.execute(
+        "INSERT INTO database_query_attempts(id, task_id, data_source_id, policy_version, sql_hash, approval_id, status, error_category, started_at, completed_at) "
+        "VALUES ('stale', ?, ?, 2, 'hash', NULL, 'in_flight', NULL, '2000-01-01T00:00:00+00:00', NULL)",
+        (state.task.id, state.source.id),
+    )
+    state.connection.commit()
+
+    state.sources.replace_policies(state.source.id, {("orders", None): AccessLevel.DENIED})
+
+    row = state.connection.execute(
+        "SELECT status, error_category FROM database_query_attempts WHERE id = 'stale'"
+    ).fetchone()
+    assert tuple(row) == ("failed", "stale_attempt")
     state.connection.close()
 
 
@@ -1384,7 +1426,7 @@ class SemanticPostgresConnection:
         elif sql.startswith("SELECT * FROM ("):
             self.query_target = sql
             self.query_limit = parameters[0]
-        elif "information_schema.columns" in sql:
+        elif "pg_catalog.pg_attribute" in sql:
             self.rows = (
                 ("orders", "region"),
                 ("orders", "amount"),
@@ -1432,6 +1474,7 @@ def test_psycopg_driver_uses_read_only_parameterized_timeouts_and_safe_wrappers(
     assert explain_connection.local_settings == {
         "statement_timeout": "8765",
         "lock_timeout": "1234",
+        "search_path": "pg_catalog, public",
     }
     assert explain_connection.explain_target == "SELECT region FROM orders"
     assert plan == {"Plan": {"Total Cost": 5, "Plan Rows": 1}}
@@ -1439,6 +1482,7 @@ def test_psycopg_driver_uses_read_only_parameterized_timeouts_and_safe_wrappers(
     assert query_connection.local_settings == {
         "statement_timeout": "4321",
         "lock_timeout": "1234",
+        "search_path": "pg_catalog, public",
     }
     assert query_connection.query_target == (
         "SELECT * FROM (SELECT region, amount FROM orders) AS safe_query LIMIT %s"

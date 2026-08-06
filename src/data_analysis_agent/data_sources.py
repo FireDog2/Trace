@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
@@ -66,11 +67,14 @@ class DataSourceRepository:
         self,
         connection: sqlite3.Connection,
         secret_protector: SecretProtector,
+        *,
+        attempt_stale_after_seconds: float = 16.0,
     ) -> None:
         connection.row_factory = sqlite3.Row
         self._connection = connection
         self._lock = sqlite_connection_lock(connection)
         self._secret_protector = secret_protector
+        self._attempt_stale_after = timedelta(seconds=attempt_stale_after_seconds)
 
     @sqlite_connection_guarded
     def create(self, project_id: str, name: str, dsn: str) -> DataSource:
@@ -148,6 +152,16 @@ class DataSourceRepository:
             self._connection.execute("BEGIN IMMEDIATE")
             if self._public_row(data_source_id) is None:
                 raise RecordNotFoundError(f"Data source not found: {data_source_id}")
+            self._recover_stale_attempts_in_transaction(data_source_id)
+            active_attempt = self._connection.execute(
+                "SELECT id FROM database_query_attempts WHERE data_source_id = ? "
+                "AND status = 'in_flight' LIMIT 1",
+                (data_source_id,),
+            ).fetchone()
+            if active_attempt is not None:
+                raise RepositoryError(
+                    "Cannot replace data-access policy while a query is in flight"
+                )
             self._connection.execute(
                 "DELETE FROM data_access_policies WHERE data_source_id = ?",
                 (data_source_id,),
@@ -218,6 +232,20 @@ class DataSourceRepository:
             "FROM data_sources WHERE id = ?",
             (data_source_id,),
         ).fetchone()
+
+    def _recover_stale_attempts_in_transaction(self, data_source_id: str) -> None:
+        """Fail only attempts older than two configured statement timeouts.
+
+        This bounded recovery prevents a process crash from permanently fencing
+        policy changes while preserving the policy fence for a live dispatch.
+        """
+        cutoff = (datetime.now(UTC) - self._attempt_stale_after).isoformat()
+        self._connection.execute(
+            "UPDATE database_query_attempts SET status = 'failed', "
+            "error_category = 'stale_attempt', completed_at = ? "
+            "WHERE data_source_id = ? AND status = 'in_flight' AND started_at <= ?",
+            (utc_now(), data_source_id, cutoff),
+        )
 
 
 def _data_source_from_row(row: sqlite3.Row) -> DataSource:
