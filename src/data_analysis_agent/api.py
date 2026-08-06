@@ -57,7 +57,13 @@ from data_analysis_agent.repositories import (
 from data_analysis_agent.settings import Settings
 from data_analysis_agent.tools import ToolRegistry, build_tool_registry
 from data_analysis_agent.team import AgentRole, TeamManager, TeamRepository, TeammateRunner
-from data_analysis_agent.tracing import AnalysisRun, TraceEvent, TraceRecorder, TraceRepository
+from data_analysis_agent.tracing import (
+    AnalysisRun,
+    TraceContext,
+    TraceEvent,
+    TraceRecorder,
+    TraceRepository,
+)
 from data_analysis_agent.skills import SkillCandidate, SkillCandidateRepository, WorkflowCurator
 from data_analysis_agent.workspace import WorkspaceError, WorkspaceService
 
@@ -310,6 +316,7 @@ def _build_services(
         attempt_stale_after_seconds=(settings.postgres_statement_timeout_ms / 1000) * 2,
     )
     reports = ReportService(workspace, artifacts, tasks)
+    traces = TraceRepository(connection)
     sql_gateway = SqlSafetyGateway(
         connection=connection,
         settings=settings,
@@ -340,11 +347,11 @@ def _build_services(
         permission_policy=PermissionPolicy(),
         approvals=approvals,
         sql_gateway=sql_gateway,
+        trace_recorder=TraceRecorder(traces),
         include_coordination_tools=True,
         include_database_query=not with_team_manager,
     )
     team_repository = TeamRepository(connection, tasks.append_event)
-    traces = TraceRepository(connection)
     skill_candidates = SkillCandidateRepository(connection)
     services = AppServices(
         settings=settings,
@@ -389,6 +396,7 @@ def _build_services(
                     repository=worker.team_repository,
                     cancel_event=cancel_event,
                     secret_protector=protector,
+                    traces=getattr(worker, "traces", None),
                 ).run(run_id)
             finally:
                 if worker is not None:
@@ -815,6 +823,21 @@ def create_app(
             "approval.decided",
             {"approval_id": approval.id, "status": approval.status},
         )
+        runs = services.traces.list_runs(approval.task_id)
+        if runs:
+            try:
+                services.trace_recorder.event(
+                    TraceContext(runs[-1].id, approval.task_id),
+                    "approval.decided",
+                    "completed",
+                    {"approval_id": approval.id, "status": approval.status},
+                )
+            except Exception:
+                services.tasks.append_event(
+                    approval.task_id,
+                    "trace.recording_failed",
+                    {"event_type": "approval.decided"},
+                )
         if request.approved:
             assert resolved_provider is not None
             background_tasks.add_task(

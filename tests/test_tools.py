@@ -21,6 +21,7 @@ from data_analysis_agent.tools import (
 )
 from data_analysis_agent.execution import QueryTimeoutError
 from data_analysis_agent.team import AgentRole, TeamRepository
+from data_analysis_agent.tracing import TraceRecorder, TraceRepository
 
 
 def test_registry_exposes_exact_mvp_tool_set(tool_registry) -> None:
@@ -150,6 +151,14 @@ def test_query_database_returns_structured_gateway_outcome(
         permission_policy=PermissionPolicy(),
         approvals=approval_repository,
         sql_gateway=gateway,
+        trace_recorder=TraceRecorder(TraceRepository(db_connection)),
+    )
+
+    analysis_run = TraceRepository(db_connection).start_run(tool_context.task_id)
+    traced_context = ToolContext(
+        project_id=tool_context.project_id,
+        task_id=tool_context.task_id,
+        run_id=analysis_run.id,
     )
 
     result = database_tool_registry.execute(
@@ -158,7 +167,7 @@ def test_query_database_returns_structured_gateway_outcome(
             name="query_database",
             arguments={"data_source_id": source.id, "sql": "SELECT region FROM orders"},
         ),
-        tool_context,
+        traced_context,
     )
 
     assert result.success is True
@@ -174,6 +183,11 @@ def test_query_database_returns_structured_gateway_outcome(
         "data_source_id_hash": hashlib.sha256(source.id.encode("utf-8")).hexdigest(),
         "sql_hash": hashlib.sha256("SELECT region FROM orders".encode("utf-8")).hexdigest(),
     }
+    sql_events = TraceRepository(db_connection).events_for_run(analysis_run.id)
+    assert [event.event_type for event in sql_events] == [
+        "sql.validated", "sql.explained", "sql.executed"
+    ]
+    assert sql_events[-1].artifact_ids == (result.output["artifact_id"],)
 
 
 def test_inspect_dataset_tool_returns_real_profile(

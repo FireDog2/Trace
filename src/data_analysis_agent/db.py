@@ -318,6 +318,39 @@ CREATE TABLE IF NOT EXISTS skill_candidates (
 );
 """
 
+MIGRATION_13_SQL = """
+CREATE TABLE agent_runs_v13 (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK(role IN ('knowledge', 'sql', 'report', 'curator')),
+    objective TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN (
+        'created', 'working', 'waiting', 'completed', 'failed', 'cancelled'
+    )),
+    result_json TEXT, error_category TEXT, error_message TEXT,
+    cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancel_requested IN (0, 1)),
+    created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT,
+    turns_used INTEGER NOT NULL DEFAULT 0 CHECK(turns_used >= 0),
+    deadline_at TEXT, worker_token TEXT, worker_claimed_at TEXT,
+    trace_run_id TEXT REFERENCES analysis_runs(id),
+    parent_event_id TEXT REFERENCES trace_events(id)
+);
+INSERT INTO agent_runs_v13(
+    id, task_id, role, objective, status, result_json, error_category,
+    error_message, cancel_requested, created_at, started_at, completed_at,
+    turns_used, deadline_at, worker_token, worker_claimed_at,
+    trace_run_id, parent_event_id
+)
+SELECT id, task_id, role, objective, status, result_json, error_category,
+       error_message, cancel_requested, created_at, started_at, completed_at,
+       turns_used, deadline_at, worker_token, worker_claimed_at, NULL, NULL
+FROM agent_runs;
+DROP TABLE agent_runs;
+ALTER TABLE agent_runs_v13 RENAME TO agent_runs;
+CREATE INDEX IF NOT EXISTS idx_agent_runs_task_status_created
+ON agent_runs(task_id, status, created_at);
+"""
+
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
@@ -445,6 +478,16 @@ def migrate(connection: sqlite3.Connection) -> None:
     if 12 not in applied:
         connection.executescript(MIGRATION_12_SQL)
         connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (12, utc_now()))
+    if 13 not in applied:
+        connection.commit()
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(agent_runs)")}
+        if not {"trace_run_id", "parent_event_id"} <= columns:
+            connection.execute("PRAGMA foreign_keys = OFF")
+            try:
+                connection.executescript(MIGRATION_13_SQL)
+            finally:
+                connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (13, utc_now()))
     connection.execute("PRAGMA foreign_keys = ON")
     connection.commit()
 

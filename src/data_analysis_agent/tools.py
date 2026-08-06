@@ -29,6 +29,7 @@ from data_analysis_agent.team_types import AgentRole
 
 if TYPE_CHECKING:
     from data_analysis_agent.team import TeamManager, TeamRepository
+    from data_analysis_agent.tracing import TraceRecorder
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +52,7 @@ class ToolContext:
     task_id: str
     agent_id: str | None = None
     run_id: str | None = None
+    parent_event_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -387,10 +389,47 @@ def build_tool_registry(
     permission_policy: PermissionPolicy,
     approvals: ApprovalRepository,
     sql_gateway: SqlSafetyGateway | None = None,
+    trace_recorder: "TraceRecorder | None" = None,
     include_coordination_tools: bool = False,
     include_database_query: bool = True,
 ) -> ToolRegistry:
     coordinator: dict[str, Any] = {}
+
+    def trace_sql(
+        context: ToolContext,
+        event_type: str,
+        status: str,
+        payload: dict[str, Any],
+        *,
+        artifact_ids: tuple[str, ...] = (),
+        error_category: str | None = None,
+    ) -> None:
+        if trace_recorder is None or context.run_id is None:
+            return
+        from data_analysis_agent.tracing import TraceContext
+        try:
+            trace_recorder.event(
+                TraceContext(
+                    context.run_id,
+                    context.task_id,
+                    agent_id=context.agent_id,
+                    parent_event_id=context.parent_event_id,
+                ),
+                event_type,
+                status,
+                payload,
+                artifact_ids=artifact_ids,
+                error_category=error_category,
+            )
+        except Exception:
+            try:
+                tasks.append_event(
+                    context.task_id,
+                    "trace.recording_failed",
+                    {"event_type": event_type, "agent_id": context.agent_id},
+                )
+            except Exception:
+                pass
     def inspect_workspace(
         arguments: ToolInput,
         context: ToolContext,
@@ -469,6 +508,52 @@ def build_tool_registry(
             arguments.data_source_id,
             arguments.sql,
         )
+        if outcome.query_hash is not None:
+            trace_sql(
+                context,
+                "sql.validated",
+                "completed",
+                {"sql_hash": outcome.query_hash},
+            )
+        if outcome.risk is not None:
+            trace_sql(
+                context,
+                "sql.explained",
+                "completed",
+                {
+                    "sql_hash": outcome.query_hash,
+                    "risk": outcome.risk.level,
+                    "total_cost": outcome.risk.total_cost,
+                    "estimated_rows": outcome.risk.estimated_rows,
+                },
+            )
+        if outcome.status == "approval_required":
+            trace_sql(
+                context,
+                "approval.required",
+                "waiting",
+                {"approval_id": outcome.approval_id, "sql_hash": outcome.query_hash},
+            )
+        elif outcome.status == "succeeded":
+            trace_sql(
+                context,
+                "sql.executed",
+                "completed",
+                {
+                    "sql_hash": outcome.query_hash,
+                    "row_count": outcome.row_count,
+                    "risk": outcome.risk.level if outcome.risk else None,
+                },
+                artifact_ids=(outcome.artifact_id,) if outcome.artifact_id else (),
+            )
+        else:
+            trace_sql(
+                context,
+                "sql.executed",
+                "failed",
+                {"sql_hash": outcome.query_hash, "status": outcome.status},
+                error_category=outcome.error_category,
+            )
         if outcome.status == "succeeded":
             return HandlerResult(
                 {
@@ -608,9 +693,25 @@ def build_tool_registry(
 
     def spawn_teammate(arguments: ToolInput, context: ToolContext) -> HandlerResult:
         from data_analysis_agent.team import AgentRole, TeamCapacityError
+        from data_analysis_agent.tracing import TraceContext
         assert isinstance(arguments, SpawnTeammateInput)
         try:
-            run = coordinator["manager"].spawn(context.task_id, arguments.role, arguments.objective)
+            trace_context = (
+                TraceContext(
+                    context.run_id, context.task_id, agent_id=context.agent_id,
+                    parent_event_id=context.parent_event_id,
+                )
+                if context.run_id else None
+            )
+            if trace_context is None:
+                run = coordinator["manager"].spawn(
+                    context.task_id, arguments.role, arguments.objective
+                )
+            else:
+                run = coordinator["manager"].spawn(
+                    context.task_id, arguments.role, arguments.objective,
+                    trace_context=trace_context,
+                )
         except (ValueError, TeamCapacityError):
             raise ToolHandlerError("Teammate capacity is unavailable", category="permission_denied", retryable=False) from None
         return HandlerResult({"agent_id": run.id, "role": run.role.value, "status": run.status.value})

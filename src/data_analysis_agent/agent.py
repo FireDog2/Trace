@@ -72,11 +72,30 @@ class AgentRunner:
         if owns_trace:
             run = self._traces.start_run(task_id)
             trace_context = TraceContext(run.id, task_id)
-        def trace(event_type: str, status: str, payload: dict[str, object]) -> None:
+        def trace(
+            event_type: str, status: str, payload: dict[str, object], **kwargs: object
+        ):
             if trace_context is not None and self._trace_recorder is not None:
-                self._trace_recorder.event(trace_context, event_type, status, payload)
+                try:
+                    return self._trace_recorder.event(
+                        trace_context, event_type, status, payload, **kwargs
+                    )
+                except Exception:
+                    try:
+                        self._tasks.append_event(
+                            task_id,
+                            "trace.recording_failed",
+                            {"event_type": event_type},
+                        )
+                    except Exception:
+                        pass
+            return None
         trace("agent.started", "running", {"role": "lead"})
-        context = ToolContext(project_id=task.project_id, task_id=task.id)
+        context = ToolContext(
+            project_id=task.project_id,
+            task_id=task.id,
+            run_id=trace_context.run_id if trace_context else None,
+        )
         action_count = 0
         recovery = RecoveryState(
             RecoveryPolicy(max_attempts=self._settings.max_tool_attempts)
@@ -156,8 +175,12 @@ class AgentRunner:
                         "The same tool call failed to make progress",
                     )
 
-                trace("tool.started", "running", {"tool": call.name})
-                result = self._tools.execute(call, context)
+                tool_event = trace("tool.started", "running", {"tool": call.name})
+                call_context = replace(
+                    context,
+                    parent_event_id=tool_event.id if tool_event is not None else None,
+                )
+                result = self._tools.execute(call, call_context)
                 if not result.success:
                     recovery_decision = recovery.record(
                         signature,
@@ -172,7 +195,29 @@ class AgentRunner:
                             retryable=recovery_decision.retry_allowed,
                             diagnostics=diagnostics,
                         )
-                trace("tool.completed", "completed" if result.success else "failed", {"tool": call.name, "success": result.success, "error_category": result.error_category})
+                        trace(
+                            "tool.retry" if recovery_decision.retry_allowed else "tool.fallback",
+                            "retrying" if recovery_decision.retry_allowed else "completed",
+                            {
+                                "tool": call.name,
+                                "category": result.error_category,
+                                "attempt": recovery_decision.attempt,
+                                "remaining": recovery_decision.remaining,
+                            },
+                            error_category=result.error_category,
+                        )
+                artifact_ids = _result_artifact_ids(result)
+                trace(
+                    "tool.completed",
+                    "completed" if result.success else "failed",
+                    {
+                        "tool": call.name,
+                        "success": result.success,
+                        "error_category": result.error_category,
+                    },
+                    error_category=result.error_category,
+                    artifact_ids=artifact_ids,
+                )
                 protected_result: bytes | None = None
                 if call.name in _PROTECTED_TOOL_NAMES and result.success:
                     assert self._protected_messages is not None
@@ -210,7 +255,7 @@ class AgentRunner:
     def _complete_model(
         self,
         request: ModelRequest,
-        trace: Callable[[str, str, dict[str, object]], None],
+        trace: Callable[..., None],
     ):
         for retry_number in range(self._settings.model_max_retries + 1):
             try:
@@ -360,6 +405,19 @@ def _tool_result_payload(result: ToolResult) -> dict[str, object]:
 
 def _tool_result_json(result: ToolResult) -> str:
     return json.dumps(_tool_result_payload(result), ensure_ascii=False, separators=(",", ":"))
+
+
+def _result_artifact_ids(result: ToolResult) -> tuple[str, ...]:
+    if not result.success or not isinstance(result.output, dict):
+        return ()
+    values: list[str] = []
+    artifact_id = result.output.get("artifact_id")
+    if isinstance(artifact_id, str) and artifact_id:
+        values.append(artifact_id)
+    artifact_ids = result.output.get("artifact_ids")
+    if isinstance(artifact_ids, list):
+        values.extend(value for value in artifact_ids if isinstance(value, str) and value)
+    return tuple(dict.fromkeys(values))
 
 
 def _safe_tool_result_json(result: ToolResult, tool_name: str) -> str:

@@ -23,6 +23,7 @@ from data_analysis_agent.repositories import ProtectedMessageError
 from data_analysis_agent.settings import Settings
 from data_analysis_agent.tools import ToolCall, ToolContext, ToolRegistry, ToolResult
 from data_analysis_agent.team_types import AgentRole
+from data_analysis_agent.tracing import TraceContext, TraceRecorder, TraceRepository
 
 
 class AgentRunStatus(StrEnum):
@@ -64,6 +65,8 @@ class AgentRun:
     deadline_at: str | None
     worker_token: str | None
     worker_claimed_at: str | None
+    trace_run_id: str | None
+    parent_event_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,12 +118,14 @@ ROLE_TOOLS: dict[AgentRole, frozenset[str]] = {
     AgentRole.KNOWLEDGE: frozenset({"inspect_workspace", "inspect_dataset"}),
     AgentRole.SQL: frozenset({"inspect_workspace", "inspect_dataset", "query_data", "query_database"}),
     AgentRole.REPORT: frozenset({"inspect_workspace", "run_python", "save_artifact", "write_report"}),
+    AgentRole.CURATOR: frozenset(),
 }
 
 ROLE_PROMPTS: dict[AgentRole, str] = {
     AgentRole.KNOWLEDGE: "Resolve metric definitions and return a JSON handoff. Do not execute SQL.",
     AgentRole.SQL: "Produce evidence with governed query tools and return artifact identifiers.",
     AgentRole.REPORT: "Use registered artifacts only and cite every important claim.",
+    AgentRole.CURATOR: "Create a reusable workflow candidate from redacted execution evidence only.",
 }
 
 _MAX_HANDOFF_BYTES = 64_000
@@ -143,19 +148,29 @@ class TeamRepository:
         self._event_publisher = event_publisher
 
     @sqlite_connection_guarded
-    def create_run(self, task_id: str, role: AgentRole, objective: str) -> AgentRun:
-        return self._create_run(task_id, role, objective, max_active=None)
+    def create_run(
+        self, task_id: str, role: AgentRole, objective: str,
+        *, trace_context: TraceContext | None = None,
+    ) -> AgentRun:
+        return self._create_run(
+            task_id, role, objective, max_active=None, trace_context=trace_context
+        )
 
     @sqlite_connection_guarded
     def create_run_if_capacity(
-        self, task_id: str, role: AgentRole, objective: str, *, max_active: int = 3
+        self, task_id: str, role: AgentRole, objective: str, *, max_active: int = 3,
+        trace_context: TraceContext | None = None,
     ) -> AgentRun:
         if not 1 <= max_active <= 3:
             raise ValueError("max_active must be between 1 and 3")
-        return self._create_run(task_id, role, objective, max_active=max_active)
+        return self._create_run(
+            task_id, role, objective, max_active=max_active,
+            trace_context=trace_context,
+        )
 
     def _create_run(
-        self, task_id: str, role: AgentRole, objective: str, *, max_active: int | None
+        self, task_id: str, role: AgentRole, objective: str, *, max_active: int | None,
+        trace_context: TraceContext | None,
     ) -> AgentRun:
         normalized_objective = objective.strip()
         if not normalized_objective:
@@ -166,6 +181,8 @@ class TeamRepository:
             error_message=None, cancel_requested=False, created_at=utc_now(),
             started_at=None, completed_at=None,
             turns_used=0, deadline_at=None, worker_token=None, worker_claimed_at=None,
+            trace_run_id=trace_context.run_id if trace_context else None,
+            parent_event_id=trace_context.parent_event_id if trace_context else None,
         )
         try:
             self._connection.execute("BEGIN IMMEDIATE")
@@ -179,11 +196,12 @@ class TeamRepository:
             self._connection.execute(
                 "INSERT INTO agent_runs("
                 "id, task_id, role, objective, status, result_json, error_category, "
-                "error_message, cancel_requested, created_at, started_at, completed_at, turns_used, deadline_at, worker_token, worker_claimed_at"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "error_message, cancel_requested, created_at, started_at, completed_at, turns_used, deadline_at, worker_token, worker_claimed_at, trace_run_id, parent_event_id"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     run.id, run.task_id, run.role, run.objective, run.status, None, None,
                     None, 0, run.created_at, None, None, 0, None, None, None,
+                    run.trace_run_id, run.parent_event_id,
                 ),
             )
             self._connection.commit()
@@ -499,6 +517,8 @@ class TeamRepository:
             created_at=current.created_at, started_at=started_at, completed_at=completed_at,
             turns_used=current.turns_used, deadline_at=current.deadline_at,
             worker_token=None if release else current.worker_token, worker_claimed_at=None if release else current.worker_claimed_at,
+            trace_run_id=current.trace_run_id,
+            parent_event_id=current.parent_event_id,
         )
 
 
@@ -511,6 +531,7 @@ def _run_from_row(row: sqlite3.Row) -> AgentRun:
         created_at=row["created_at"], started_at=row["started_at"], completed_at=row["completed_at"],
         turns_used=int(row["turns_used"]), deadline_at=row["deadline_at"],
         worker_token=row["worker_token"], worker_claimed_at=row["worker_claimed_at"],
+        trace_run_id=row["trace_run_id"], parent_event_id=row["parent_event_id"],
     )
 
 
@@ -558,6 +579,7 @@ class TeammateRunner:
         self, *, settings: Settings, provider: ModelProvider, tools: ToolRegistry,
         repository: TeamRepository, cancel_event: Event | None = None,
         secret_protector: SecretProtector | None = None,
+        traces: TraceRepository | None = None,
     ) -> None:
         self._settings = settings
         self._provider = provider
@@ -568,6 +590,7 @@ class TeammateRunner:
             _ProtectedAgentMessageRepository(repository._connection, secret_protector)
             if secret_protector is not None else None
         )
+        self._trace_recorder = TraceRecorder(traces) if traces is not None else None
 
     def run(self, agent_run_id: str) -> AgentRun:
         run = self._repository.get_run(agent_run_id)
@@ -587,6 +610,7 @@ class TeammateRunner:
             return self._repository.transition_run(run.id, AgentRunStatus.CANCELLED)
         if run.status in {AgentRunStatus.CREATED, AgentRunStatus.WAITING}:
             run = self._repository.transition_run(run.id, AgentRunStatus.WORKING)
+        self._trace(run, "teammate.started", "running", {"role": run.role.value})
         tools = self._tools.restrict(ROLE_TOOLS[run.role])
         while True:
             terminal = self._terminal_before_action(run)
@@ -606,6 +630,12 @@ class TeammateRunner:
                 return terminal
             try:
                 response = self._provider.complete(self._request(run, tools))
+                self._trace(
+                    run,
+                    "teammate.model.completed",
+                    "completed",
+                    {"tool_call_count": len(response.tool_calls), "has_text": bool(response.text.strip())},
+                )
             except (ProviderError, ProtectedMessageError):
                 return self._repository.fail_run(run.id, "provider_error")
             except Exception:
@@ -617,12 +647,44 @@ class TeammateRunner:
                 try:
                     handoff = self._parse_handoff(response.text)
                     self._repository.append_message(run.id, "assistant", handoff)
-                    return self._repository.complete_run(run.id, handoff)
+                    completed = self._repository.complete_run(run.id, handoff)
+                    self._trace(completed, "teammate.completed", "completed", {"role": run.role.value})
+                    return completed
                 except ValueError:
                     return self._repository.fail_run(run.id, "invalid_handoff")
             failure = self._record_and_execute_calls(run, tools, response.tool_calls)
             if failure is not None:
                 return failure
+
+    def _trace(
+        self, run: AgentRun, event_type: str, status: str,
+        payload: dict[str, object], **kwargs: object,
+    ) -> None:
+        if self._trace_recorder is None or run.trace_run_id is None:
+            return
+        try:
+            self._trace_recorder.event(
+                TraceContext(
+                    run.trace_run_id,
+                    run.task_id,
+                    agent_id=run.id,
+                    parent_event_id=run.parent_event_id,
+                ),
+                event_type,
+                status,
+                payload,
+                **kwargs,
+            )
+        except Exception:
+            if self._repository._event_publisher is not None:
+                try:
+                    self._repository._event_publisher(
+                        run.task_id,
+                        "trace.recording_failed",
+                        {"agent_id": run.id, "event_type": event_type},
+                    )
+                except Exception:
+                    pass
     def _terminal_before_action(self, run: AgentRun) -> AgentRun | None:
         boundary = self._boundary_category(run)
         if boundary == "cancelled":
@@ -666,7 +728,12 @@ class TeammateRunner:
             self._record_tool_calls(run, calls)
         except Exception:
             return self._repository.fail_run(run.id, "message_persistence_error")
-        context = ToolContext(project_id=self._repository.project_id_for_run(run.id), task_id=run.task_id, agent_id=run.id, run_id=run.id)
+        context = ToolContext(
+            project_id=self._repository.project_id_for_run(run.id),
+            task_id=run.task_id,
+            agent_id=run.id,
+            run_id=run.trace_run_id or run.id,
+        )
         for index, call in enumerate(calls):
             boundary = self._boundary_category(run)
             if boundary is not None:
@@ -768,12 +835,17 @@ class TeamManager:
         self._cancel_events: dict[str, Event] = {}
         self._closed = False
 
-    def spawn(self, task_id: str, role: AgentRole, objective: str) -> AgentRun:
+    def spawn(
+        self, task_id: str, role: AgentRole, objective: str,
+        *, trace_context: TraceContext | None = None,
+    ) -> AgentRun:
         with self._lock:
             if self._closed:
                 raise TeamManagerClosed("Team manager is shut down")
             run = self._repository.create_run_if_capacity(
-                task_id, role, objective, max_active=self._settings.max_active_teammates
+                task_id, role, objective,
+                max_active=self._settings.max_active_teammates,
+                trace_context=trace_context,
             )
             event = Event()
             self._cancel_events[run.id] = event

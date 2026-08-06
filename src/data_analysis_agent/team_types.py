@@ -5,3 +5,4 @@ class AgentRole(StrEnum):
     KNOWLEDGE = "knowledge"
     SQL = "sql"
     REPORT = "report"
+    CURATOR = "curator"
