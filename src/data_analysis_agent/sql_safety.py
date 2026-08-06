@@ -253,6 +253,15 @@ def _deny_nested_writes(statement: exp.Query) -> None:
 
 def _validate_safe_functions(statement: exp.Query) -> None:
     for function in statement.find_all(exp.Func):
+        if (
+            isinstance(function, exp.Anonymous)
+            and isinstance(function.this, exp.Identifier)
+            and function.this.args.get("quoted") is True
+        ):
+            raise SqlValidationError(
+                "unsafe_function",
+                "Quoted PostgreSQL function identifiers are not allowed",
+            )
         if isinstance(function.parent, exp.Dot) and function.parent.expression is function:
             raise SqlValidationError(
                 "unsafe_function",

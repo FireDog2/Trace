@@ -313,38 +313,47 @@ def test_timeout_is_structured_retryable_and_redacts_credentials(
 
 def test_result_byte_limit_returns_structured_error_without_artifact(
     sql_gateway,
+    db_connection,
     source_repository,
+    approval_repository,
     artifact_repository,
     fake_driver,
     task,
 ) -> None:
     source = _create_source(source_repository, task.project_id)
+    sql = "SELECT customer_email FROM orders"
+    first = sql_gateway.execute(task.id, task.project_id, source.id, sql)
+    approval_repository.decide(first.approval_id, approved=True)
+    before_attempts = _budget_attempts(db_connection, task.id)
     sql_gateway.settings = replace(sql_gateway.settings, postgres_max_result_bytes=12)
     fake_driver.columns = ("region",)
     fake_driver.rows = (("a-result-that-is-too-large",),)
 
-    outcome = sql_gateway.execute(
-        task.id,
-        task.project_id,
-        source.id,
-        "SELECT region FROM orders",
-    )
+    outcome = sql_gateway.execute(task.id, task.project_id, source.id, sql)
 
     assert outcome.status == "retryable_error"
     assert outcome.error_category == "result_limit"
     assert outcome.retryable is True
+    assert approval_repository.get(first.approval_id).status == "approved"
+    assert _budget_attempts(db_connection, task.id) == before_attempts
     assert artifact_repository.list_for_task(task.id) == ()
 
 
 def test_artifact_write_error_is_structured_and_removes_reserved_path(
     sql_gateway,
+    db_connection,
     source_repository,
+    approval_repository,
     artifact_repository,
     workspace,
     task,
     monkeypatch,
 ) -> None:
     source = _create_source(source_repository, task.project_id)
+    sql = "SELECT customer_email FROM orders"
+    first = sql_gateway.execute(task.id, task.project_id, source.id, sql)
+    approval_repository.decide(first.approval_id, approved=True)
+    before_attempts = _budget_attempts(db_connection, task.id)
     original_write_bytes = Path.write_bytes
 
     def fail_query_artifact_write(path: Path, data: bytes) -> int:
@@ -355,16 +364,13 @@ def test_artifact_write_error_is_structured_and_removes_reserved_path(
 
     monkeypatch.setattr(Path, "write_bytes", fail_query_artifact_write)
 
-    outcome = sql_gateway.execute(
-        task.id,
-        task.project_id,
-        source.id,
-        "SELECT region FROM orders",
-    )
+    outcome = sql_gateway.execute(task.id, task.project_id, source.id, sql)
 
     assert outcome.status == "retryable_error"
     assert outcome.error_category == "artifact_write_error"
     assert outcome.retryable is True
+    assert approval_repository.get(first.approval_id).status == "approved"
+    assert _budget_attempts(db_connection, task.id) == before_attempts
     assert artifact_repository.list_for_task(task.id) == ()
     derived = workspace.resolve_inside(task.project_id, "derived")
     assert tuple(derived.glob("postgres-query-*.csv")) == ()
@@ -462,29 +468,24 @@ class CoordinatedApprovalRepository:
         return getattr(self.repository, name)
 
 
-class CoordinatedPathGateway(SqlSafetyGateway):
-    def __init__(self, *args, path_barrier: threading.Barrier, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.path_barrier = path_barrier
-
-    def _query_artifact_path(self, project_id: str, sql_hash: str):
-        path = super()._query_artifact_path(project_id, sql_hash)
-        self.path_barrier.wait(timeout=5)
-        return path
-
-
 class FailSecondRegistrationRepository:
     def __init__(self, repository: ArtifactRepository) -> None:
         self.repository = repository
         self._lock = threading.Lock()
         self._attempt = 0
 
-    def register(self, **kwargs):
+    def _register(self, method, kwargs):
         with self._lock:
             self._attempt += 1
             if self._attempt == 2:
                 raise RuntimeError("Injected artifact registration failure")
-            return self.repository.register(**kwargs)
+            return method(**kwargs)
+
+    def register(self, **kwargs):
+        return self._register(self.repository.register, kwargs)
+
+    def register_in_transaction(self, **kwargs):
+        return self._register(self.repository.register_in_transaction, kwargs)
 
     def __getattr__(self, name: str):
         return getattr(self.repository, name)
@@ -620,6 +621,175 @@ def _budget_attempts(connection, task_id: str) -> int:
     return 0 if row is None else row[0]
 
 
+class FailingArtifactRegistrationRepository:
+    def __init__(self, repository: ArtifactRepository) -> None:
+        self.repository = repository
+
+    def register(self, **kwargs):
+        self.repository.register(**kwargs)
+        raise RuntimeError("injected artifact registration failure")
+
+    def register_in_transaction(self, **kwargs):
+        self.repository.register_in_transaction(**kwargs)
+        raise RuntimeError("injected artifact registration failure")
+
+    def __getattr__(self, name: str):
+        return getattr(self.repository, name)
+
+
+class FailingPendingTaskRepository:
+    def __init__(self, repository: TaskRepository, failure_point: str) -> None:
+        self.repository = repository
+        self.failure_point = failure_point
+
+    def transition(self, *args, **kwargs):
+        if self.failure_point == "transition":
+            raise RuntimeError("injected pending task transition failure")
+        return self.repository.transition(*args, **kwargs)
+
+    def transition_in_transaction(self, *args, **kwargs):
+        if self.failure_point == "transition":
+            raise RuntimeError("injected pending task transition failure")
+        return self.repository.transition_in_transaction(*args, **kwargs)
+
+    def append_event(self, *args, **kwargs):
+        if self.failure_point == "event":
+            raise RuntimeError("injected pending event append failure")
+        return self.repository.append_event(*args, **kwargs)
+
+    def append_event_in_transaction(self, *args, **kwargs):
+        if self.failure_point == "event":
+            raise RuntimeError("injected pending event append failure")
+        return self.repository.append_event_in_transaction(*args, **kwargs)
+
+    def __getattr__(self, name: str):
+        return getattr(self.repository, name)
+
+
+@pytest.mark.parametrize("failure_point", ("transition", "event"))
+def test_pending_approval_task_and_event_roll_back_together_on_failure(
+    tmp_path,
+    fake_driver,
+    failure_point,
+) -> None:
+    state = _build_real_gateway(tmp_path, fake_driver)
+    state.gateway.tasks = FailingPendingTaskRepository(
+        state.tasks,
+        failure_point,
+    )
+
+    with pytest.raises(RuntimeError, match="injected pending"):
+        state.gateway.execute(
+            state.task.id,
+            state.project.id,
+            state.source.id,
+            "SELECT customer_email FROM orders",
+        )
+
+    assert state.approvals.list_for_task(state.task.id) == ()
+    assert state.tasks.get(state.task.id).status is TaskStatus.UNDERSTANDING
+    assert state.tasks.events_after(state.task.id, 0) == ()
+    state.connection.close()
+
+
+def test_result_row_limit_rolls_back_budget_and_approved_grant(
+    tmp_path,
+    fake_driver,
+) -> None:
+    state = _build_real_gateway(tmp_path, fake_driver)
+    sql = "SELECT customer_email FROM orders"
+    first = state.gateway.execute(
+        state.task.id,
+        state.project.id,
+        state.source.id,
+        sql,
+    )
+    state.approvals.decide(first.approval_id, approved=True)
+    before_attempts = _budget_attempts(state.connection, state.task.id)
+    state.gateway.settings = replace(state.settings, postgres_max_rows=1)
+    fake_driver.rows = (("East", 10), ("West", 20))
+
+    outcome = state.gateway.execute(
+        state.task.id,
+        state.project.id,
+        state.source.id,
+        sql,
+    )
+
+    assert outcome.status == "retryable_error"
+    assert outcome.error_category == "result_limit"
+    assert state.approvals.get(first.approval_id).status == "approved"
+    assert _budget_attempts(state.connection, state.task.id) == before_attempts
+    assert state.artifacts.list_for_task(state.task.id) == ()
+    state.connection.close()
+
+
+def test_result_serialization_error_rolls_back_budget_and_approved_grant(
+    tmp_path,
+    fake_driver,
+) -> None:
+    state = _build_real_gateway(tmp_path, fake_driver)
+    sql = "SELECT customer_email FROM orders"
+    first = state.gateway.execute(
+        state.task.id,
+        state.project.id,
+        state.source.id,
+        sql,
+    )
+    state.approvals.decide(first.approval_id, approved=True)
+    before_attempts = _budget_attempts(state.connection, state.task.id)
+    fake_driver.columns = ("region",)
+    fake_driver.rows = (("East", 10),)
+
+    outcome = state.gateway.execute(
+        state.task.id,
+        state.project.id,
+        state.source.id,
+        sql,
+    )
+
+    assert outcome.status == "retryable_error"
+    assert outcome.error_category == "result_serialization_error"
+    assert state.approvals.get(first.approval_id).status == "approved"
+    assert _budget_attempts(state.connection, state.task.id) == before_attempts
+    assert state.artifacts.list_for_task(state.task.id) == ()
+    state.connection.close()
+
+
+def test_artifact_registration_error_rolls_back_metadata_and_removes_file(
+    tmp_path,
+    fake_driver,
+) -> None:
+    state = _build_real_gateway(tmp_path, fake_driver)
+    sql = "SELECT customer_email FROM orders"
+    first = state.gateway.execute(
+        state.task.id,
+        state.project.id,
+        state.source.id,
+        sql,
+    )
+    state.approvals.decide(first.approval_id, approved=True)
+    before_attempts = _budget_attempts(state.connection, state.task.id)
+    state.gateway.artifacts = FailingArtifactRegistrationRepository(state.artifacts)
+
+    outcome = state.gateway.execute(
+        state.task.id,
+        state.project.id,
+        state.source.id,
+        sql,
+    )
+
+    assert outcome.status == "retryable_error"
+    assert outcome.error_category == "artifact_registration_error"
+    assert outcome.retryable is True
+    assert state.approvals.get(first.approval_id).status == "approved"
+    assert _budget_attempts(state.connection, state.task.id) == before_attempts
+    assert state.artifacts.list_for_task(state.task.id) == ()
+    derived = state.workspace.resolve_inside(state.project.id, "derived")
+    assert tuple(derived.glob("postgres-query-*.csv")) == ()
+    state.connection.close()
+
+
 def test_policy_change_during_approval_resolution_rolls_back_consumption(
     tmp_path,
     fake_driver,
@@ -653,9 +823,18 @@ def test_policy_change_during_approval_resolution_rolls_back_consumption(
     state.connection.close()
 
 
-def test_query_timeout_rolls_back_budget_and_approved_grant(
+@pytest.mark.parametrize(
+    ("query_error", "expected_category"),
+    [
+        (TimeoutError("database timeout"), "query_timeout"),
+        (ConnectionError("database unavailable"), "connection_error"),
+    ],
+)
+def test_query_failure_rolls_back_budget_and_approved_grant(
     tmp_path,
     fake_driver,
+    query_error,
+    expected_category,
 ) -> None:
     state = _build_real_gateway(tmp_path, fake_driver)
     sql = "SELECT customer_email FROM orders"
@@ -667,7 +846,7 @@ def test_query_timeout_rolls_back_budget_and_approved_grant(
     )
     state.approvals.decide(first.approval_id, approved=True)
     before_attempts = _budget_attempts(state.connection, state.task.id)
-    fake_driver.query_error = TimeoutError("database timeout")
+    fake_driver.query_error = query_error
 
     outcome = state.gateway.execute(
         state.task.id,
@@ -677,7 +856,7 @@ def test_query_timeout_rolls_back_budget_and_approved_grant(
     )
 
     assert outcome.status == "retryable_error"
-    assert outcome.error_category == "query_timeout"
+    assert outcome.error_category == expected_category
     assert _budget_attempts(state.connection, state.task.id) == before_attempts
     assert state.approvals.get(first.approval_id).status == "approved"
     state.connection.close()
@@ -1023,7 +1202,7 @@ def test_concurrent_registration_failure_never_deletes_successful_artifact(
         {("orders", None): AccessLevel.ALLOWED},
     )
     artifacts = ArtifactRepository(connection, workspace)
-    gateway = CoordinatedPathGateway(
+    gateway = SqlSafetyGateway(
         connection=connection,
         settings=settings,
         sources=sources,
@@ -1033,7 +1212,6 @@ def test_concurrent_registration_failure_never_deletes_successful_artifact(
         workspace=workspace,
         tasks=tasks,
         driver=fake_driver,
-        path_barrier=threading.Barrier(2),
     )
     start = threading.Barrier(2)
     outcomes = []
@@ -1059,9 +1237,13 @@ def test_concurrent_registration_failure_never_deletes_successful_artifact(
     for thread in threads:
         thread.join(timeout=5)
 
-    assert len(outcomes) == 1
-    assert outcomes[0].status == "succeeded"
-    assert len(errors) == 1
+    assert sorted(outcome.status for outcome in outcomes) == [
+        "retryable_error",
+        "succeeded",
+    ]
+    failed = next(outcome for outcome in outcomes if outcome.status == "retryable_error")
+    assert failed.error_category == "artifact_registration_error"
+    assert errors == []
     assert all(not thread.is_alive() for thread in threads)
     registered = artifacts.list_for_task(task.id)
     assert len(registered) == 1

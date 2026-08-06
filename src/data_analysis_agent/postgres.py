@@ -306,8 +306,7 @@ class SqlSafetyGateway:
 
         approval_reason = _approval_reason(validated, risk)
         pending_resolution = None
-        raw_columns = None
-        raw_rows = None
+        path = None
         with self._metadata_lock:
             try:
                 self._connection.execute("BEGIN IMMEDIATE")
@@ -345,6 +344,23 @@ class SqlSafetyGateway:
                         )
                     if resolution.status == "pending":
                         pending_resolution = resolution
+                        if resolution.created:
+                            current_task = self.tasks.get(task_id)
+                            if current_task.status is not TaskStatus.NEEDS_INPUT:
+                                self.tasks.transition_in_transaction(
+                                    task_id,
+                                    TaskStatus.NEEDS_INPUT,
+                                )
+                            self.tasks.append_event_in_transaction(
+                                task_id,
+                                "approval.requested",
+                                {
+                                    "approval_id": resolution.approval.id,
+                                    "sql_hash": validated.sql_hash,
+                                    "policy_version": policy.version,
+                                    "reason": approval_reason,
+                                },
+                            )
                         self._connection.commit()
 
                 if pending_resolution is None:
@@ -372,27 +388,108 @@ class SqlSafetyGateway:
                             query_hash=validated.sql_hash,
                             risk=risk,
                         )
+                    columns = tuple(str(column) for column in raw_columns)
+                    rows = tuple(tuple(row) for row in raw_rows)
+                    if len(rows) > self.settings.postgres_max_rows:
+                        self._connection.rollback()
+                        return _result_limit(validated.sql_hash, risk)
+                    try:
+                        serialized = _csv_bytes(columns, rows)
+                    except (csv.Error, UnicodeError, TypeError, ValueError):
+                        self._connection.rollback()
+                        return SqlGatewayOutcome(
+                            status="retryable_error",
+                            query_hash=validated.sql_hash,
+                            risk=risk,
+                            error_category="result_serialization_error",
+                            message=(
+                                "The PostgreSQL result could not be serialized safely"
+                            ),
+                            retryable=True,
+                        )
+                    if len(serialized) > self.settings.postgres_max_result_bytes:
+                        self._connection.rollback()
+                        return _result_limit(validated.sql_hash, risk)
+
+                    try:
+                        path = self._query_artifact_path(
+                            project_id,
+                            validated.sql_hash,
+                        )
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_bytes(serialized)
+                    except OSError:
+                        self._connection.rollback()
+                        if path is not None:
+                            with suppress(OSError):
+                                path.unlink(missing_ok=True)
+                        return SqlGatewayOutcome(
+                            status="retryable_error",
+                            query_hash=validated.sql_hash,
+                            risk=risk,
+                            error_category="artifact_write_error",
+                            message=(
+                                "The PostgreSQL result artifact could not be "
+                                "written safely"
+                            ),
+                            retryable=True,
+                        )
+
+                    try:
+                        artifact = self.artifacts.register_in_transaction(
+                            project_id=project_id,
+                            task_id=task_id,
+                            artifact_type=ArtifactType.DERIVED_DATASET,
+                            path=path,
+                            title="PostgreSQL query result",
+                            description=(
+                                "Bounded PostgreSQL result for query "
+                                f"{validated.sql_hash[:12]} "
+                                f"({risk.level} explain risk)"
+                            ),
+                            producer_execution_id=None,
+                            input_artifact_ids=(),
+                        )
+                    except Exception:
+                        self._connection.rollback()
+                        with suppress(OSError):
+                            path.unlink(missing_ok=True)
+                        return SqlGatewayOutcome(
+                            status="retryable_error",
+                            query_hash=validated.sql_hash,
+                            risk=risk,
+                            error_category="artifact_registration_error",
+                            message=(
+                                "The PostgreSQL result artifact could not be "
+                                "registered safely"
+                            ),
+                            retryable=True,
+                        )
+
+                    preview = tuple(
+                        dict(zip(columns, row, strict=True))
+                        for row in rows[: min(len(rows), 20)]
+                    )
+                    outcome = SqlGatewayOutcome(
+                        status="succeeded",
+                        query_hash=validated.sql_hash,
+                        risk=risk,
+                        artifact_id=artifact.id,
+                        columns=columns,
+                        preview=preview,
+                        row_count=len(rows),
+                    )
                     self._connection.commit()
+                    return outcome
             except BaseException:
                 self._connection.rollback()
+                if path is not None:
+                    with suppress(OSError):
+                        path.unlink(missing_ok=True)
                 raise
 
         if pending_resolution is not None:
             approval = pending_resolution.approval
-            current_task = self.tasks.get(task_id)
-            if pending_resolution.created:
-                if current_task.status is not TaskStatus.NEEDS_INPUT:
-                    self.tasks.transition(task_id, TaskStatus.NEEDS_INPUT)
-                self.tasks.append_event(
-                    task_id,
-                    "approval.requested",
-                    {
-                        "approval_id": approval.id,
-                        "sql_hash": validated.sql_hash,
-                        "policy_version": policy.version,
-                        "reason": approval_reason,
-                    },
-                )
             return SqlGatewayOutcome(
                 status="approval_required",
                 query_hash=validated.sql_hash,
@@ -400,76 +497,6 @@ class SqlSafetyGateway:
                 approval_id=approval.id,
                 message=approval_reason,
             )
-
-        assert raw_columns is not None
-        assert raw_rows is not None
-
-        columns = tuple(str(column) for column in raw_columns)
-        rows = tuple(tuple(row) for row in raw_rows)
-        if len(rows) > self.settings.postgres_max_rows:
-            return _result_limit(validated.sql_hash, risk)
-        try:
-            serialized = _csv_bytes(columns, rows)
-        except (csv.Error, UnicodeError, TypeError, ValueError):
-            return SqlGatewayOutcome(
-                status="retryable_error",
-                query_hash=validated.sql_hash,
-                risk=risk,
-                error_category="result_serialization_error",
-                message="The PostgreSQL result could not be serialized safely",
-                retryable=True,
-            )
-        if len(serialized) > self.settings.postgres_max_result_bytes:
-            return _result_limit(validated.sql_hash, risk)
-
-        path = None
-        try:
-            path = self._query_artifact_path(project_id, validated.sql_hash)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(serialized)
-        except OSError:
-            if path is not None:
-                with suppress(OSError):
-                    path.unlink(missing_ok=True)
-            return SqlGatewayOutcome(
-                status="retryable_error",
-                query_hash=validated.sql_hash,
-                risk=risk,
-                error_category="artifact_write_error",
-                message="The PostgreSQL result artifact could not be written safely",
-                retryable=True,
-            )
-        try:
-            artifact = self.artifacts.register(
-                project_id=project_id,
-                task_id=task_id,
-                artifact_type=ArtifactType.DERIVED_DATASET,
-                path=path,
-                title="PostgreSQL query result",
-                description=(
-                    f"Bounded PostgreSQL result for query {validated.sql_hash[:12]} "
-                    f"({risk.level} explain risk)"
-                ),
-                producer_execution_id=None,
-                input_artifact_ids=(),
-            )
-        except Exception:
-            path.unlink(missing_ok=True)
-            raise
-
-        preview = tuple(
-            dict(zip(columns, row, strict=True))
-            for row in rows[: min(len(rows), 20)]
-        )
-        return SqlGatewayOutcome(
-            status="succeeded",
-            query_hash=validated.sql_hash,
-            risk=risk,
-            artifact_id=artifact.id,
-            columns=columns,
-            preview=preview,
-            row_count=len(rows),
-        )
 
     def _consume_budget(self, task_id: str) -> bool:
         with self._metadata_lock:

@@ -282,6 +282,33 @@ def test_validator_rejects_every_schema_qualified_function(sql: str) -> None:
 @pytest.mark.parametrize(
     "sql",
     [
+        'SELECT "JSONB_AGG"(region) FROM orders',
+        'SELECT "jsonb_agg"(region) FROM orders',
+        'SELECT COALESCE("JSON_BUILD_OBJECT"(\'region\', region), NULL) FROM orders',
+        'SELECT UPPER("AGE"(CURRENT_DATE, CURRENT_DATE)::text) FROM orders',
+    ],
+)
+def test_validator_rejects_quoted_function_identifiers(sql: str) -> None:
+    with pytest.raises(SqlValidationError) as error:
+        SqlAstValidator().validate(sql, CATALOG, POLICY)
+
+    assert error.value.code == "unsafe_function"
+
+
+def test_validator_continues_to_allow_unquoted_reviewed_builtins() -> None:
+    result = SqlAstValidator().validate(
+        "SELECT JSONB_AGG(region), JSON_BUILD_OBJECT('region', region), "
+        "AGE(CURRENT_DATE, CURRENT_DATE) FROM orders",
+        CATALOG,
+        POLICY,
+    )
+
+    assert result.access_level is AccessLevel.ALLOWED
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
         "SELECT region::evil.custom_type FROM orders",
         "SELECT CAST(region AS custom_type) FROM orders",
     ],

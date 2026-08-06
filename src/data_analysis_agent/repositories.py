@@ -191,6 +191,24 @@ class TaskRepository:
 
     @sqlite_connection_guarded
     def transition(self, task_id: str, target: TaskStatus) -> Task:
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            task = self.transition_in_transaction(task_id, target)
+            self._connection.commit()
+            return task
+        except Exception:
+            self._connection.rollback()
+            raise
+
+    @sqlite_connection_guarded
+    def transition_in_transaction(
+        self,
+        task_id: str,
+        target: TaskStatus,
+    ) -> Task:
+        """Transition a task without ending the caller-owned transaction."""
+        if not self._connection.in_transaction:
+            raise RuntimeError("task transition requires an active transaction")
         current = self.get(task_id)
         if target not in TASK_TRANSITIONS[current.status]:
             raise InvalidTaskTransition(f"{current.status} -> {target}")
@@ -199,7 +217,6 @@ class TaskRepository:
             "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
             (target, updated_at, task_id),
         )
-        self._connection.commit()
         return Task(
             id=current.id,
             project_id=current.project_id,
@@ -384,33 +401,46 @@ class TaskRepository:
         event_type: str,
         payload: dict[str, object],
     ) -> TaskEvent:
-        self.get(task_id)
-        event_id = str(uuid4())
-        created_at = utc_now()
         try:
             self._connection.execute("BEGIN IMMEDIATE")
-            latest = self._connection.execute(
-                "SELECT COALESCE(MAX(sequence), 0) FROM task_events WHERE task_id = ?",
-                (task_id,),
-            ).fetchone()[0]
-            sequence = int(latest) + 1
-            self._connection.execute(
-                "INSERT INTO task_events("
-                "id, task_id, sequence, event_type, payload_json, created_at"
-                ") VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    event_id,
-                    task_id,
-                    sequence,
-                    event_type,
-                    json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-                    created_at,
-                ),
-            )
+            event = self.append_event_in_transaction(task_id, event_type, payload)
             self._connection.commit()
+            return event
         except Exception:
             self._connection.rollback()
             raise
+
+    @sqlite_connection_guarded
+    def append_event_in_transaction(
+        self,
+        task_id: str,
+        event_type: str,
+        payload: dict[str, object],
+    ) -> TaskEvent:
+        """Append an event without ending the caller-owned transaction."""
+        if not self._connection.in_transaction:
+            raise RuntimeError("task event append requires an active transaction")
+        self.get(task_id)
+        event_id = str(uuid4())
+        created_at = utc_now()
+        latest = self._connection.execute(
+            "SELECT COALESCE(MAX(sequence), 0) FROM task_events WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()[0]
+        sequence = int(latest) + 1
+        self._connection.execute(
+            "INSERT INTO task_events("
+            "id, task_id, sequence, event_type, payload_json, created_at"
+            ") VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                event_id,
+                task_id,
+                sequence,
+                event_type,
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                created_at,
+            ),
+        )
         return TaskEvent(
             id=event_id,
             task_id=task_id,
@@ -504,6 +534,39 @@ class ArtifactRepository:
         producer_execution_id: str | None,
         input_artifact_ids: tuple[str, ...],
     ) -> Artifact:
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            artifact = self.register_in_transaction(
+                project_id=project_id,
+                task_id=task_id,
+                artifact_type=artifact_type,
+                path=path,
+                title=title,
+                description=description,
+                producer_execution_id=producer_execution_id,
+                input_artifact_ids=input_artifact_ids,
+            )
+            self._connection.commit()
+            return artifact
+        except Exception:
+            self._connection.rollback()
+            raise
+
+    @sqlite_connection_guarded
+    def register_in_transaction(
+        self,
+        project_id: str,
+        task_id: str | None,
+        artifact_type: ArtifactType,
+        path: Path,
+        title: str,
+        description: str,
+        producer_execution_id: str | None,
+        input_artifact_ids: tuple[str, ...],
+    ) -> Artifact:
+        """Register an artifact without ending the caller-owned transaction."""
+        if not self._connection.in_transaction:
+            raise RuntimeError("artifact registration requires an active transaction")
         resolved_path = self._workspace.resolve_inside(project_id, path)
         if not resolved_path.is_file():
             raise InvalidArtifactError(f"Artifact file does not exist: {path}")
@@ -557,9 +620,7 @@ class ArtifactRepository:
                 "VALUES (?, ?)",
                 ((artifact_id, input_id) for input_id in unique_inputs),
             )
-            self._connection.commit()
         except sqlite3.IntegrityError as exc:
-            self._connection.rollback()
             raise InvalidArtifactError(str(exc)) from exc
 
         return Artifact(
