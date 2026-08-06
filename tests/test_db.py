@@ -71,3 +71,16 @@ def test_model_configuration_migration_recovers_after_version_record_is_missing(
     assert db_connection.execute(
         "SELECT version FROM schema_migrations WHERE version = 2"
     ).fetchone() == (2,)
+
+
+def test_data_source_migration_recovers_after_version_record_is_missing(
+    db_connection,
+) -> None:
+    db_connection.execute("DELETE FROM schema_migrations WHERE version = 3")
+    db_connection.commit()
+
+    migrate(db_connection)
+
+    assert db_connection.execute(
+        "SELECT version FROM schema_migrations WHERE version = 3"
+    ).fetchone() == (3,)

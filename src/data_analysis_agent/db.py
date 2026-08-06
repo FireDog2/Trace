@@ -126,7 +126,7 @@ CREATE TABLE IF NOT EXISTS model_configuration (
 """
 
 MIGRATION_3_SQL = """
-CREATE TABLE data_sources (
+CREATE TABLE IF NOT EXISTS data_sources (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(id),
     name TEXT NOT NULL,
@@ -138,7 +138,7 @@ CREATE TABLE data_sources (
     UNIQUE(project_id, name)
 );
 
-CREATE TABLE data_access_policies (
+CREATE TABLE IF NOT EXISTS data_access_policies (
     id TEXT PRIMARY KEY,
     data_source_id TEXT NOT NULL REFERENCES data_sources(id),
     table_name TEXT NOT NULL,
@@ -151,7 +151,7 @@ CREATE TABLE data_access_policies (
     UNIQUE(data_source_id, table_name, column_name)
 );
 
-CREATE TABLE task_query_budget (
+CREATE TABLE IF NOT EXISTS task_query_budget (
     task_id TEXT PRIMARY KEY REFERENCES tasks(id),
     attempts INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL
