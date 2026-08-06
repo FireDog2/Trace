@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from threading import Event
+from queue import Queue
+from threading import Barrier, Event, Lock, Thread
 
 import pytest
 
 import data_analysis_agent.team as team_module
 from data_analysis_agent.model_config import SecretProtector
+from data_analysis_agent.db import connect_database
 from data_analysis_agent.providers import ModelResponse, ProviderError, ScriptedProvider
+from data_analysis_agent.repositories import ProjectRepository, TaskRepository
 from data_analysis_agent.team import AgentRole, AgentRunStatus, TeamRepository, TeammateRunner
 from data_analysis_agent.tools import ToolCall, ToolContext, ToolResult
 
@@ -328,6 +332,178 @@ def test_working_run_continues_without_illegal_self_transition(settings, db_conn
         settings=settings, provider=ScriptedProvider([ModelResponse('{"ok":true}', ())]), tools=tool_registry, repository=repository,
     ).run(run.id)
     assert result.status is AgentRunStatus.COMPLETED
+
+
+def test_concurrent_runners_execute_only_lease_owner_for_working_run(settings, tmp_path, tool_registry) -> None:
+    """Removing the durable worker claim lets both runners call the model for one working run."""
+    database_path = tmp_path / "concurrent-teammate-runner.sqlite3"
+    owner_connection = connect_database(replace(settings, database_path=database_path))
+    contender_connection = connect_database(replace(settings, database_path=database_path))
+    try:
+        project = ProjectRepository(owner_connection).create("Concurrent runner")
+        task = TaskRepository(owner_connection).create(project.id, "Complete exactly once")
+        owner_repository = TeamRepository(owner_connection)
+        contender_repository = TeamRepository(contender_connection)
+        run = owner_repository.create_run(task.id, AgentRole.KNOWLEDGE, "Return a handoff")
+        owner_repository.transition_run(run.id, AgentRunStatus.WORKING)
+        owner_claimed, provider_entered, allow_owner, contender_mutated = Event(), Event(), Event(), Event()
+        claim_owner = owner_repository.claim_worker
+        claim_contender = contender_repository.claim_worker
+
+        def owner_claim_worker(*args, **kwargs):
+            claimed = claim_owner(*args, **kwargs)
+            owner_claimed.set()
+            return claimed
+
+        def contender_claim_worker(*args, **kwargs):
+            assert owner_claimed.wait(timeout=5)
+            return claim_contender(*args, **kwargs)
+
+        def unexpected_contender_mutation(*args, **kwargs):
+            del args, kwargs
+            contender_mutated.set()
+            raise AssertionError("A runner without the lease must not mutate the run")
+
+        owner_repository.claim_worker = owner_claim_worker  # type: ignore[method-assign]
+        contender_repository.claim_worker = contender_claim_worker  # type: ignore[method-assign]
+        for method in ("transition_run", "reserve_turn", "complete_run", "fail_run", "append_message"):
+            setattr(contender_repository, method, unexpected_contender_mutation)
+        provider_lock = Lock()
+
+        class BlockingProvider:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def complete(self, request):
+                del request
+                with provider_lock:
+                    self.calls += 1
+                provider_entered.set()
+                assert allow_owner.wait(timeout=5)
+                return ModelResponse('{"owner":true}', ())
+
+        provider = BlockingProvider()
+        barrier = Barrier(2)
+        outcomes: Queue[AgentRun] = Queue()
+
+        def execute(repository: TeamRepository) -> AgentRun:
+            barrier.wait(timeout=5)
+            result = TeammateRunner(
+                settings=replace(settings, max_teammate_turns=1), provider=provider,
+                tools=tool_registry, repository=repository,
+            ).run(run.id)
+            outcomes.put(result)
+            return result
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = (pool.submit(execute, owner_repository), pool.submit(execute, contender_repository))
+            assert provider_entered.wait(timeout=5)
+            busy = outcomes.get(timeout=5)
+            held = owner_repository.get_run(run.id)
+            assert busy.status is AgentRunStatus.WORKING
+            assert held.status is AgentRunStatus.WORKING
+            assert held.worker_token is not None
+            assert held.turns_used == 1
+            assert provider.calls == 1
+            assert not contender_mutated.is_set()
+
+            allow_owner.set()
+            completed = outcomes.get(timeout=5)
+            assert [future.result(timeout=5) for future in futures]
+
+        assert completed.status is AgentRunStatus.COMPLETED
+        assert completed.result_json == '{"owner":true}'
+        assert provider.calls == 1
+        assert not contender_mutated.is_set()
+        final = owner_repository.get_run(run.id)
+        assert final.status is AgentRunStatus.COMPLETED
+        assert final.worker_token is None
+    finally:
+        contender_connection.close()
+        owner_connection.close()
+
+
+def test_owner_keeps_lease_between_turns_and_blocks_midrun_contender(settings, tmp_path, tool_registry) -> None:
+    """Removing the lease between turns lets a contender transition or call the provider mid-run."""
+    database_path = tmp_path / "midturn-teammate-runner.sqlite3"
+    owner_connection = connect_database(replace(settings, database_path=database_path))
+    contender_connection = connect_database(replace(settings, database_path=database_path))
+    try:
+        project = ProjectRepository(owner_connection).create("Midturn lease")
+        task = TaskRepository(owner_connection).create(project.id, "Finish after a tool")
+        owner_repository = TeamRepository(owner_connection)
+        contender_repository = TeamRepository(contender_connection)
+        run = owner_repository.create_run(task.id, AgentRole.KNOWLEDGE, "Use one tool then hand off")
+        second_started, second_finished, transition_called = Event(), Event(), Event()
+        contender_outcomes: Queue[AgentRun] = Queue()
+
+        def unexpected_transition(*args, **kwargs):
+            del args, kwargs
+            transition_called.set()
+            raise AssertionError("A runner without the lease must not transition the run")
+
+        contender_repository.transition_run = unexpected_transition  # type: ignore[method-assign]
+
+        class TwoTurnProvider:
+            def __init__(self) -> None:
+                self.calls = 0
+                self._lock = Lock()
+
+            def complete(self, request):
+                del request
+                with self._lock:
+                    self.calls += 1
+                    if self.calls == 1:
+                        return ModelResponse("", (ToolCall("inspect", "inspect_workspace", {}),))
+                    return ModelResponse('{"completed":"after tool"}', ())
+
+        provider = TwoTurnProvider()
+
+        def run_contender() -> None:
+            second_started.set()
+            try:
+                contender_outcomes.put(
+                    TeammateRunner(
+                        settings=replace(settings, max_teammate_turns=2), provider=provider,
+                        tools=tool_registry, repository=contender_repository,
+                    ).run(run.id)
+                )
+            finally:
+                second_finished.set()
+
+        class Registry:
+            def restrict(self, allowed):
+                del allowed
+                return self
+
+            def schemas(self):
+                return ()
+
+            def execute(self, call, context):
+                del context
+                contender = Thread(target=run_contender)
+                contender.start()
+                assert second_started.wait(timeout=5)
+                assert second_finished.wait(timeout=5)
+                contender.join(timeout=5)
+                assert not contender.is_alive()
+                return ToolResult(call.id, True, {"inspected": True})
+
+        completed = TeammateRunner(
+            settings=replace(settings, max_teammate_turns=2), provider=provider,
+            tools=Registry(), repository=owner_repository,
+        ).run(run.id)
+
+        contender = contender_outcomes.get(timeout=5)
+        assert contender.status is AgentRunStatus.WORKING
+        assert not transition_called.is_set()
+        assert provider.calls == 2
+        assert completed.status is AgentRunStatus.COMPLETED
+        assert completed.turns_used == 2
+        assert completed.worker_token is None
+    finally:
+        contender_connection.close()
+        owner_connection.close()
 
 
 @pytest.mark.parametrize("text", ('{"value":NaN}', '{"value":Infinity}', '{"value":-Infinity}'))
