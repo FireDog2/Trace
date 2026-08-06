@@ -98,7 +98,7 @@ _SAFE_ERROR_MESSAGES = {
     "invalid_handoff": "Teammate returned an invalid handoff",
     "provider_error": "The model provider failed",
     "tool_error": "A teammate tool failed unexpectedly",
-    "message_protection_error": "Protected teammate message storage is unavailable",
+    "message_persistence_error": "Protected teammate message storage is unavailable",
 }
 
 ROLE_TOOLS: dict[AgentRole, frozenset[str]] = {
@@ -454,6 +454,9 @@ class TeammateRunner:
                 return self._repository.fail_run(run.id, "provider_error")
             except Exception:
                 return self._repository.fail_run(run.id, "provider_error")
+            terminal = self._terminal_before_action(run.id, deadline)
+            if terminal is not None:
+                return terminal
             if not response.tool_calls:
                 try:
                     return self._repository.complete_run(run.id, self._parse_handoff(response.text))
@@ -465,11 +468,25 @@ class TeammateRunner:
         return self._repository.fail_run(run.id, "agent_turn_limit")
 
     def _terminal_before_action(self, run_id: str, deadline: float) -> AgentRun | None:
-        if self._cancelled(run_id):
+        boundary = self._boundary_category(run_id, deadline)
+        if boundary == "cancelled":
             return self._repository.transition_run(run_id, AgentRunStatus.CANCELLED)
-        if monotonic() >= deadline:
+        if boundary == "agent_timeout":
             return self._repository.fail_run(run_id, "agent_timeout")
         return None
+
+    def _boundary_category(self, run_id: str, deadline: float) -> str | None:
+        # Cancellation wins over a coincident deadline because it is explicit user intent.
+        if self._cancelled(run_id):
+            return "cancelled"
+        if monotonic() >= deadline:
+            return "agent_timeout"
+        return None
+
+    def _finish_boundary(self, run_id: str, boundary: str) -> AgentRun:
+        if boundary == "cancelled":
+            return self._repository.transition_run(run_id, AgentRunStatus.CANCELLED)
+        return self._repository.fail_run(run_id, "agent_timeout")
 
     def _cancelled(self, run_id: str) -> bool:
         return self._cancel_event.is_set() or self._repository.cancel_requested(run_id)
@@ -491,25 +508,37 @@ class TeammateRunner:
     ) -> AgentRun | None:
         try:
             self._record_tool_calls(run, calls)
-        except ProtectedMessageError:
-            return self._repository.fail_run(run.id, "message_protection_error")
+        except Exception:
+            return self._repository.fail_run(run.id, "message_persistence_error")
         context = ToolContext(project_id=self._repository.project_id_for_run(run.id), task_id=run.task_id, agent_id=run.id, run_id=run.id)
         for index, call in enumerate(calls):
-            terminal = self._terminal_before_action(run.id, deadline)
-            if terminal is not None:
-                self._record_cancelled(run.id, calls[index:], "cancelled_due_to_cancel")
-                return terminal
+            boundary = self._boundary_category(run.id, deadline)
+            if boundary is not None:
+                if not self._try_record_cancelled(run.id, calls[index:], "cancelled_due_to_cancel"):
+                    return self._repository.fail_run(run.id, "message_persistence_error")
+                return self._finish_boundary(run.id, boundary)
             try:
                 result = tools.execute(call, context)
             except Exception:
-                self._record_result(run.id, call.name, ToolResult(call.id, False, {}, "tool_error", "Tool failed"))
+                try:
+                    self._record_result(run.id, call.name, ToolResult(call.id, False, {}, "tool_error", "Tool failed"))
+                except Exception:
+                    return self._repository.fail_run(run.id, "message_persistence_error")
+                if not self._try_record_cancelled(run.id, calls[index + 1:], "cancelled_due_to_tool_error"):
+                    return self._repository.fail_run(run.id, "message_persistence_error")
                 return self._repository.fail_run(run.id, "tool_error")
             try:
                 self._record_result(run.id, call.name, result)
-            except ProtectedMessageError:
-                return self._repository.fail_run(run.id, "message_protection_error")
+            except Exception:
+                return self._repository.fail_run(run.id, "message_persistence_error")
+            boundary = self._boundary_category(run.id, deadline)
+            if boundary is not None:
+                if not self._try_record_cancelled(run.id, calls[index + 1:], "cancelled_due_to_cancel"):
+                    return self._repository.fail_run(run.id, "message_persistence_error")
+                return self._finish_boundary(run.id, boundary)
             if result.pauses_task:
-                self._record_cancelled(run.id, calls[index + 1:], "cancelled_due_to_pause")
+                if not self._try_record_cancelled(run.id, calls[index + 1:], "cancelled_due_to_pause"):
+                    return self._repository.fail_run(run.id, "message_persistence_error")
                 return self._repository.transition_run(run.id, AgentRunStatus.WAITING)
         return None
 
@@ -526,8 +555,8 @@ class TeammateRunner:
     def _record_result(self, run_id: str, tool_name: str, result: ToolResult) -> None:
         raw = _tool_result_json(result)
         safe = _safe_tool_result_json(result, tool_name)
-        # Database result previews can contain sensitive result values even if the request did not.
-        if tool_name == "query_database":
+        # Only successful rich database results carry raw previews worth encrypting.
+        if tool_name == "query_database" and result.success and _has_rich_database_result(result):
             if self._protected_messages is None:
                 raise ProtectedMessageError("Protected teammate message storage is unavailable")
             self._repository.append_protected_message(run_id, "tool", safe, self._protected_messages.protect(raw))
@@ -538,16 +567,26 @@ class TeammateRunner:
         for call in calls:
             self._record_result(run_id, call.name, ToolResult(call.id, False, {}, category, "Cancelled before execution"))
 
+    def _try_record_cancelled(self, run_id: str, calls: tuple[ToolCall, ...], category: str) -> bool:
+        try:
+            self._record_cancelled(run_id, calls, category)
+            return True
+        except Exception:
+            return False
+
     def _parse_handoff(self, text: str) -> str:
         if not text or len(text.encode("utf-8")) > _MAX_HANDOFF_BYTES:
             raise ValueError("invalid handoff")
         try:
-            value = json.loads(text)
-        except (TypeError, json.JSONDecodeError) as exc:
+            value = json.loads(text, parse_constant=_reject_non_finite_json)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError("invalid handoff") from exc
         if not isinstance(value, dict):
             raise ValueError("invalid handoff")
-        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        try:
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid handoff") from exc
 
 
 def _safe_tool_call(call: ToolCall) -> dict[str, object]:
@@ -557,6 +596,14 @@ def _safe_tool_call(call: ToolCall) -> dict[str, object]:
         "sql_hash": sha256(str(call.arguments.get("sql", "")).encode("utf-8")).hexdigest(),
         "data_source_id_hash": sha256(str(call.arguments.get("data_source_id", "")).encode("utf-8")).hexdigest(),
     }}
+
+
+def _has_rich_database_result(result: ToolResult) -> bool:
+    return isinstance(result.output, dict) and any(key in result.output for key in ("preview", "rows", "raw_result"))
+
+
+def _reject_non_finite_json(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant: {value}")
 
 
 def _tool_result_json(result: ToolResult) -> str:

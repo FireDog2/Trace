@@ -6,6 +6,7 @@ from threading import Event
 
 import pytest
 
+import data_analysis_agent.team as team_module
 from data_analysis_agent.model_config import SecretProtector
 from data_analysis_agent.providers import ModelResponse, ProviderError, ScriptedProvider
 from data_analysis_agent.team import AgentRole, AgentRunStatus, TeamRepository, TeammateRunner
@@ -143,3 +144,122 @@ def test_teammate_cancellation_before_each_call_and_remaining_call_results(setti
     messages = repository.list_messages(run.id)
     assert [message.role for message in messages] == ["assistant_tool_call", "tool", "tool"]
     assert "cancelled_due_to_cancel" in messages[-1].content
+
+
+def test_response_boundary_cancellation_wins_before_handoff_or_tool_history(settings, db_connection, task, tool_registry) -> None:
+    """A cancellation raised during a blocking model call wins before its response is persisted."""
+    repository = TeamRepository(db_connection)
+    run = repository.create_run(task.id, AgentRole.KNOWLEDGE, "Inspect workspace")
+    cancelled = Event()
+
+    class Provider:
+        def complete(self, request):
+            del request
+            cancelled.set()
+            return ModelResponse('{"would":"complete"}', ())
+
+    result = TeammateRunner(settings=settings, provider=Provider(), tools=tool_registry, repository=repository, cancel_event=cancelled).run(run.id)
+
+    assert result.status is AgentRunStatus.CANCELLED
+    assert repository.list_messages(run.id) == ()
+
+
+def test_response_boundary_deadline_wins_before_handoff(settings, db_connection, task, tool_registry, monkeypatch) -> None:
+    """A model response arriving after deadline cannot complete the teammate."""
+    repository = TeamRepository(db_connection)
+    run = repository.create_run(task.id, AgentRole.KNOWLEDGE, "Inspect workspace")
+    moments = iter((0.0, 0.0, 2.0))
+    monkeypatch.setattr(team_module, "monotonic", lambda: next(moments))
+
+    result = TeammateRunner(
+        settings=replace(settings, teammate_timeout_seconds=1),
+        provider=ScriptedProvider([ModelResponse('{"would":"complete"}', ())]), tools=tool_registry, repository=repository,
+    ).run(run.id)
+
+    assert result.status is AgentRunStatus.FAILED
+    assert result.error_category == "agent_timeout"
+    assert repository.list_messages(run.id) == ()
+
+
+def test_safe_database_error_result_does_not_require_second_protection(settings, db_connection, task) -> None:
+    """A failed database tool has an already-safe result message and must not encrypt it again."""
+    class ProtectOnlyOnce:
+        def __init__(self): self.calls = 0
+        def protect(self, value):
+            self.calls += 1
+            if self.calls > 1: raise RuntimeError("protector unavailable")
+            return b"cipher:" + value.encode()
+        def unprotect(self, value): return value.removeprefix(b"cipher:").decode()
+
+    class Registry:
+        def restrict(self, allowed): return self
+        def schemas(self): return ()
+        def execute(self, call, context):
+            del context
+            return ToolResult(call.id, False, {}, "internal_tool_error", "Tool failed")
+
+    repository = TeamRepository(db_connection)
+    run = repository.create_run(task.id, AgentRole.SQL, "Query customers")
+    protector = ProtectOnlyOnce()
+    result = TeammateRunner(
+        settings=settings,
+        provider=ScriptedProvider([
+            ModelResponse("", (ToolCall("db", "query_database", {"data_source_id": "source", "sql": "SELECT 1"}),)),
+            ModelResponse('{"status":"handled"}', ()),
+        ]),
+        tools=Registry(), repository=repository, secret_protector=protector,
+    ).run(run.id)
+
+    assert result.status is AgentRunStatus.COMPLETED
+    assert protector.calls == 1
+    assert db_connection.execute("SELECT COUNT(*) FROM protected_agent_message_payloads").fetchone()[0] == 1
+
+
+def test_throwing_database_tool_with_failing_later_protection_terminates_and_pairs_calls(settings, db_connection, task) -> None:
+    """A tool exception cannot strand a run, and skipped sibling calls still receive results."""
+    class ProtectOnlyOnce:
+        def __init__(self): self.calls = 0
+        def protect(self, value):
+            self.calls += 1
+            if self.calls > 1: raise RuntimeError("protector unavailable")
+            return b"cipher:" + value.encode()
+        def unprotect(self, value): return value.removeprefix(b"cipher:").decode()
+
+    class Registry:
+        def restrict(self, allowed): return self
+        def schemas(self): return ()
+        def execute(self, call, context):
+            del call, context
+            raise RuntimeError("tool secret")
+
+    repository = TeamRepository(db_connection)
+    run = repository.create_run(task.id, AgentRole.SQL, "Query customers")
+    result = TeammateRunner(
+        settings=settings,
+        provider=ScriptedProvider([ModelResponse("", (
+            ToolCall("db", "query_database", {"data_source_id": "source", "sql": "SELECT 1"}),
+            ToolCall("later", "inspect_workspace", {}),
+        ))]),
+        tools=Registry(), repository=repository, secret_protector=ProtectOnlyOnce(),
+    ).run(run.id)
+
+    assert result.status is AgentRunStatus.FAILED
+    assert result.error_category == "tool_error"
+    messages = repository.list_messages(run.id)
+    assert [message.role for message in messages] == ["assistant_tool_call", "tool", "tool"]
+    assert "cancelled_due_to_tool_error" in messages[-1].content
+
+
+@pytest.mark.parametrize("text", ('{"value":NaN}', '{"value":Infinity}', '{"value":-Infinity}'))
+def test_teammate_rejects_non_finite_json_handoffs(settings, db_connection, task, tool_registry, text) -> None:
+    """Non-finite JSON constants cannot enter durable handoff results."""
+    repository = TeamRepository(db_connection)
+    run = repository.create_run(task.id, AgentRole.KNOWLEDGE, "Find definition")
+
+    failed = TeammateRunner(
+        settings=settings, provider=ScriptedProvider([ModelResponse(text, ())]), tools=tool_registry, repository=repository,
+    ).run(run.id)
+
+    assert failed.status is AgentRunStatus.FAILED
+    assert failed.error_category == "invalid_handoff"
+    assert failed.result_json is None

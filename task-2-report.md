@@ -16,3 +16,16 @@ Verification (shared `G:\data-analysis-agent\.venv`):
 - `pytest tests/test_teammate_runner.py tests/test_team_repository.py tests/test_tools.py tests/test_agent.py -v`: 31 passed.
 - `pytest -q`: 210 passed, 1 skipped (`TEST_POSTGRES_DSN` unset), 1 existing dependency deprecation warning.
 - `git diff --check`: no whitespace errors.
+
+## Fix round 1/5
+
+- Re-check cancellation (which wins ties) and deadline immediately after each
+  model response, plus after each tool handler result, before any subsequent
+  persistence, tool, or handoff completion.
+- Encrypt database results only when successful and rich (`preview`, `rows`, or
+  `raw_result`); error, approval, denied, and cancellation results remain safe
+  summaries. Persistence failures now end terminally with
+  `message_persistence_error`, and sibling tool calls always receive a paired
+  cancelled result after a tool exception.
+- Reject `NaN`, `Infinity`, and `-Infinity` in JSON handoffs and prohibit
+  non-finite values in the canonical serialized result.
