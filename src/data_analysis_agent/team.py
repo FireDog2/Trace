@@ -57,6 +57,8 @@ class AgentRun:
     completed_at: str | None
     turns_used: int
     deadline_at: str | None
+    worker_token: str | None
+    worker_claimed_at: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,18 +139,18 @@ class TeamRepository:
             status=AgentRunStatus.CREATED, result_json=None, error_category=None,
             error_message=None, cancel_requested=False, created_at=utc_now(),
             started_at=None, completed_at=None,
-            turns_used=0, deadline_at=None,
+            turns_used=0, deadline_at=None, worker_token=None, worker_claimed_at=None,
         )
         try:
             self._connection.execute("BEGIN IMMEDIATE")
             self._connection.execute(
                 "INSERT INTO agent_runs("
                 "id, task_id, role, objective, status, result_json, error_category, "
-                "error_message, cancel_requested, created_at, started_at, completed_at, turns_used, deadline_at"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "error_message, cancel_requested, created_at, started_at, completed_at, turns_used, deadline_at, worker_token, worker_claimed_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     run.id, run.task_id, run.role, run.objective, run.status, None, None,
-                    None, 0, run.created_at, None, None, 0, None,
+                    None, 0, run.created_at, None, None, 0, None, None, None,
                 ),
             )
             self._connection.commit()
@@ -206,7 +208,29 @@ class TeamRepository:
         return str(row["project_id"])
 
     @sqlite_connection_guarded
-    def reserve_turn(self, agent_run_id: str, max_turns: int, timeout_seconds: int) -> AgentRun | None:
+    def claim_worker(self, agent_run_id: str, token: str) -> AgentRun | None:
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            current = self._read_run(agent_run_id)
+            if current.worker_token == token:
+                self._connection.commit(); return current
+            cursor = self._connection.execute(
+                "UPDATE agent_runs SET worker_token = ?, worker_claimed_at = ? WHERE id = ? "
+                "AND worker_token IS NULL AND status IN ('created', 'waiting', 'working')",
+                (token, utc_now(), agent_run_id),
+            )
+            self._connection.commit()
+            return replace(current, worker_token=token, worker_claimed_at=utc_now()) if cursor.rowcount == 1 else None
+        except Exception:
+            self._connection.rollback(); raise
+
+    @sqlite_connection_guarded
+    def release_worker(self, agent_run_id: str, token: str) -> None:
+        self._connection.execute("UPDATE agent_runs SET worker_token = NULL, worker_claimed_at = NULL WHERE id = ? AND worker_token = ?", (agent_run_id, token))
+        self._connection.commit()
+
+    @sqlite_connection_guarded
+    def reserve_turn(self, agent_run_id: str, token: str, max_turns: int, timeout_seconds: int) -> AgentRun | None:
         """Atomically establish a durable deadline and claim one model turn when available."""
         try:
             self._connection.execute("BEGIN IMMEDIATE")
@@ -216,9 +240,9 @@ class TeamRepository:
             if current.deadline_at is None:
                 self._connection.execute("UPDATE agent_runs SET deadline_at = ? WHERE id = ?", (deadline_at, agent_run_id))
             cursor = self._connection.execute(
-                "UPDATE agent_runs SET turns_used = turns_used + 1 WHERE id = ? "
+                "UPDATE agent_runs SET turns_used = turns_used + 1 WHERE id = ? AND worker_token = ? "
                 "AND turns_used < ? AND deadline_at > ?",
-                (agent_run_id, max_turns, now.isoformat()),
+                (agent_run_id, token, max_turns, now.isoformat()),
             )
             self._connection.commit()
             return replace(current, turns_used=current.turns_used + 1, deadline_at=deadline_at) if cursor.rowcount == 1 else None
@@ -366,7 +390,7 @@ class TeamRepository:
             completed_at = utc_now()
             cursor = self._connection.execute(
                 "UPDATE agent_runs SET status = 'failed', error_category = 'interrupted', "
-                "error_message = ?, completed_at = ? WHERE status IN ('working', 'waiting')",
+                "error_message = ?, completed_at = ?, worker_token = NULL, worker_claimed_at = NULL WHERE status IN ('working', 'waiting')",
                 (_SAFE_ERROR_MESSAGES["interrupted"], completed_at),
             )
             self._connection.commit()
@@ -405,6 +429,7 @@ class TeamRepository:
             error_message=error_message, cancel_requested=current.cancel_requested,
             created_at=current.created_at, started_at=started_at, completed_at=completed_at,
             turns_used=current.turns_used, deadline_at=current.deadline_at,
+            worker_token=current.worker_token, worker_claimed_at=current.worker_claimed_at,
         )
 
 
@@ -416,6 +441,7 @@ def _run_from_row(row: sqlite3.Row) -> AgentRun:
         error_message=row["error_message"], cancel_requested=bool(row["cancel_requested"]),
         created_at=row["created_at"], started_at=row["started_at"], completed_at=row["completed_at"],
         turns_used=int(row["turns_used"]), deadline_at=row["deadline_at"],
+        worker_token=row["worker_token"], worker_claimed_at=row["worker_claimed_at"],
     )
 
 
@@ -466,6 +492,16 @@ class TeammateRunner:
         run = self._repository.get_run(agent_run_id)
         if run.status in {AgentRunStatus.COMPLETED, AgentRunStatus.FAILED, AgentRunStatus.CANCELLED}:
             return run
+        token = str(uuid4())
+        claimed = self._repository.claim_worker(run.id, token)
+        if claimed is None:
+            return self._repository.get_run(run.id)
+        try:
+            return self._run_owned(claimed, token)
+        finally:
+            self._repository.release_worker(run.id, token)
+
+    def _run_owned(self, run: AgentRun, token: str) -> AgentRun:
         if self._cancelled(run.id):
             return self._repository.transition_run(run.id, AgentRunStatus.CANCELLED)
         if run.status in {AgentRunStatus.CREATED, AgentRunStatus.WAITING}:
@@ -476,7 +512,7 @@ class TeammateRunner:
             if terminal is not None:
                 return terminal
             reserved = self._repository.reserve_turn(
-                run.id, self._settings.max_teammate_turns, self._settings.teammate_timeout_seconds
+                run.id, token, self._settings.max_teammate_turns, self._settings.teammate_timeout_seconds
             )
             if reserved is None:
                 current = self._repository.get_run(run.id)

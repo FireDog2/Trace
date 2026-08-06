@@ -114,8 +114,9 @@ def test_reserve_turn_returns_explicit_claim_or_none(db_connection, task) -> Non
     repository = TeamRepository(db_connection)
     run = repository.create_run(task.id, AgentRole.KNOWLEDGE, "Claim one")
 
-    claimed = repository.reserve_turn(run.id, max_turns=1, timeout_seconds=60)
-    rejected = repository.reserve_turn(run.id, max_turns=1, timeout_seconds=60)
+    assert repository.claim_worker(run.id, "worker") is not None
+    claimed = repository.reserve_turn(run.id, "worker", max_turns=1, timeout_seconds=60)
+    rejected = repository.reserve_turn(run.id, "worker", max_turns=1, timeout_seconds=60)
 
     assert claimed is not None and claimed.turns_used == 1
     assert rejected is None

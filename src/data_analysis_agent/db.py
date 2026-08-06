@@ -283,6 +283,11 @@ ALTER TABLE agent_runs ADD COLUMN turns_used INTEGER NOT NULL DEFAULT 0 CHECK(tu
 ALTER TABLE agent_runs ADD COLUMN deadline_at TEXT;
 """
 
+MIGRATION_10_SQL = """
+ALTER TABLE agent_runs ADD COLUMN worker_token TEXT;
+ALTER TABLE agent_runs ADD COLUMN worker_claimed_at TEXT;
+"""
+
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
@@ -382,6 +387,20 @@ def migrate(connection: sqlite3.Connection) -> None:
             if "deadline_at" not in columns:
                 connection.execute("ALTER TABLE agent_runs ADD COLUMN deadline_at TEXT")
             connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (9, utc_now()))
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+    if 10 not in applied:
+        try:
+            connection.commit()
+            connection.execute("BEGIN IMMEDIATE")
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(agent_runs)")}
+            if "worker_token" not in columns:
+                connection.execute("ALTER TABLE agent_runs ADD COLUMN worker_token TEXT")
+            if "worker_claimed_at" not in columns:
+                connection.execute("ALTER TABLE agent_runs ADD COLUMN worker_claimed_at TEXT")
+            connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (10, utc_now()))
             connection.commit()
         except Exception:
             connection.rollback()

@@ -34,7 +34,7 @@ def test_migrate_creates_versioned_core_tables(db_connection) -> None:
     } <= names
     assert db_connection.execute(
         "SELECT version FROM schema_migrations ORDER BY version"
-    ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)]
+    ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]
     agent_run_columns = {row[1] for row in db_connection.execute("PRAGMA table_info(agent_runs)")}
     assert {"turns_used", "deadline_at"} <= agent_run_columns
     for table in ("data_access_policies", "database_query_attempts"):

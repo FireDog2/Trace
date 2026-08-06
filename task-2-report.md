@@ -49,3 +49,11 @@ Verification (shared `G:\data-analysis-agent\.venv`):
 - Turn claims use an explicit conditional SQLite update; a post-claim boundary
   recheck may terminate without calling the provider, while retaining that
   claimed scheduling attempt for safety.
+
+## Fix round 4/5
+
+- Migration 10 adds durable worker leases. A runner claims a UUID token before
+  work and releases it in `finally`; a competing runner returns the current run
+  without changing state or invoking a provider.
+- Turn reservation is bound to the worker token; startup interruption clears
+  persisted leases.
