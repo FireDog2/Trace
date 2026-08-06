@@ -162,6 +162,17 @@ function fakeApiWithCompletedTask(
 }
 
 describe("analysis workbench", () => {
+  it("uses the TRACE brand and groups model settings by responsibility", async () => {
+    render(<App api={fakeApiWithCompletedTask()} />);
+
+    expect(await screen.findByText("TRACE", { selector: ".brand-block strong" })).toBeVisible();
+    expect(screen.getByText("LOCAL ANALYSIS SYSTEM")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "更改模型配置" }));
+    expect(screen.getByRole("heading", { name: "模型供应商" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "连接配置" })).toBeVisible();
+  });
+
   it("keeps conversation separate from durable task artifacts", async () => {
     render(<App api={fakeApiWithCompletedTask()} />);
 

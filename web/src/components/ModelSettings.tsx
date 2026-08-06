@@ -98,71 +98,81 @@ export function ModelSettings({
         </header>
 
         <form onSubmit={submit}>
-          <fieldset className="provider-selector">
-            <legend>选择厂商</legend>
-            {configuration.providers.map((item, index) => (
-              <label key={item.provider} className={provider === item.provider ? "selected" : ""}>
-                <input
-                  type="radio"
-                  aria-label={item.label}
-                  name="provider"
-                  value={item.provider}
-                  checked={provider === item.provider}
-                  onChange={() => chooseProvider(item.provider)}
-                />
-                <span className="provider-number">0{index + 1}</span>
-                <span>
-                  <strong>{item.label}</strong>
-                  <small>{item.custom_url ? "OpenAI 兼容接口" : "官方接口"}</small>
-                </span>
-              </label>
-            ))}
-          </fieldset>
+          <div className="model-settings-layout">
+            <section className="settings-provider-panel" aria-labelledby="provider-heading">
+              <h3 id="provider-heading">模型供应商</h3>
+              <p>选择分析任务使用的推理服务。</p>
+              <fieldset className="provider-selector">
+                <legend className="sr-only">选择厂商</legend>
+                {configuration.providers.map((item, index) => (
+                  <label key={item.provider} className={provider === item.provider ? "selected" : ""}>
+                    <input
+                      type="radio"
+                      aria-label={item.label}
+                      name="provider"
+                      value={item.provider}
+                      checked={provider === item.provider}
+                      onChange={() => chooseProvider(item.provider)}
+                    />
+                    <span className="provider-number">0{index + 1}</span>
+                    <span>
+                      <strong>{item.label}</strong>
+                      <small>{item.custom_url ? "OpenAI 兼容接口" : "官方接口"}</small>
+                    </span>
+                  </label>
+                ))}
+              </fieldset>
+            </section>
 
-          <div className="settings-fields">
-            <label>
-              <span>Base URL</span>
-              <input
-                aria-label="Base URL"
-                type="url"
-                value={baseUrl}
-                disabled={!definition.custom_url}
-                required
-                onChange={(event) => setBaseUrl(event.target.value)}
-              />
-              {!definition.custom_url && <small>官方地址已锁定，避免误配。</small>}
-            </label>
+            <section className="settings-config-panel" aria-labelledby="configuration-heading">
+              <h3 id="configuration-heading">连接配置</h3>
+              <p>设置当前供应商的服务地址、模型和访问密钥。</p>
+              <div className="settings-fields">
+                <label>
+                  <span>Base URL</span>
+                  <input
+                    aria-label="Base URL"
+                    type="url"
+                    value={baseUrl}
+                    disabled={!definition.custom_url}
+                    required
+                    onChange={(event) => setBaseUrl(event.target.value)}
+                  />
+                  {!definition.custom_url && <small>官方地址已锁定，避免误配。</small>}
+                </label>
 
-            <label>
-              <span>模型</span>
-              {definition.models.length > 0 ? (
-                <select aria-label="模型" value={model} onChange={(event) => setModel(event.target.value)}>
-                  {definition.models.map((item) => <option key={item} value={item}>{item}</option>)}
-                </select>
-              ) : (
-                <input
-                  aria-label="模型名称"
-                  value={model}
-                  required
-                  placeholder="例如：provider/model-name"
-                  onChange={(event) => setModel(event.target.value)}
-                />
-              )}
-            </label>
+                <label>
+                  <span>模型</span>
+                  {definition.models.length > 0 ? (
+                    <select aria-label="模型" value={model} onChange={(event) => setModel(event.target.value)}>
+                      {definition.models.map((item) => <option key={item} value={item}>{item}</option>)}
+                    </select>
+                  ) : (
+                    <input
+                      aria-label="模型名称"
+                      value={model}
+                      required
+                      placeholder="例如：provider/model-name"
+                      onChange={(event) => setModel(event.target.value)}
+                    />
+                  )}
+                </label>
 
-            <label>
-              <span>API Key</span>
-              <input
-                aria-label="API Key"
-                type="password"
-                value={apiKey}
-                required={!preservesKey}
-                autoComplete="new-password"
-                placeholder={preservesKey ? "留空则继续使用已保存的密钥" : "输入厂商 API Key"}
-                onChange={(event) => setApiKey(event.target.value)}
-              />
-              <small>{preservesKey ? "已安全保存；此处不会回显。" : "密钥仅保存在当前 Windows 用户的加密存储中。"}</small>
-            </label>
+                <label>
+                  <span>API Key</span>
+                  <input
+                    aria-label="API Key"
+                    type="password"
+                    value={apiKey}
+                    required={!preservesKey}
+                    autoComplete="new-password"
+                    placeholder={preservesKey ? "留空则继续使用已保存的密钥" : "输入厂商 API Key"}
+                    onChange={(event) => setApiKey(event.target.value)}
+                  />
+                  <small>{preservesKey ? "已安全保存；此处不会回显。" : "密钥仅保存在当前 Windows 用户的加密存储中。"}</small>
+                </label>
+              </div>
+            </section>
           </div>
 
           {error && <p className="settings-error" role="alert">{error}</p>}

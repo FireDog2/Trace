@@ -44,8 +44,8 @@ export function ProjectNav({
   return (
     <nav className="project-rail" aria-label="分析项目">
       <header className="brand-block">
-        <span className="brand-index">TRACE / LOCAL</span>
-        <strong>迹析</strong>
+        <span className="brand-index">LOCAL ANALYSIS SYSTEM</span>
+        <strong>TRACE</strong>
         <p>每个结论，都有来路。</p>
       </header>
 
