@@ -108,3 +108,14 @@ def test_messages_require_existing_task_run_and_have_stable_order(db_connection,
     assert [message.id for message in repository.list_messages(run.id)] == [first.id, second.id]
     with pytest.raises(Exception):
         repository.create_run("missing-task", AgentRole.SQL, "Fails FK")
+
+
+def test_reserve_turn_returns_explicit_claim_or_none(db_connection, task) -> None:
+    repository = TeamRepository(db_connection)
+    run = repository.create_run(task.id, AgentRole.KNOWLEDGE, "Claim one")
+
+    claimed = repository.reserve_turn(run.id, max_turns=1, timeout_seconds=60)
+    rejected = repository.reserve_turn(run.id, max_turns=1, timeout_seconds=60)
+
+    assert claimed is not None and claimed.turns_used == 1
+    assert rejected is None

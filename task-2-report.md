@@ -41,3 +41,11 @@ Verification (shared `G:\data-analysis-agent\.venv`):
 - Verification: focused migration/teammate suite: 24 passed; full suite: 220
   passed, 1 Postgres integration test skipped because `TEST_POSTGRES_DSN` is
   unset.
+
+## Fix round 3/5
+
+- Pre-tool cancellation and timeout now use distinct paired-result categories.
+- Re-entry continues an already `working` run without an invalid self-transition.
+- Turn claims use an explicit conditional SQLite update; a post-claim boundary
+  recheck may terminate without calling the provider, while retaining that
+  claimed scheduling attempt for safety.

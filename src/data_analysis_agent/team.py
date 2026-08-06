@@ -206,23 +206,22 @@ class TeamRepository:
         return str(row["project_id"])
 
     @sqlite_connection_guarded
-    def reserve_turn(self, agent_run_id: str, max_turns: int, timeout_seconds: int) -> AgentRun:
+    def reserve_turn(self, agent_run_id: str, max_turns: int, timeout_seconds: int) -> AgentRun | None:
         """Atomically establish a durable deadline and claim one model turn when available."""
         try:
             self._connection.execute("BEGIN IMMEDIATE")
             current = _run_from_row(self._get_row(agent_run_id))
             now = _utc_datetime(utc_now())
             deadline_at = current.deadline_at or (now + timedelta(seconds=timeout_seconds)).isoformat()
-            deadline = _utc_datetime(deadline_at)
-            turns = current.turns_used
-            if now < deadline and turns < max_turns:
-                turns += 1
-            self._connection.execute(
-                "UPDATE agent_runs SET turns_used = ?, deadline_at = ? WHERE id = ?",
-                (turns, deadline_at, agent_run_id),
+            if current.deadline_at is None:
+                self._connection.execute("UPDATE agent_runs SET deadline_at = ? WHERE id = ?", (deadline_at, agent_run_id))
+            cursor = self._connection.execute(
+                "UPDATE agent_runs SET turns_used = turns_used + 1 WHERE id = ? "
+                "AND turns_used < ? AND deadline_at > ?",
+                (agent_run_id, max_turns, now.isoformat()),
             )
             self._connection.commit()
-            return replace(current, turns_used=turns, deadline_at=deadline_at)
+            return replace(current, turns_used=current.turns_used + 1, deadline_at=deadline_at) if cursor.rowcount == 1 else None
         except Exception:
             self._connection.rollback()
             raise
@@ -469,7 +468,8 @@ class TeammateRunner:
             return run
         if self._cancelled(run.id):
             return self._repository.transition_run(run.id, AgentRunStatus.CANCELLED)
-        run = self._repository.transition_run(run.id, AgentRunStatus.WORKING)
+        if run.status in {AgentRunStatus.CREATED, AgentRunStatus.WAITING}:
+            run = self._repository.transition_run(run.id, AgentRunStatus.WORKING)
         tools = self._tools.restrict(ROLE_TOOLS[run.role])
         while True:
             terminal = self._terminal_before_action(run)
@@ -478,13 +478,15 @@ class TeammateRunner:
             reserved = self._repository.reserve_turn(
                 run.id, self._settings.max_teammate_turns, self._settings.teammate_timeout_seconds
             )
-            if reserved.deadline_at is None:
-                return self._repository.fail_run(run.id, "agent_timeout")
-            if _utc_datetime(utc_now()) >= _utc_datetime(reserved.deadline_at):
-                return self._repository.fail_run(run.id, "agent_timeout")
-            if reserved.turns_used == run.turns_used:
+            if reserved is None:
+                current = self._repository.get_run(run.id)
+                if self._boundary_category(current) == "agent_timeout":
+                    return self._repository.fail_run(run.id, "agent_timeout")
                 return self._repository.fail_run(run.id, "agent_turn_limit")
             run = reserved
+            terminal = self._terminal_before_action(run)
+            if terminal is not None:
+                return terminal
             try:
                 response = self._provider.complete(self._request(run, tools))
             except (ProviderError, ProtectedMessageError):
@@ -549,7 +551,8 @@ class TeammateRunner:
         for index, call in enumerate(calls):
             boundary = self._boundary_category(run)
             if boundary is not None:
-                if not self._try_record_cancelled(run.id, calls[index:], "cancelled_due_to_cancel"):
+                category = "cancelled_due_to_cancel" if boundary == "cancelled" else "cancelled_due_to_timeout"
+                if not self._try_record_cancelled(run.id, calls[index:], category):
                     return self._repository.fail_run(run.id, "message_persistence_error")
                 return self._finish_boundary(run.id, boundary)
             try:

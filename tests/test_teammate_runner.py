@@ -319,6 +319,17 @@ def test_waiting_run_reserves_turns_across_resumes_without_extending_deadline(se
     assert resumed.error_category == "agent_turn_limit"
 
 
+def test_working_run_continues_without_illegal_self_transition(settings, db_connection, task, tool_registry) -> None:
+    """A manager re-entry may continue an already-working durable run."""
+    repository = TeamRepository(db_connection)
+    run = repository.create_run(task.id, AgentRole.KNOWLEDGE, "Inspect workspace")
+    repository.transition_run(run.id, AgentRunStatus.WORKING)
+    result = TeammateRunner(
+        settings=settings, provider=ScriptedProvider([ModelResponse('{"ok":true}', ())]), tools=tool_registry, repository=repository,
+    ).run(run.id)
+    assert result.status is AgentRunStatus.COMPLETED
+
+
 @pytest.mark.parametrize("text", ('{"value":NaN}', '{"value":Infinity}', '{"value":-Infinity}'))
 def test_teammate_rejects_non_finite_json_handoffs(settings, db_connection, task, tool_registry, text) -> None:
     """Non-finite JSON constants cannot enter durable handoff results."""
