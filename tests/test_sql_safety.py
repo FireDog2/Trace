@@ -261,3 +261,48 @@ def test_validator_allows_reviewed_read_only_analysis_functions(sql: str) -> Non
     result = SqlAstValidator().validate(sql, CATALOG, POLICY)
 
     assert result.access_level is AccessLevel.ALLOWED
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT evil.lower(region) FROM orders",
+        "SELECT PG_CATALOG.LOWER(region) FROM orders",
+        "SELECT COALESCE(evil.lower(region), region) FROM orders",
+        "SELECT evil.sum(amount) FROM orders",
+    ],
+)
+def test_validator_rejects_every_schema_qualified_function(sql: str) -> None:
+    with pytest.raises(SqlValidationError) as error:
+        SqlAstValidator().validate(sql, CATALOG, POLICY)
+
+    assert error.value.code == "unsafe_function"
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT region::evil.custom_type FROM orders",
+        "SELECT CAST(region AS custom_type) FROM orders",
+    ],
+)
+def test_validator_rejects_custom_cast_types(sql: str) -> None:
+    with pytest.raises(SqlValidationError) as error:
+        SqlAstValidator().validate(sql, CATALOG, POLICY)
+
+    assert error.value.code == "unsafe_cast"
+
+
+def test_validator_allows_actual_sqlglot_forms_of_reviewed_functions() -> None:
+    result = SqlAstValidator().validate(
+        "SELECT BOOL_AND(amount > 0), STRING_AGG(region, ','), "
+        "POSITION('a' IN UPPER(LOWER(region))), "
+        "TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD'), "
+        "TO_DATE('2026-08-06', 'YYYY-MM-DD'), "
+        "ARRAY_LENGTH(ARRAY[1, 2], 1), CARDINALITY(ARRAY[1, 2]) "
+        "FROM orders",
+        CATALOG,
+        POLICY,
+    )
+
+    assert result.access_level is AccessLevel.ALLOWED

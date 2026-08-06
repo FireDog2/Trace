@@ -60,7 +60,9 @@ _COLUMN_ERROR = re.compile(r"Column '([^']+)' could not be resolved")
 _SAFE_POSTGRES_FUNCTIONS = frozenset(
     {
         # Aggregation and statistics.
+        "array",
         "array_agg",
+        "array_size",
         "avg",
         "bit_and",
         "bit_or",
@@ -71,6 +73,7 @@ _SAFE_POSTGRES_FUNCTIONS = frozenset(
         "covar_pop",
         "covar_samp",
         "every",
+        "group_concat",
         "json_agg",
         "json_object_agg",
         "jsonb_agg",
@@ -84,6 +87,8 @@ _SAFE_POSTGRES_FUNCTIONS = frozenset(
         "stddev_samp",
         "string_agg",
         "sum",
+        "logical_and",
+        "logical_or",
         "var_pop",
         "var_samp",
         "variance",
@@ -109,6 +114,7 @@ _SAFE_POSTGRES_FUNCTIONS = frozenset(
         "rtrim",
         "split_part",
         "strpos",
+        "str_position",
         "substr",
         "substring",
         "trim",
@@ -126,8 +132,10 @@ _SAFE_POSTGRES_FUNCTIONS = frozenset(
         "make_date",
         "now",
         "timestamp_trunc",
+        "time_to_str",
         "to_char",
         "to_date",
+        "str_to_date",
         # Math.
         "abs",
         "cbrt",
@@ -191,6 +199,7 @@ class SqlAstValidator:
         statement = _parse_one_statement(sql)
         catalog_index = _catalog_index(catalog)
         _deny_nested_writes(statement)
+        _validate_safe_casts(statement)
         _validate_safe_functions(statement)
         _validate_catalog_tables(statement, catalog_index)
 
@@ -244,6 +253,11 @@ def _deny_nested_writes(statement: exp.Query) -> None:
 
 def _validate_safe_functions(statement: exp.Query) -> None:
     for function in statement.find_all(exp.Func):
+        if isinstance(function.parent, exp.Dot) and function.parent.expression is function:
+            raise SqlValidationError(
+                "unsafe_function",
+                "Schema-qualified PostgreSQL functions are not allowed",
+            )
         if isinstance(function, exp.Anonymous):
             function_name = function.name.lower()
         else:
@@ -252,6 +266,15 @@ def _validate_safe_functions(statement: exp.Query) -> None:
             raise SqlValidationError(
                 "unsafe_function",
                 f"PostgreSQL function {function_name!r} is not allowed",
+            )
+
+
+def _validate_safe_casts(statement: exp.Query) -> None:
+    for data_type in statement.find_all(exp.DataType):
+        if data_type.this is exp.DataType.Type.USERDEFINED:
+            raise SqlValidationError(
+                "unsafe_cast",
+                "Custom PostgreSQL cast types are not allowed",
             )
 
 

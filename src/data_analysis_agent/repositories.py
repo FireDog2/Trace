@@ -6,7 +6,11 @@ import sqlite3
 from pathlib import Path
 from uuid import uuid4
 
-from data_analysis_agent.db import utc_now
+from data_analysis_agent.db import (
+    sqlite_connection_guarded,
+    sqlite_connection_lock,
+    utc_now,
+)
 from data_analysis_agent.domain import (
     Artifact,
     ArtifactType,
@@ -81,7 +85,9 @@ class ProjectRepository:
     def __init__(self, connection: sqlite3.Connection) -> None:
         connection.row_factory = sqlite3.Row
         self._connection = connection
+        self._lock = sqlite_connection_lock(connection)
 
+    @sqlite_connection_guarded
     def create(self, name: str) -> Project:
         normalized_name = name.strip()
         if not normalized_name:
@@ -102,6 +108,7 @@ class ProjectRepository:
             updated_at=now,
         )
 
+    @sqlite_connection_guarded
     def get(self, project_id: str) -> Project:
         row = self._connection.execute(
             "SELECT id, name, status, created_at, updated_at "
@@ -118,6 +125,7 @@ class ProjectRepository:
             updated_at=row["updated_at"],
         )
 
+    @sqlite_connection_guarded
     def list(self) -> tuple[Project, ...]:
         rows = self._connection.execute(
             "SELECT id, name, status, created_at, updated_at "
@@ -139,7 +147,9 @@ class TaskRepository:
     def __init__(self, connection: sqlite3.Connection) -> None:
         connection.row_factory = sqlite3.Row
         self._connection = connection
+        self._lock = sqlite_connection_lock(connection)
 
+    @sqlite_connection_guarded
     def create(self, project_id: str, objective: str) -> Task:
         normalized_objective = objective.strip()
         if not normalized_objective:
@@ -168,6 +178,7 @@ class TaskRepository:
             updated_at=now,
         )
 
+    @sqlite_connection_guarded
     def get(self, task_id: str) -> Task:
         row = self._connection.execute(
             "SELECT id, project_id, objective, status, created_at, updated_at "
@@ -178,6 +189,7 @@ class TaskRepository:
             raise RecordNotFoundError(f"Task not found: {task_id}")
         return _task_from_row(row)
 
+    @sqlite_connection_guarded
     def transition(self, task_id: str, target: TaskStatus) -> Task:
         current = self.get(task_id)
         if target not in TASK_TRANSITIONS[current.status]:
@@ -197,6 +209,7 @@ class TaskRepository:
             updated_at=updated_at,
         )
 
+    @sqlite_connection_guarded
     def reopen_completed(self, task_id: str) -> Task:
         """Start a persisted follow-up cycle without weakening terminal transitions."""
         current = self.get(task_id)
@@ -219,6 +232,7 @@ class TaskRepository:
             updated_at=updated_at,
         )
 
+    @sqlite_connection_guarded
     def add_message(self, task_id: str, role: str, content: str) -> Message:
         if role not in {"user", "assistant", "assistant_tool_call", "system", "tool"}:
             raise ValueError(f"Unsupported message role: {role}")
@@ -247,6 +261,7 @@ class TaskRepository:
         self._connection.commit()
         return message
 
+    @sqlite_connection_guarded
     def list_messages(self, task_id: str) -> tuple[Message, ...]:
         rows = self._connection.execute(
             "SELECT id, task_id, role, content, created_at FROM messages "
@@ -264,6 +279,7 @@ class TaskRepository:
             for row in rows
         )
 
+    @sqlite_connection_guarded
     def revise_plan(
         self,
         task_id: str,
@@ -329,6 +345,7 @@ class TaskRepository:
             created_at=created_at,
         )
 
+    @sqlite_connection_guarded
     def get_plan_revision(self, revision_id: str) -> PlanRevision:
         revision_row = self._connection.execute(
             "SELECT id, task_id, revision, reason, created_at "
@@ -351,6 +368,7 @@ class TaskRepository:
             created_at=revision_row["created_at"],
         )
 
+    @sqlite_connection_guarded
     def latest_plan(self, task_id: str) -> PlanRevision | None:
         row = self._connection.execute(
             "SELECT id FROM plan_revisions WHERE task_id = ? "
@@ -359,6 +377,7 @@ class TaskRepository:
         ).fetchone()
         return self.get_plan_revision(row["id"]) if row is not None else None
 
+    @sqlite_connection_guarded
     def append_event(
         self,
         task_id: str,
@@ -401,6 +420,7 @@ class TaskRepository:
             created_at=created_at,
         )
 
+    @sqlite_connection_guarded
     def events_after(self, task_id: str, sequence: int) -> tuple[TaskEvent, ...]:
         rows = self._connection.execute(
             "SELECT id, task_id, sequence, event_type, payload_json, created_at "
@@ -409,6 +429,7 @@ class TaskRepository:
         ).fetchall()
         return tuple(_task_event_from_row(row) for row in rows)
 
+    @sqlite_connection_guarded
     def list_for_project(self, project_id: str) -> tuple[Task, ...]:
         rows = self._connection.execute(
             "SELECT id, project_id, objective, status, created_at, updated_at "
@@ -417,6 +438,7 @@ class TaskRepository:
         ).fetchall()
         return tuple(_task_from_row(row) for row in rows)
 
+    @sqlite_connection_guarded
     def start_tool_execution(
         self,
         task_id: str,
@@ -441,6 +463,7 @@ class TaskRepository:
         self._connection.commit()
         return execution_id
 
+    @sqlite_connection_guarded
     def finish_tool_execution(
         self,
         execution_id: str,
@@ -466,8 +489,10 @@ class ArtifactRepository:
     ) -> None:
         connection.row_factory = sqlite3.Row
         self._connection = connection
+        self._lock = sqlite_connection_lock(connection)
         self._workspace = workspace
 
+    @sqlite_connection_guarded
     def register(
         self,
         project_id: str,
@@ -551,6 +576,7 @@ class ArtifactRepository:
             created_at=created_at,
         )
 
+    @sqlite_connection_guarded
     def get(self, artifact_id: str) -> Artifact:
         row = self._connection.execute(
             "SELECT * FROM artifacts WHERE id = ?",
@@ -577,6 +603,7 @@ class ArtifactRepository:
             created_at=row["created_at"],
         )
 
+    @sqlite_connection_guarded
     def list_for_project(self, project_id: str) -> tuple[Artifact, ...]:
         rows = self._connection.execute(
             "SELECT id FROM artifacts WHERE project_id = ? ORDER BY created_at, rowid",
@@ -584,6 +611,7 @@ class ArtifactRepository:
         ).fetchall()
         return tuple(self.get(row["id"]) for row in rows)
 
+    @sqlite_connection_guarded
     def list_for_task(self, task_id: str) -> tuple[Artifact, ...]:
         rows = self._connection.execute(
             "SELECT id FROM artifacts WHERE task_id = ? ORDER BY created_at, rowid",
@@ -591,6 +619,7 @@ class ArtifactRepository:
         ).fetchall()
         return tuple(self.get(row["id"]) for row in rows)
 
+    @sqlite_connection_guarded
     def set_producer(
         self,
         artifact_ids: tuple[str, ...],
@@ -608,6 +637,7 @@ class ArtifactRepository:
         if cursor.rowcount != len(set(artifact_ids)):
             raise InvalidArtifactError("Could not assign producing execution")
 
+    @sqlite_connection_guarded
     def record_evidence(
         self,
         report_artifact_id: str,
@@ -628,6 +658,7 @@ class ArtifactRepository:
         )
         self._connection.commit()
 
+    @sqlite_connection_guarded
     def evidence_for(self, report_artifact_id: str) -> tuple[str, ...]:
         rows = self._connection.execute(
             "SELECT evidence_artifact_id FROM evidence_links "

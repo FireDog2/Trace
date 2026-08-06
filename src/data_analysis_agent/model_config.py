@@ -9,7 +9,11 @@ from enum import StrEnum
 from typing import Protocol
 from urllib.parse import urlsplit
 
-from data_analysis_agent.db import utc_now
+from data_analysis_agent.db import (
+    sqlite_connection_guarded,
+    sqlite_connection_lock,
+    utc_now,
+)
 
 
 class ModelProviderKind(StrEnum):
@@ -153,8 +157,10 @@ class ModelConfigurationRepository:
     ) -> None:
         connection.row_factory = sqlite3.Row
         self._connection = connection
+        self._lock = sqlite_connection_lock(connection)
         self._secret_protector = secret_protector
 
+    @sqlite_connection_guarded
     def get_public(self) -> ModelConfigurationStatus:
         row = self._get_row()
         if row is None:
@@ -175,6 +181,7 @@ class ModelConfigurationRepository:
             updated_at=row["updated_at"],
         )
 
+    @sqlite_connection_guarded
     def save(
         self,
         provider: str | ModelProviderKind,
@@ -231,6 +238,7 @@ class ModelConfigurationRepository:
         self._connection.commit()
         return self.get_public()
 
+    @sqlite_connection_guarded
     def credentials(self) -> ProviderCredentials:
         row = self._get_row()
         if row is None:

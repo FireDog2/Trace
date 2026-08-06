@@ -7,7 +7,11 @@ from types import MappingProxyType
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from data_analysis_agent.db import utc_now
+from data_analysis_agent.db import (
+    sqlite_connection_guarded,
+    sqlite_connection_lock,
+    utc_now,
+)
 from data_analysis_agent.model_config import SecretProtector
 from data_analysis_agent.repositories import RecordNotFoundError, RepositoryError
 
@@ -61,8 +65,10 @@ class DataSourceRepository:
     ) -> None:
         connection.row_factory = sqlite3.Row
         self._connection = connection
+        self._lock = sqlite_connection_lock(connection)
         self._secret_protector = secret_protector
 
+    @sqlite_connection_guarded
     def create(self, project_id: str, name: str, dsn: str) -> DataSource:
         normalized_dsn = _postgres_dsn(dsn)
         source_id = str(uuid4())
@@ -88,12 +94,14 @@ class DataSourceRepository:
             raise RepositoryError("Unable to create data source") from exc
         return self.get_public(source_id)
 
+    @sqlite_connection_guarded
     def get_public(self, data_source_id: str) -> DataSource:
         row = self._public_row(data_source_id)
         if row is None:
             raise RecordNotFoundError(f"Data source not found: {data_source_id}")
         return _data_source_from_row(row)
 
+    @sqlite_connection_guarded
     def credentials(self, data_source_id: str) -> DataSourceCredentials:
         row = self._connection.execute(
             "SELECT id, protected_dsn FROM data_sources WHERE id = ?",
@@ -106,6 +114,7 @@ class DataSourceRepository:
             dsn=self._secret_protector.unprotect(bytes(row["protected_dsn"])),
         )
 
+    @sqlite_connection_guarded
     def list_for_project(self, project_id: str) -> tuple[DataSource, ...]:
         rows = self._connection.execute(
             "SELECT id, project_id, name, dialect, policy_version, created_at, updated_at "
@@ -114,6 +123,7 @@ class DataSourceRepository:
         ).fetchall()
         return tuple(_data_source_from_row(row) for row in rows)
 
+    @sqlite_connection_guarded
     def replace_policies(
         self,
         data_source_id: str,
@@ -166,6 +176,7 @@ class DataSourceRepository:
             self._connection.rollback()
             raise
 
+    @sqlite_connection_guarded
     def policy_snapshot(self, data_source_id: str) -> PolicySnapshot:
         owns_transaction = not self._connection.in_transaction
         if owns_transaction:

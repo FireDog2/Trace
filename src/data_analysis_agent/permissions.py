@@ -157,51 +157,60 @@ class ApprovalRepository:
         action: ToolAction,
         reason: str,
     ) -> ApprovalResolution:
-        action_json = _action_json(action)
         with self._lock:
             try:
                 self._connection.execute("BEGIN IMMEDIATE")
-                rows = self._connection.execute(
-                    "SELECT * FROM approvals "
-                    "WHERE task_id = ? AND action_json = ? "
-                    "ORDER BY created_at, rowid",
-                    (task_id, action_json),
-                ).fetchall()
-                approved = next(
-                    (row for row in rows if row["status"] == "approved"), None
-                )
-                if approved is not None:
-                    cursor = self._connection.execute(
-                        "UPDATE approvals SET status = 'consumed' "
-                        "WHERE id = ? AND status = 'approved'",
-                        (approved["id"],),
-                    )
-                    if cursor.rowcount == 1:
-                        self._connection.commit()
-                        return ApprovalResolution(
-                            "authorized",
-                            replace(_approval_from_row(approved), status="consumed"),
-                        )
-                pending = next(
-                    (row for row in rows if row["status"] == "pending"), None
-                )
-                if pending is not None:
-                    self._connection.commit()
-                    return ApprovalResolution("pending", _approval_from_row(pending))
-                rejected = next(
-                    (row for row in reversed(rows) if row["status"] == "rejected"),
-                    None,
-                )
-                if rejected is not None:
-                    self._connection.commit()
-                    return ApprovalResolution("rejected", _approval_from_row(rejected))
-                approval = _pending_approval(task_id, action, reason)
-                _insert_approval(self._connection, approval)
+                resolution = self.resolve_once_in_transaction(task_id, action, reason)
                 self._connection.commit()
-                return ApprovalResolution("pending", approval, created=True)
+                return resolution
             except Exception:
                 self._connection.rollback()
                 raise
+
+    def resolve_once_in_transaction(
+        self,
+        task_id: str,
+        action: ToolAction,
+        reason: str,
+    ) -> ApprovalResolution:
+        """Resolve an approval without committing the caller-owned transaction."""
+        with self._lock:
+            if not self._connection.in_transaction:
+                raise RuntimeError("approval resolution requires an active transaction")
+            rows = self._connection.execute(
+                "SELECT * FROM approvals "
+                "WHERE task_id = ? AND action_json = ? "
+                "ORDER BY created_at, rowid",
+                (task_id, _action_json(action)),
+            ).fetchall()
+            approved = next(
+                (row for row in rows if row["status"] == "approved"), None
+            )
+            if approved is not None:
+                cursor = self._connection.execute(
+                    "UPDATE approvals SET status = 'consumed' "
+                    "WHERE id = ? AND status = 'approved'",
+                    (approved["id"],),
+                )
+                if cursor.rowcount == 1:
+                    return ApprovalResolution(
+                        "authorized",
+                        replace(_approval_from_row(approved), status="consumed"),
+                    )
+            pending = next(
+                (row for row in rows if row["status"] == "pending"), None
+            )
+            if pending is not None:
+                return ApprovalResolution("pending", _approval_from_row(pending))
+            rejected = next(
+                (row for row in reversed(rows) if row["status"] == "rejected"),
+                None,
+            )
+            if rejected is not None:
+                return ApprovalResolution("rejected", _approval_from_row(rejected))
+            approval = _pending_approval(task_id, action, reason)
+            _insert_approval(self._connection, approval)
+            return ApprovalResolution("pending", approval, created=True)
 
     def decide(self, approval_id: str, approved: bool) -> Approval:
         with self._lock:

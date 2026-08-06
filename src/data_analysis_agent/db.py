@@ -2,19 +2,35 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import UTC, datetime
+from functools import wraps
 from threading import Lock, RLock
+from typing import Any, Callable, TypeVar
 
 from data_analysis_agent.settings import Settings
 
 
 _CONNECTION_LOCKS_GUARD = Lock()
 _CONNECTION_LOCKS: dict[int, RLock] = {}
+_RESULT = TypeVar("_RESULT")
 
 
 def sqlite_connection_lock(connection: sqlite3.Connection) -> RLock:
     connection_id = id(connection)
     with _CONNECTION_LOCKS_GUARD:
         return _CONNECTION_LOCKS.setdefault(connection_id, RLock())
+
+
+def sqlite_connection_guarded(
+    method: Callable[..., _RESULT],
+) -> Callable[..., _RESULT]:
+    """Serialize a repository method on its connection-wide reentrant lock."""
+
+    @wraps(method)
+    def guarded(self: Any, *args: Any, **kwargs: Any) -> _RESULT:
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return guarded
 
 
 MIGRATION_1_SQL = """

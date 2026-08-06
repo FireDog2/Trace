@@ -5,6 +5,7 @@ import io
 import re
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -283,12 +284,6 @@ class SqlSafetyGateway:
                 "The query references data denied by the active policy",
                 query_hash=validated.sql_hash,
             )
-        if not self._consume_budget(task_id):
-            return _denied(
-                "query_budget_exhausted",
-                "The per-task PostgreSQL query budget is exhausted",
-                query_hash=validated.sql_hash,
-            )
 
         try:
             plan = self.driver.explain(
@@ -310,57 +305,104 @@ class SqlSafetyGateway:
             )
 
         approval_reason = _approval_reason(validated, risk)
-        if approval_reason is not None:
-            action = _approval_action(data_source_id, validated, policy.version)
-            if not self._policy_version_matches(data_source_id, policy.version):
-                return _policy_changed(validated.sql_hash, risk)
-            resolution = self.approvals.resolve_once(
-                task_id,
-                action,
-                approval_reason,
-            )
-            if resolution.status == "rejected":
-                return _denied(
-                    "approval_rejected",
-                    "The exact PostgreSQL query was rejected",
-                    query_hash=validated.sql_hash,
-                    risk=risk,
-                )
-            if resolution.status == "pending":
-                approval = resolution.approval
-                current_task = self.tasks.get(task_id)
-                if resolution.created:
-                    if current_task.status is not TaskStatus.NEEDS_INPUT:
-                        self.tasks.transition(task_id, TaskStatus.NEEDS_INPUT)
-                    self.tasks.append_event(
-                        task_id,
-                        "approval.requested",
-                        {
-                            "approval_id": approval.id,
-                            "sql_hash": validated.sql_hash,
-                            "policy_version": policy.version,
-                            "reason": approval_reason,
-                        },
-                    )
-                return SqlGatewayOutcome(
-                    status="approval_required",
-                    query_hash=validated.sql_hash,
-                    risk=risk,
-                    approval_id=approval.id,
-                    message=approval_reason,
-                )
+        pending_resolution = None
+        raw_columns = None
+        raw_rows = None
+        with self._metadata_lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                if not self._policy_version_matches_in_transaction(
+                    data_source_id,
+                    policy.version,
+                ):
+                    self._connection.rollback()
+                    return _policy_changed(validated.sql_hash, risk)
 
-        if not self._policy_version_matches(data_source_id, policy.version):
-            return _policy_changed(validated.sql_hash, risk)
-        try:
-            raw_columns, raw_rows = self.driver.query(
-                credentials.dsn,
-                validated.normalized_sql,
-                statement_timeout_ms=self.settings.postgres_statement_timeout_ms,
-                row_limit=self.settings.postgres_max_rows,
+                if approval_reason is not None:
+                    action = _approval_action(
+                        data_source_id,
+                        validated,
+                        policy.version,
+                    )
+                    resolution = self.approvals.resolve_once_in_transaction(
+                        task_id,
+                        action,
+                        approval_reason,
+                    )
+                    if not self._policy_version_matches_in_transaction(
+                        data_source_id,
+                        policy.version,
+                    ):
+                        self._connection.rollback()
+                        return _policy_changed(validated.sql_hash, risk)
+                    if resolution.status == "rejected":
+                        self._connection.commit()
+                        return _denied(
+                            "approval_rejected",
+                            "The exact PostgreSQL query was rejected",
+                            query_hash=validated.sql_hash,
+                            risk=risk,
+                        )
+                    if resolution.status == "pending":
+                        pending_resolution = resolution
+                        self._connection.commit()
+
+                if pending_resolution is None:
+                    if not self._consume_budget_in_transaction(task_id):
+                        self._connection.rollback()
+                        return _denied(
+                            "query_budget_exhausted",
+                            "The per-task PostgreSQL query budget is exhausted",
+                            query_hash=validated.sql_hash,
+                            risk=risk,
+                        )
+                    try:
+                        raw_columns, raw_rows = self.driver.query(
+                            credentials.dsn,
+                            validated.normalized_sql,
+                            statement_timeout_ms=(
+                                self.settings.postgres_statement_timeout_ms
+                            ),
+                            row_limit=self.settings.postgres_max_rows,
+                        )
+                    except BaseException as exc:
+                        self._connection.rollback()
+                        return _driver_error(
+                            exc,
+                            query_hash=validated.sql_hash,
+                            risk=risk,
+                        )
+                    self._connection.commit()
+            except BaseException:
+                self._connection.rollback()
+                raise
+
+        if pending_resolution is not None:
+            approval = pending_resolution.approval
+            current_task = self.tasks.get(task_id)
+            if pending_resolution.created:
+                if current_task.status is not TaskStatus.NEEDS_INPUT:
+                    self.tasks.transition(task_id, TaskStatus.NEEDS_INPUT)
+                self.tasks.append_event(
+                    task_id,
+                    "approval.requested",
+                    {
+                        "approval_id": approval.id,
+                        "sql_hash": validated.sql_hash,
+                        "policy_version": policy.version,
+                        "reason": approval_reason,
+                    },
+                )
+            return SqlGatewayOutcome(
+                status="approval_required",
+                query_hash=validated.sql_hash,
+                risk=risk,
+                approval_id=approval.id,
+                message=approval_reason,
             )
-        except BaseException as exc:
-            return _driver_error(exc, query_hash=validated.sql_hash, risk=risk)
+
+        assert raw_columns is not None
+        assert raw_rows is not None
 
         columns = tuple(str(column) for column in raw_columns)
         rows = tuple(tuple(row) for row in raw_rows)
@@ -380,9 +422,23 @@ class SqlSafetyGateway:
         if len(serialized) > self.settings.postgres_max_result_bytes:
             return _result_limit(validated.sql_hash, risk)
 
-        path = self._query_artifact_path(project_id, validated.sql_hash)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(serialized)
+        path = None
+        try:
+            path = self._query_artifact_path(project_id, validated.sql_hash)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(serialized)
+        except OSError:
+            if path is not None:
+                with suppress(OSError):
+                    path.unlink(missing_ok=True)
+            return SqlGatewayOutcome(
+                status="retryable_error",
+                query_hash=validated.sql_hash,
+                risk=risk,
+                error_category="artifact_write_error",
+                message="The PostgreSQL result artifact could not be written safely",
+                retryable=True,
+            )
         try:
             artifact = self.artifacts.register(
                 project_id=project_id,
@@ -419,25 +475,44 @@ class SqlSafetyGateway:
         with self._metadata_lock:
             try:
                 self._connection.execute("BEGIN IMMEDIATE")
-                row = self._connection.execute(
-                    "SELECT attempts FROM task_query_budget WHERE task_id = ?",
-                    (task_id,),
-                ).fetchone()
-                attempts = int(row["attempts"] if row is not None else 0)
-                if attempts >= self.settings.postgres_max_queries_per_task:
+                consumed = self._consume_budget_in_transaction(task_id)
+                if not consumed:
                     self._connection.rollback()
                     return False
-                self._connection.execute(
-                    "INSERT INTO task_query_budget(task_id, attempts, updated_at) "
-                    "VALUES (?, 1, ?) ON CONFLICT(task_id) DO UPDATE SET "
-                    "attempts = attempts + 1, updated_at = excluded.updated_at",
-                    (task_id, utc_now()),
-                )
                 self._connection.commit()
                 return True
             except Exception:
                 self._connection.rollback()
                 raise
+
+    def _consume_budget_in_transaction(self, task_id: str) -> bool:
+        row = self._connection.execute(
+            "SELECT attempts FROM task_query_budget WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        attempts = int(row["attempts"] if row is not None else 0)
+        if attempts >= self.settings.postgres_max_queries_per_task:
+            return False
+        self._connection.execute(
+            "INSERT INTO task_query_budget(task_id, attempts, updated_at) "
+            "VALUES (?, 1, ?) ON CONFLICT(task_id) DO UPDATE SET "
+            "attempts = attempts + 1, updated_at = excluded.updated_at",
+            (task_id, utc_now()),
+        )
+        return True
+
+    def _policy_version_matches_in_transaction(
+        self,
+        data_source_id: str,
+        expected_version: int,
+    ) -> bool:
+        row = self._connection.execute(
+            "SELECT policy_version FROM data_sources WHERE id = ?",
+            (data_source_id,),
+        ).fetchone()
+        if row is not None:
+            return int(row["policy_version"]) == expected_version
+        return self._policy_version_matches(data_source_id, expected_version)
 
     def _policy_version_matches(
         self,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import replace
+from pathlib import Path
 import sqlite3
 import threading
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from data_analysis_agent.data_sources import (
     AccessLevel,
     DataSource,
     DataSourceCredentials,
+    DataSourceRepository,
     PolicySnapshot,
 )
 from data_analysis_agent.db import migrate
@@ -334,6 +336,40 @@ def test_result_byte_limit_returns_structured_error_without_artifact(
     assert artifact_repository.list_for_task(task.id) == ()
 
 
+def test_artifact_write_error_is_structured_and_removes_reserved_path(
+    sql_gateway,
+    source_repository,
+    artifact_repository,
+    workspace,
+    task,
+    monkeypatch,
+) -> None:
+    source = _create_source(source_repository, task.project_id)
+    original_write_bytes = Path.write_bytes
+
+    def fail_query_artifact_write(path: Path, data: bytes) -> int:
+        if path.name.startswith("postgres-query-"):
+            assert path.exists()
+            raise OSError("injected disk write failure")
+        return original_write_bytes(path, data)
+
+    monkeypatch.setattr(Path, "write_bytes", fail_query_artifact_write)
+
+    outcome = sql_gateway.execute(
+        task.id,
+        task.project_id,
+        source.id,
+        "SELECT region FROM orders",
+    )
+
+    assert outcome.status == "retryable_error"
+    assert outcome.error_category == "artifact_write_error"
+    assert outcome.retryable is True
+    assert artifact_repository.list_for_task(task.id) == ()
+    derived = workspace.resolve_inside(task.project_id, "derived")
+    assert tuple(derived.glob("postgres-query-*.csv")) == ()
+
+
 def test_query_budget_stops_before_an_extra_database_query(
     db_connection,
     settings,
@@ -492,6 +528,301 @@ def _build_threaded_gateway(tmp_path, fake_driver, rules):
         sources,
         approvals,
     )
+
+
+class PassthroughProtector:
+    def protect(self, value: str) -> bytes:
+        return value.encode()
+
+    def unprotect(self, value: bytes) -> str:
+        return value.decode()
+
+
+def _build_real_gateway(tmp_path, fake_driver):
+    database_path = tmp_path / "real-gateway.sqlite3"
+    connection = sqlite3.connect(
+        database_path,
+        check_same_thread=False,
+        timeout=5,
+    )
+    migrate(connection)
+    settings = Settings(data_dir=tmp_path / "app-data", database_path=database_path)
+    workspace = WorkspaceService(settings)
+    project = ProjectRepository(connection).create("Real gateway")
+    workspace.create_project(project.id)
+    tasks = TaskRepository(connection)
+    task = tasks.create(project.id, "Run governed PostgreSQL")
+    sources = DataSourceRepository(connection, PassthroughProtector())
+    source = _create_source(sources, project.id)
+    approvals = ApprovalRepository(connection)
+    artifacts = ArtifactRepository(connection, workspace)
+    gateway = SqlSafetyGateway(
+        connection=connection,
+        settings=settings,
+        sources=sources,
+        validator=SqlAstValidator(),
+        approvals=approvals,
+        artifacts=artifacts,
+        workspace=workspace,
+        tasks=tasks,
+        driver=fake_driver,
+    )
+    return SimpleNamespace(
+        connection=connection,
+        database_path=database_path,
+        settings=settings,
+        workspace=workspace,
+        project=project,
+        tasks=tasks,
+        task=task,
+        sources=sources,
+        source=source,
+        approvals=approvals,
+        artifacts=artifacts,
+        gateway=gateway,
+    )
+
+
+class PolicyChangingApprovalRepository:
+    """Inject a policy-version change after approval resolution."""
+
+    def __init__(self, repository, connection, source_id: str) -> None:
+        self.repository = repository
+        self.connection = connection
+        self.source_id = source_id
+
+    def _change_policy_version(self) -> None:
+        self.connection.execute(
+            "UPDATE data_sources SET policy_version = policy_version + 1 WHERE id = ?",
+            (self.source_id,),
+        )
+
+    def resolve_once(self, *args, **kwargs):
+        resolution = self.repository.resolve_once(*args, **kwargs)
+        self._change_policy_version()
+        self.connection.commit()
+        return resolution
+
+    def resolve_once_in_transaction(self, *args, **kwargs):
+        resolution = self.repository.resolve_once_in_transaction(*args, **kwargs)
+        self._change_policy_version()
+        return resolution
+
+    def __getattr__(self, name: str):
+        return getattr(self.repository, name)
+
+
+def _budget_attempts(connection, task_id: str) -> int:
+    row = connection.execute(
+        "SELECT attempts FROM task_query_budget WHERE task_id = ?",
+        (task_id,),
+    ).fetchone()
+    return 0 if row is None else row[0]
+
+
+def test_policy_change_during_approval_resolution_rolls_back_consumption(
+    tmp_path,
+    fake_driver,
+) -> None:
+    state = _build_real_gateway(tmp_path, fake_driver)
+    sql = "SELECT customer_email FROM orders"
+    first = state.gateway.execute(
+        state.task.id,
+        state.project.id,
+        state.source.id,
+        sql,
+    )
+    state.approvals.decide(first.approval_id, approved=True)
+    state.gateway.approvals = PolicyChangingApprovalRepository(
+        state.approvals,
+        state.connection,
+        state.source.id,
+    )
+
+    changed = state.gateway.execute(
+        state.task.id,
+        state.project.id,
+        state.source.id,
+        sql,
+    )
+
+    assert changed.status == "denied"
+    assert changed.error_category == "policy_changed"
+    assert state.approvals.get(first.approval_id).status == "approved"
+    assert fake_driver.queried_sql == []
+    state.connection.close()
+
+
+def test_query_timeout_rolls_back_budget_and_approved_grant(
+    tmp_path,
+    fake_driver,
+) -> None:
+    state = _build_real_gateway(tmp_path, fake_driver)
+    sql = "SELECT customer_email FROM orders"
+    first = state.gateway.execute(
+        state.task.id,
+        state.project.id,
+        state.source.id,
+        sql,
+    )
+    state.approvals.decide(first.approval_id, approved=True)
+    before_attempts = _budget_attempts(state.connection, state.task.id)
+    fake_driver.query_error = TimeoutError("database timeout")
+
+    outcome = state.gateway.execute(
+        state.task.id,
+        state.project.id,
+        state.source.id,
+        sql,
+    )
+
+    assert outcome.status == "retryable_error"
+    assert outcome.error_category == "query_timeout"
+    assert _budget_attempts(state.connection, state.task.id) == before_attempts
+    assert state.approvals.get(first.approval_id).status == "approved"
+    state.connection.close()
+
+
+def test_cross_connection_policy_replacement_waits_for_query_fence(
+    tmp_path,
+    fake_driver,
+) -> None:
+    state = _build_real_gateway(tmp_path, fake_driver)
+    replacement_connection = sqlite3.connect(
+        state.database_path,
+        check_same_thread=False,
+        timeout=5,
+    )
+    replacement_sources = DataSourceRepository(
+        replacement_connection,
+        PassthroughProtector(),
+    )
+    replacement_attempted = threading.Event()
+    replacement_done = threading.Event()
+    replacement_errors = []
+    replacement_threads = []
+    blocked_during_query = []
+
+    def replace_policy() -> None:
+        replacement_attempted.set()
+        try:
+            replacement_sources.replace_policies(
+                state.source.id,
+                {("orders", None): AccessLevel.DENIED},
+            )
+        except BaseException as exc:
+            replacement_errors.append(exc)
+        finally:
+            replacement_done.set()
+
+    def on_query() -> None:
+        thread = threading.Thread(target=replace_policy)
+        replacement_threads.append(thread)
+        thread.start()
+        assert replacement_attempted.wait(timeout=2)
+        blocked_during_query.append(not replacement_done.wait(timeout=0.2))
+
+    fake_driver.on_query = on_query
+
+    outcome = state.gateway.execute(
+        state.task.id,
+        state.project.id,
+        state.source.id,
+        "SELECT region FROM orders",
+    )
+
+    assert outcome.status == "succeeded"
+    assert blocked_during_query == [True]
+    assert replacement_done.wait(timeout=5)
+    for thread in replacement_threads:
+        thread.join(timeout=5)
+    assert replacement_errors == []
+    assert replacement_sources.get_public(state.source.id).policy_version == 3
+    replacement_connection.close()
+    state.connection.close()
+
+
+@pytest.mark.parametrize(
+    "operation_name",
+    ("source_create", "policy_replace", "task_transition", "artifact_register"),
+)
+def test_shared_connection_metadata_writes_wait_for_query_fence(
+    tmp_path,
+    fake_driver,
+    operation_name,
+) -> None:
+    state = _build_real_gateway(tmp_path, fake_driver)
+    secondary_task = state.tasks.create(
+        state.project.id,
+        f"Concurrent {operation_name}",
+    )
+    concurrent_artifact_path = state.workspace.resolve_inside(
+        state.project.id,
+        f"derived/{operation_name}.txt",
+    )
+    concurrent_artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    concurrent_artifact_path.write_text("concurrent metadata", encoding="utf-8")
+    operation_attempted = threading.Event()
+    operation_done = threading.Event()
+    operation_errors = []
+    operation_threads = []
+    blocked_during_query = []
+
+    def write_metadata() -> None:
+        operation_attempted.set()
+        try:
+            if operation_name == "source_create":
+                state.sources.create(
+                    state.project.id,
+                    "Concurrent source",
+                    "postgresql://localhost/concurrent",
+                )
+            elif operation_name == "policy_replace":
+                state.sources.replace_policies(
+                    state.source.id,
+                    {("orders", None): AccessLevel.DENIED},
+                )
+            elif operation_name == "task_transition":
+                state.tasks.transition(secondary_task.id, TaskStatus.PLANNING)
+            else:
+                state.artifacts.register(
+                    project_id=state.project.id,
+                    task_id=secondary_task.id,
+                    artifact_type=ArtifactType.DERIVED_DATASET,
+                    path=concurrent_artifact_path,
+                    title="Concurrent artifact",
+                    description="Concurrent metadata registration",
+                    producer_execution_id=None,
+                    input_artifact_ids=(),
+                )
+        except BaseException as exc:
+            operation_errors.append(exc)
+        finally:
+            operation_done.set()
+
+    def on_query() -> None:
+        thread = threading.Thread(target=write_metadata)
+        operation_threads.append(thread)
+        thread.start()
+        assert operation_attempted.wait(timeout=2)
+        blocked_during_query.append(not operation_done.wait(timeout=0.2))
+
+    fake_driver.on_query = on_query
+
+    outcome = state.gateway.execute(
+        state.task.id,
+        state.project.id,
+        state.source.id,
+        "SELECT region FROM orders",
+    )
+
+    assert outcome.status == "succeeded"
+    assert blocked_during_query == [True]
+    assert operation_done.wait(timeout=5)
+    for thread in operation_threads:
+        thread.join(timeout=5)
+    assert operation_errors == []
+    state.connection.close()
 
 
 def test_concurrent_gateway_calls_cannot_exceed_shared_connection_budget(
