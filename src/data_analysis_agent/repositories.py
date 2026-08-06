@@ -59,20 +59,10 @@ class ProtectedToolMessageRepository:
         self._lock = sqlite_connection_lock(connection)
         self._protector = protector
 
-    @sqlite_connection_guarded
-    def store(self, message_id: str, content: str) -> None:
+    def protect(self, content: str) -> bytes:
         try:
-            protected = self._protector.protect(content)
+            return self._protector.protect(content)
         except BaseException:
-            raise ProtectedMessageError("Protected tool message storage is unavailable") from None
-        try:
-            self._connection.execute(
-                "INSERT INTO protected_tool_message_payloads(message_id, protected_content, created_at) VALUES (?, ?, ?)",
-                (message_id, sqlite3.Binary(protected), utc_now()),
-            )
-            self._connection.commit()
-        except sqlite3.Error:
-            self._connection.rollback()
             raise ProtectedMessageError("Protected tool message storage is unavailable") from None
 
     @sqlite_connection_guarded
@@ -317,6 +307,37 @@ class TaskRepository:
         )
         self._connection.commit()
         return message
+
+    @sqlite_connection_guarded
+    def add_protected_tool_message(
+        self,
+        task_id: str,
+        role: str,
+        safe_content: str,
+        protected_content: bytes,
+    ) -> Message:
+        if role not in {"assistant_tool_call", "tool"}:
+            raise ValueError("Only tool protocol messages may have protected payloads")
+        normalized = safe_content.strip()
+        if not normalized:
+            raise ValueError("Message content must not be empty")
+        message = Message(str(uuid4()), task_id, role, normalized, utc_now())
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            self.get(task_id)
+            self._connection.execute(
+                "INSERT INTO messages(id, task_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
+                (message.id, message.task_id, message.role, message.content, message.created_at),
+            )
+            self._connection.execute(
+                "INSERT INTO protected_tool_message_payloads(message_id, protected_content, created_at) VALUES (?, ?, ?)",
+                (message.id, sqlite3.Binary(protected_content), message.created_at),
+            )
+            self._connection.commit()
+            return message
+        except Exception:
+            self._connection.rollback()
+            raise ProtectedMessageError("Protected tool message storage is unavailable") from None
 
     @sqlite_connection_guarded
     def list_messages(self, task_id: str) -> tuple[Message, ...]:

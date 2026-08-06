@@ -295,6 +295,39 @@ def migrate(connection: sqlite3.Connection) -> None:
         connection.executescript(MIGRATION_5_SQL)
         connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (5, utc_now()))
     if 6 not in applied:
-        connection.executescript(MIGRATION_6_SQL)
-        connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (6, utc_now()))
+        connection.commit()
+        _recover_migration_6_intermediates(connection)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for statement in (item.strip() for item in MIGRATION_6_SQL.split(";")):
+                if statement:
+                    connection.execute(statement)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                (6, utc_now()),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.commit()
+
+
+def _recover_migration_6_intermediates(connection: sqlite3.Connection) -> None:
+    """Recover a legacy interrupted pre-transaction table rebuild deterministically."""
+    for original, repaired in (
+        ("data_access_policies", "data_access_policies_repaired"),
+        ("database_query_attempts", "database_query_attempts_repaired"),
+    ):
+        has_original = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (original,)
+        ).fetchone() is not None
+        has_repaired = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (repaired,)
+        ).fetchone() is not None
+        if has_repaired and has_original:
+            connection.execute(f"DROP TABLE {repaired}")
+        elif has_repaired:
+            connection.execute(f"ALTER TABLE {repaired} RENAME TO {original}")
     connection.commit()

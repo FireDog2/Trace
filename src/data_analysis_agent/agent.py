@@ -86,24 +86,20 @@ class AgentRunner:
                     for call in response.tool_calls
                 ]
             }
-            tool_call_message = self._tasks.add_message(
-                task_id,
-                "assistant_tool_call",
-                json.dumps(
-                    {
-                        "tool_calls": [_safe_tool_call(call) for call in response.tool_calls]
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
+            safe_tool_calls = json.dumps(
+                {"tool_calls": [_safe_tool_call(call) for call in response.tool_calls]},
+                ensure_ascii=False, separators=(",", ":"),
             )
             if any(call.name == "query_database" for call in response.tool_calls):
                 if self._protected_messages is None:
                     return self._fail_task(task_id, "message_protection_error", "Protected tool message storage is unavailable")
                 try:
-                    self._protected_messages.store(tool_call_message.id, json.dumps(raw_tool_calls, ensure_ascii=False, separators=(",", ":")))
+                    encrypted = self._protected_messages.protect(json.dumps(raw_tool_calls, ensure_ascii=False, separators=(",", ":")))
+                    tool_call_message = self._tasks.add_protected_tool_message(task_id, "assistant_tool_call", safe_tool_calls, encrypted)
                 except ProtectedMessageError:
                     return self._fail_task(task_id, "message_protection_error", "Protected tool message storage is unavailable")
+            else:
+                tool_call_message = self._tasks.add_message(task_id, "assistant_tool_call", safe_tool_calls)
             self._tasks.append_event(
                 task_id,
                 "message.created",
@@ -131,13 +127,17 @@ class AgentRunner:
                     )
 
                 result = self._tools.execute(call, context)
-                message = self._record_tool_result(task_id, result, call.name)
-                if call.name == "query_database":
+                protected_result: bytes | None = None
+                if call.name == "query_database" and result.success:
                     assert self._protected_messages is not None
                     try:
-                        self._protected_messages.store(message.id, _tool_result_json(result))
+                        protected_result = self._protected_messages.protect(_tool_result_json(result))
                     except ProtectedMessageError:
                         return self._fail_task(task_id, "message_protection_error", "Protected tool message storage is unavailable")
+                try:
+                    message = self._record_tool_result(task_id, result, call.name, protected_result)
+                except ProtectedMessageError:
+                    return self._fail_task(task_id, "message_protection_error", "Protected tool message storage is unavailable")
                 if result.pauses_task:
                     for cancelled in response.tool_calls[call_index + 1:]:
                         self._record_tool_result(
@@ -220,9 +220,13 @@ class AgentRunner:
             return safe_content
         return self._protected_messages.get(message_id) or safe_content
 
-    def _record_tool_result(self, task_id: str, result: ToolResult, tool_name: str):
+    def _record_tool_result(self, task_id: str, result: ToolResult, tool_name: str, protected_content: bytes | None = None):
         content = _safe_tool_result_json(result, tool_name)
-        message = self._tasks.add_message(task_id, "tool", content)
+        message = (
+            self._tasks.add_protected_tool_message(task_id, "tool", content, protected_content)
+            if protected_content is not None
+            else self._tasks.add_message(task_id, "tool", content)
+        )
         self._tasks.append_event(
             task_id,
             "message.created",

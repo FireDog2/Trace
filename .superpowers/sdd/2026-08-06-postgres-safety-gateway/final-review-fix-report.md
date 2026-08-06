@@ -42,3 +42,9 @@ Implementation commit: `93a502a`.
 - **A:** migrations 5/6 are replay-safe; migration 6 repairs the source foreign keys for earlier version-3/4 databases and fresh migration definitions include those FKs.
 
 Round-2 verification: focused agent/gateway tests passed (44); default suite passed (196) with the one explicit `TEST_POSTGRES_DSN` skip. No test DSN was present, so no live connection was made.
+
+## Round 3/5
+
+- Protected query tool-call payloads are encrypted before any SQLite write and inserted atomically with their safe message envelope. Successful rich database results use the same one-transaction path; safe error/pause results never require a second protected write.
+- Migration 6 now uses `BEGIN IMMEDIATE` for the complete rebuild, index creation, and migration-version record. Interrupted legacy `*_repaired` tables have deterministic recovery, and foreign keys are restored on exit.
+- The opt-in live test includes a restricted, approved cross-join statement with a short timeout and asserts the durable consumed approval, budget, and failed attempt category. It remains skipped unless `TEST_POSTGRES_DSN` is explicitly supplied.
