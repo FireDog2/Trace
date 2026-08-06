@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import json
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from hashlib import sha256
 from threading import Event
@@ -54,6 +55,8 @@ class AgentRun:
     created_at: str
     started_at: str | None
     completed_at: str | None
+    turns_used: int
+    deadline_at: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,17 +137,18 @@ class TeamRepository:
             status=AgentRunStatus.CREATED, result_json=None, error_category=None,
             error_message=None, cancel_requested=False, created_at=utc_now(),
             started_at=None, completed_at=None,
+            turns_used=0, deadline_at=None,
         )
         try:
             self._connection.execute("BEGIN IMMEDIATE")
             self._connection.execute(
                 "INSERT INTO agent_runs("
                 "id, task_id, role, objective, status, result_json, error_category, "
-                "error_message, cancel_requested, created_at, started_at, completed_at"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "error_message, cancel_requested, created_at, started_at, completed_at, turns_used, deadline_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     run.id, run.task_id, run.role, run.objective, run.status, None, None,
-                    None, 0, run.created_at, None, None,
+                    None, 0, run.created_at, None, None, 0, None,
                 ),
             )
             self._connection.commit()
@@ -200,6 +204,28 @@ class TeamRepository:
         if row is None:
             raise KeyError("Agent run not found")
         return str(row["project_id"])
+
+    @sqlite_connection_guarded
+    def reserve_turn(self, agent_run_id: str, max_turns: int, timeout_seconds: int) -> AgentRun:
+        """Atomically establish a durable deadline and claim one model turn when available."""
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            current = _run_from_row(self._get_row(agent_run_id))
+            now = _utc_datetime(utc_now())
+            deadline_at = current.deadline_at or (now + timedelta(seconds=timeout_seconds)).isoformat()
+            deadline = _utc_datetime(deadline_at)
+            turns = current.turns_used
+            if now < deadline and turns < max_turns:
+                turns += 1
+            self._connection.execute(
+                "UPDATE agent_runs SET turns_used = ?, deadline_at = ? WHERE id = ?",
+                (turns, deadline_at, agent_run_id),
+            )
+            self._connection.commit()
+            return replace(current, turns_used=turns, deadline_at=deadline_at)
+        except Exception:
+            self._connection.rollback()
+            raise
 
     @sqlite_connection_guarded
     def transition_run(self, agent_run_id: str, target: AgentRunStatus) -> AgentRun:
@@ -379,6 +405,7 @@ class TeamRepository:
             status=target, result_json=result_json, error_category=error_category,
             error_message=error_message, cancel_requested=current.cancel_requested,
             created_at=current.created_at, started_at=started_at, completed_at=completed_at,
+            turns_used=current.turns_used, deadline_at=current.deadline_at,
         )
 
 
@@ -389,6 +416,7 @@ def _run_from_row(row: sqlite3.Row) -> AgentRun:
         result_json=row["result_json"], error_category=row["error_category"],
         error_message=row["error_message"], cancel_requested=bool(row["cancel_requested"]),
         created_at=row["created_at"], started_at=row["started_at"], completed_at=row["completed_at"],
+        turns_used=int(row["turns_used"]), deadline_at=row["deadline_at"],
     )
 
 
@@ -443,18 +471,27 @@ class TeammateRunner:
             return self._repository.transition_run(run.id, AgentRunStatus.CANCELLED)
         run = self._repository.transition_run(run.id, AgentRunStatus.WORKING)
         tools = self._tools.restrict(ROLE_TOOLS[run.role])
-        deadline = monotonic() + self._settings.teammate_timeout_seconds
-        for _turn in range(self._settings.max_teammate_turns):
-            terminal = self._terminal_before_action(run.id, deadline)
+        while True:
+            terminal = self._terminal_before_action(run)
             if terminal is not None:
                 return terminal
+            reserved = self._repository.reserve_turn(
+                run.id, self._settings.max_teammate_turns, self._settings.teammate_timeout_seconds
+            )
+            if reserved.deadline_at is None:
+                return self._repository.fail_run(run.id, "agent_timeout")
+            if _utc_datetime(utc_now()) >= _utc_datetime(reserved.deadline_at):
+                return self._repository.fail_run(run.id, "agent_timeout")
+            if reserved.turns_used == run.turns_used:
+                return self._repository.fail_run(run.id, "agent_turn_limit")
+            run = reserved
             try:
                 response = self._provider.complete(self._request(run, tools))
             except (ProviderError, ProtectedMessageError):
                 return self._repository.fail_run(run.id, "provider_error")
             except Exception:
                 return self._repository.fail_run(run.id, "provider_error")
-            terminal = self._terminal_before_action(run.id, deadline)
+            terminal = self._terminal_before_action(run)
             if terminal is not None:
                 return terminal
             if not response.tool_calls:
@@ -462,24 +499,22 @@ class TeammateRunner:
                     return self._repository.complete_run(run.id, self._parse_handoff(response.text))
                 except ValueError:
                     return self._repository.fail_run(run.id, "invalid_handoff")
-            failure = self._record_and_execute_calls(run, tools, response.tool_calls, deadline)
+            failure = self._record_and_execute_calls(run, tools, response.tool_calls)
             if failure is not None:
                 return failure
-        return self._repository.fail_run(run.id, "agent_turn_limit")
-
-    def _terminal_before_action(self, run_id: str, deadline: float) -> AgentRun | None:
-        boundary = self._boundary_category(run_id, deadline)
+    def _terminal_before_action(self, run: AgentRun) -> AgentRun | None:
+        boundary = self._boundary_category(run)
         if boundary == "cancelled":
-            return self._repository.transition_run(run_id, AgentRunStatus.CANCELLED)
+            return self._repository.transition_run(run.id, AgentRunStatus.CANCELLED)
         if boundary == "agent_timeout":
-            return self._repository.fail_run(run_id, "agent_timeout")
+            return self._repository.fail_run(run.id, "agent_timeout")
         return None
 
-    def _boundary_category(self, run_id: str, deadline: float) -> str | None:
+    def _boundary_category(self, run: AgentRun) -> str | None:
         # Cancellation wins over a coincident deadline because it is explicit user intent.
-        if self._cancelled(run_id):
+        if self._cancelled(run.id):
             return "cancelled"
-        if monotonic() >= deadline:
+        if run.deadline_at is not None and _utc_datetime(utc_now()) >= _utc_datetime(run.deadline_at):
             return "agent_timeout"
         return None
 
@@ -504,7 +539,7 @@ class TeammateRunner:
         return self._protected_messages.get(message_id) or safe_content
 
     def _record_and_execute_calls(
-        self, run: AgentRun, tools: ToolRegistry, calls: tuple[ToolCall, ...], deadline: float
+        self, run: AgentRun, tools: ToolRegistry, calls: tuple[ToolCall, ...]
     ) -> AgentRun | None:
         try:
             self._record_tool_calls(run, calls)
@@ -512,7 +547,7 @@ class TeammateRunner:
             return self._repository.fail_run(run.id, "message_persistence_error")
         context = ToolContext(project_id=self._repository.project_id_for_run(run.id), task_id=run.task_id, agent_id=run.id, run_id=run.id)
         for index, call in enumerate(calls):
-            boundary = self._boundary_category(run.id, deadline)
+            boundary = self._boundary_category(run)
             if boundary is not None:
                 if not self._try_record_cancelled(run.id, calls[index:], "cancelled_due_to_cancel"):
                     return self._repository.fail_run(run.id, "message_persistence_error")
@@ -527,15 +562,16 @@ class TeammateRunner:
                 if not self._try_record_cancelled(run.id, calls[index + 1:], "cancelled_due_to_tool_error"):
                     return self._repository.fail_run(run.id, "message_persistence_error")
                 return self._repository.fail_run(run.id, "tool_error")
+            boundary = self._boundary_category(run)
+            if boundary is not None:
+                category = "cancelled_due_to_cancel" if boundary == "cancelled" else "cancelled_due_to_timeout"
+                if not self._try_record_cancelled(run.id, calls[index:], category):
+                    return self._repository.fail_run(run.id, "message_persistence_error")
+                return self._finish_boundary(run.id, boundary)
             try:
                 self._record_result(run.id, call.name, result)
             except Exception:
                 return self._repository.fail_run(run.id, "message_persistence_error")
-            boundary = self._boundary_category(run.id, deadline)
-            if boundary is not None:
-                if not self._try_record_cancelled(run.id, calls[index + 1:], "cancelled_due_to_cancel"):
-                    return self._repository.fail_run(run.id, "message_persistence_error")
-                return self._finish_boundary(run.id, boundary)
             if result.pauses_task:
                 if not self._try_record_cancelled(run.id, calls[index + 1:], "cancelled_due_to_pause"):
                     return self._repository.fail_run(run.id, "message_persistence_error")
@@ -604,6 +640,11 @@ def _has_rich_database_result(result: ToolResult) -> bool:
 
 def _reject_non_finite_json(value: str) -> None:
     raise ValueError(f"non-finite JSON constant: {value}")
+
+
+def _utc_datetime(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 def _tool_result_json(result: ToolResult) -> str:

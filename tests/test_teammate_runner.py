@@ -168,12 +168,18 @@ def test_response_boundary_deadline_wins_before_handoff(settings, db_connection,
     """A model response arriving after deadline cannot complete the teammate."""
     repository = TeamRepository(db_connection)
     run = repository.create_run(task.id, AgentRole.KNOWLEDGE, "Inspect workspace")
-    moments = iter((0.0, 0.0, 2.0))
-    monkeypatch.setattr(team_module, "monotonic", lambda: next(moments))
+    now = ["2026-08-06T00:00:00+00:00"]
+    monkeypatch.setattr(team_module, "utc_now", lambda: now[0])
+
+    class LateProvider:
+        def complete(self, request):
+            del request
+            now[0] = "2026-08-06T00:00:02+00:00"
+            return ModelResponse('{"would":"complete"}', ())
 
     result = TeammateRunner(
         settings=replace(settings, teammate_timeout_seconds=1),
-        provider=ScriptedProvider([ModelResponse('{"would":"complete"}', ())]), tools=tool_registry, repository=repository,
+        provider=LateProvider(), tools=tool_registry, repository=repository,
     ).run(run.id)
 
     assert result.status is AgentRunStatus.FAILED
@@ -248,6 +254,69 @@ def test_throwing_database_tool_with_failing_later_protection_terminates_and_pai
     messages = repository.list_messages(run.id)
     assert [message.role for message in messages] == ["assistant_tool_call", "tool", "tool"]
     assert "cancelled_due_to_tool_error" in messages[-1].content
+
+
+def test_tool_response_boundary_discards_secret_result_and_pairs_timeout(settings, db_connection, task) -> None:
+    """A tool finishing after deadline cannot persist its sensitive output or call siblings."""
+    secret = "customer@example.test"
+    now = ["2026-08-06T00:00:00+00:00"]
+
+    class Registry:
+        def restrict(self, allowed): return self
+        def schemas(self): return ()
+        def execute(self, call, context):
+            del call, context
+            now[0] = "2026-08-06T00:00:02+00:00"
+            return ToolResult("first", True, {"preview": [{"email": secret}]})
+
+    repository = TeamRepository(db_connection)
+    run = repository.create_run(task.id, AgentRole.KNOWLEDGE, "Inspect workspace")
+    original_now = team_module.utc_now
+    team_module.utc_now = lambda: now[0]
+    try:
+        result = TeammateRunner(
+            settings=replace(settings, teammate_timeout_seconds=1),
+            provider=ScriptedProvider([ModelResponse("", (
+                ToolCall("first", "inspect_workspace", {}), ToolCall("later", "inspect_dataset", {"artifact_id": "x"}),
+            ))]), tools=Registry(), repository=repository,
+        ).run(run.id)
+    finally:
+        team_module.utc_now = original_now
+
+    assert result.status is AgentRunStatus.FAILED
+    assert result.error_category == "agent_timeout"
+    stored = "\n".join(message.content for message in repository.list_messages(run.id))
+    assert secret not in stored
+    assert [message.role for message in repository.list_messages(run.id)] == ["assistant_tool_call", "tool", "tool"]
+    assert "cancelled_due_to_timeout" in stored
+
+
+def test_waiting_run_reserves_turns_across_resumes_without_extending_deadline(settings, db_connection, task) -> None:
+    """A durable run's budget and absolute deadline survive a WAITING resume."""
+    repository = TeamRepository(db_connection)
+    run = repository.create_run(task.id, AgentRole.KNOWLEDGE, "Inspect workspace")
+
+    class PausingRegistry:
+        def restrict(self, allowed): return self
+        def schemas(self): return ()
+        def execute(self, call, context):
+            return ToolResult(call.id, False, {}, pauses_task=True)
+
+    first = TeammateRunner(
+        settings=replace(settings, max_teammate_turns=1),
+        provider=ScriptedProvider([ModelResponse("", (ToolCall("pause", "inspect_workspace", {}),))]),
+        tools=PausingRegistry(), repository=repository,
+    ).run(run.id)
+    resumed = TeammateRunner(
+        settings=replace(settings, max_teammate_turns=1),
+        provider=ScriptedProvider([ModelResponse('{"should":"not call"}', ())]),
+        tools=PausingRegistry(), repository=repository,
+    ).run(run.id)
+
+    assert first.status is AgentRunStatus.WAITING
+    assert first.turns_used == 1 and first.deadline_at
+    assert resumed.status is AgentRunStatus.FAILED
+    assert resumed.error_category == "agent_turn_limit"
 
 
 @pytest.mark.parametrize("text", ('{"value":NaN}', '{"value":Infinity}', '{"value":-Infinity}'))

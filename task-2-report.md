@@ -29,3 +29,15 @@ Verification (shared `G:\data-analysis-agent\.venv`):
   cancelled result after a tool exception.
 - Reject `NaN`, `Infinity`, and `-Infinity` in JSON handoffs and prohibit
   non-finite values in the canonical serialized result.
+
+## Fix round 2/5
+
+- A tool result that returns after cancellation or deadline is discarded before
+  persistence; the current and sibling calls receive only paired cancellation
+  summaries (`cancelled_due_to_cancel` or `cancelled_due_to_timeout`).
+- Migration 9 adds replay-safe durable `turns_used` and absolute `deadline_at`
+  fields. `reserve_turn()` atomically establishes the deadline once and claims
+  each provider turn, so resumes preserve both limits.
+- Verification: focused migration/teammate suite: 24 passed; full suite: 220
+  passed, 1 Postgres integration test skipped because `TEST_POSTGRES_DSN` is
+  unset.

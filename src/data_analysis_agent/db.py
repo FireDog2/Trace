@@ -278,6 +278,11 @@ CREATE TABLE IF NOT EXISTS protected_agent_message_payloads (
 );
 """
 
+MIGRATION_9_SQL = """
+ALTER TABLE agent_runs ADD COLUMN turns_used INTEGER NOT NULL DEFAULT 0 CHECK(turns_used >= 0);
+ALTER TABLE agent_runs ADD COLUMN deadline_at TEXT;
+"""
+
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
@@ -367,6 +372,20 @@ def migrate(connection: sqlite3.Connection) -> None:
     if 8 not in applied:
         connection.executescript(MIGRATION_8_SQL)
         connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (8, utc_now()))
+    if 9 not in applied:
+        try:
+            connection.commit()
+            connection.execute("BEGIN IMMEDIATE")
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(agent_runs)")}
+            if "turns_used" not in columns:
+                connection.execute("ALTER TABLE agent_runs ADD COLUMN turns_used INTEGER NOT NULL DEFAULT 0 CHECK(turns_used >= 0)")
+            if "deadline_at" not in columns:
+                connection.execute("ALTER TABLE agent_runs ADD COLUMN deadline_at TEXT")
+            connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (9, utc_now()))
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
     connection.execute("PRAGMA foreign_keys = ON")
     connection.commit()
 

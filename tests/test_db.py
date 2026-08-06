@@ -34,7 +34,9 @@ def test_migrate_creates_versioned_core_tables(db_connection) -> None:
     } <= names
     assert db_connection.execute(
         "SELECT version FROM schema_migrations ORDER BY version"
-    ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,)]
+    ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)]
+    agent_run_columns = {row[1] for row in db_connection.execute("PRAGMA table_info(agent_runs)")}
+    assert {"turns_used", "deadline_at"} <= agent_run_columns
     for table in ("data_access_policies", "database_query_attempts"):
         assert any(
             row[2] == "data_sources"
@@ -54,6 +56,15 @@ def test_team_migration_replays_after_missing_version_record(db_connection) -> N
     assert {row[0] for row in db_connection.execute(
         "SELECT name FROM sqlite_master WHERE type = 'table'"
     )} >= {"agent_runs", "agent_messages"}
+
+
+def test_turn_deadline_migration_replays_when_its_version_record_is_missing(db_connection) -> None:
+    db_connection.execute("DELETE FROM schema_migrations WHERE version = 9")
+    db_connection.commit()
+
+    migrate(db_connection)
+
+    assert db_connection.execute("SELECT version FROM schema_migrations WHERE version = 9").fetchone() == (9,)
 
 
 def test_data_source_migration_stores_encrypted_credentials_only(db_connection) -> None:
