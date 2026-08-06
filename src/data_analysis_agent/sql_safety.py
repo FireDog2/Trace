@@ -57,6 +57,128 @@ _ACCESS_STRENGTH = {
     AccessLevel.DENIED: 2,
 }
 _COLUMN_ERROR = re.compile(r"Column '([^']+)' could not be resolved")
+_SAFE_POSTGRES_FUNCTIONS = frozenset(
+    {
+        # Aggregation and statistics.
+        "array_agg",
+        "avg",
+        "bit_and",
+        "bit_or",
+        "bool_and",
+        "bool_or",
+        "corr",
+        "count",
+        "covar_pop",
+        "covar_samp",
+        "every",
+        "json_agg",
+        "json_object_agg",
+        "jsonb_agg",
+        "jsonb_object_agg",
+        "max",
+        "min",
+        "percentile_cont",
+        "percentile_disc",
+        "stddev",
+        "stddev_pop",
+        "stddev_samp",
+        "string_agg",
+        "sum",
+        "var_pop",
+        "var_samp",
+        "variance",
+        # String and binary transformations.
+        "btrim",
+        "char_length",
+        "concat",
+        "concat_ws",
+        "encode",
+        "initcap",
+        "left",
+        "length",
+        "lower",
+        "ltrim",
+        "md5",
+        "octet_length",
+        "position",
+        "regexp_replace",
+        "repeat",
+        "replace",
+        "reverse",
+        "right",
+        "rtrim",
+        "split_part",
+        "strpos",
+        "substr",
+        "substring",
+        "trim",
+        "upper",
+        # Date/time analysis.
+        "age",
+        "current_date",
+        "current_time",
+        "current_timestamp",
+        "date_part",
+        "date_trunc",
+        "extract",
+        "localtime",
+        "localtimestamp",
+        "make_date",
+        "now",
+        "timestamp_trunc",
+        "to_char",
+        "to_date",
+        # Math.
+        "abs",
+        "cbrt",
+        "ceil",
+        "ceiling",
+        "degrees",
+        "exp",
+        "floor",
+        "ln",
+        "log",
+        "log10",
+        "mod",
+        "pi",
+        "power",
+        "radians",
+        "round",
+        "sign",
+        "sqrt",
+        "trunc",
+        # Null handling, values, JSON, arrays, and reviewed window functions.
+        "array_length",
+        "cardinality",
+        "cast",
+        "coalesce",
+        "cume_dist",
+        "dense_rank",
+        "first_value",
+        "greatest",
+        "json_build_array",
+        "json_build_object",
+        "json_extract_path",
+        "json_extract_path_text",
+        "jsonb_build_array",
+        "jsonb_build_object",
+        "jsonb_extract_path",
+        "jsonb_extract_path_text",
+        "lag",
+        "last_value",
+        "lead",
+        "least",
+        "nth_value",
+        "ntile",
+        "nullif",
+        "percent_rank",
+        "rank",
+        "row_number",
+        "row_to_json",
+        "to_json",
+        "to_jsonb",
+    }
+)
 
 
 class SqlAstValidator:
@@ -69,6 +191,7 @@ class SqlAstValidator:
         statement = _parse_one_statement(sql)
         catalog_index = _catalog_index(catalog)
         _deny_nested_writes(statement)
+        _validate_safe_functions(statement)
         _validate_catalog_tables(statement, catalog_index)
 
         normalized = statement.sql(dialect="postgres", pretty=False, normalize=True)
@@ -116,6 +239,19 @@ def _deny_nested_writes(statement: exp.Query) -> None:
         if next(statement.find_all(denied_type), None) is not None:
             raise SqlValidationError(
                 "unsafe_statement", f"{denied_type.__name__} is denied"
+            )
+
+
+def _validate_safe_functions(statement: exp.Query) -> None:
+    for function in statement.find_all(exp.Func):
+        if isinstance(function, exp.Anonymous):
+            function_name = function.name.lower()
+        else:
+            function_name = function.sql_name().lower()
+        if function_name not in _SAFE_POSTGRES_FUNCTIONS:
+            raise SqlValidationError(
+                "unsafe_function",
+                f"PostgreSQL function {function_name!r} is not allowed",
             )
 
 

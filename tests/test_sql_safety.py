@@ -223,3 +223,41 @@ def test_validator_returns_stable_normalized_sql_and_hash() -> None:
 
     assert result.normalized_sql == "SELECT o.region FROM orders AS o"
     assert result.sql_hash == sha256(result.normalized_sql.encode("utf-8")).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT dblink_exec('warehouse', 'DELETE FROM orders')",
+        "SELECT pg_terminate_backend(123)",
+        "SELECT pg_read_file('/etc/passwd')",
+        "SELECT set_config('statement_timeout', '0', false)",
+        "SELECT unreviewed_business_function(amount) FROM orders",
+    ],
+)
+def test_validator_rejects_dangerous_or_unknown_postgres_functions(sql: str) -> None:
+    with pytest.raises(SqlValidationError) as error:
+        SqlAstValidator().validate(sql, CATALOG, POLICY)
+
+    assert error.value.code == "unsafe_function"
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT SUM(amount), AVG(amount), MIN(amount), MAX(amount), COUNT(*) FROM orders",
+        "SELECT LOWER(region), UPPER(region), LENGTH(region), "
+        "CONCAT(region, '-review') FROM orders",
+        "SELECT DATE_TRUNC('month', CURRENT_DATE), "
+        "EXTRACT(YEAR FROM CURRENT_DATE) FROM orders",
+        "SELECT ABS(amount), ROUND(amount, 2), SQRT(amount), POWER(amount, 2) "
+        "FROM orders",
+        "SELECT COALESCE(region, 'unknown'), NULLIF(amount, 0), "
+        "ROW_NUMBER() OVER (ORDER BY amount), LAG(amount) OVER (ORDER BY amount) "
+        "FROM orders",
+    ],
+)
+def test_validator_allows_reviewed_read_only_analysis_functions(sql: str) -> None:
+    result = SqlAstValidator().validate(sql, CATALOG, POLICY)
+
+    assert result.access_level is AccessLevel.ALLOWED

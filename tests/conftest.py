@@ -53,6 +53,7 @@ class FakePostgresDriver:
         self.inspect_error: BaseException | None = None
         self.explain_error: BaseException | None = None
         self.query_error: BaseException | None = None
+        self.on_explain = None
         self.explained_sql: list[tuple[str, int]] = []
         self.queried_sql: list[tuple[str, int, int]] = []
 
@@ -65,6 +66,8 @@ class FakePostgresDriver:
         if self.explain_error is not None:
             raise self.explain_error
         self.explained_sql.append((sql, statement_timeout_ms))
+        if self.on_explain is not None:
+            self.on_explain()
         return self.plan
 
     def query(

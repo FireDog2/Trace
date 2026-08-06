@@ -2,19 +2,34 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import replace
+import sqlite3
+import threading
 from types import SimpleNamespace
 
 import pytest
 
-from data_analysis_agent.data_sources import AccessLevel
+from data_analysis_agent.data_sources import (
+    AccessLevel,
+    DataSource,
+    DataSourceCredentials,
+    PolicySnapshot,
+)
+from data_analysis_agent.db import migrate
 from data_analysis_agent.domain import ArtifactType, TaskStatus
-from data_analysis_agent.permissions import ToolAction
+from data_analysis_agent.permissions import ApprovalRepository, ToolAction
 from data_analysis_agent.postgres import (
     ExplainRiskPolicy,
     PsycopgDriver,
     SqlSafetyGateway,
 )
+from data_analysis_agent.repositories import (
+    ArtifactRepository,
+    ProjectRepository,
+    TaskRepository,
+)
+from data_analysis_agent.settings import Settings
 from data_analysis_agent.sql_safety import SqlAstValidator
+from data_analysis_agent.workspace import WorkspaceService
 
 
 def _create_source(source_repository, project_id: str):
@@ -153,6 +168,54 @@ def test_changed_policy_version_cannot_consume_an_existing_approval(
         "policy_version"
     ] == 3
     assert approval_repository.get(first.approval_id).status == "approved"
+
+
+def test_policy_change_during_explain_does_not_consume_approval(
+    sql_gateway,
+    source_repository,
+    approval_repository,
+    fake_driver,
+    task,
+) -> None:
+    source = _create_source(source_repository, task.project_id)
+    sql = "SELECT customer_email FROM orders"
+    first = sql_gateway.execute(task.id, task.project_id, source.id, sql)
+    approval_repository.decide(first.approval_id, approved=True)
+    fake_driver.on_explain = lambda: source_repository.replace_policies(
+        source.id,
+        {("orders", None): AccessLevel.DENIED},
+    )
+
+    changed = sql_gateway.execute(task.id, task.project_id, source.id, sql)
+
+    assert changed.status == "denied"
+    assert changed.error_category == "policy_changed"
+    assert approval_repository.get(first.approval_id).status == "approved"
+    assert fake_driver.queried_sql == []
+
+
+def test_policy_change_during_explain_prevents_allowed_query_execution(
+    sql_gateway,
+    source_repository,
+    fake_driver,
+    task,
+) -> None:
+    source = _create_source(source_repository, task.project_id)
+    fake_driver.on_explain = lambda: source_repository.replace_policies(
+        source.id,
+        {("orders", None): AccessLevel.DENIED},
+    )
+
+    changed = sql_gateway.execute(
+        task.id,
+        task.project_id,
+        source.id,
+        "SELECT region FROM orders",
+    )
+
+    assert changed.status == "denied"
+    assert changed.error_category == "policy_changed"
+    assert fake_driver.queried_sql == []
 
 
 def test_repeated_pending_query_reuses_the_existing_approval(
@@ -323,6 +386,359 @@ def test_query_budget_stops_before_an_extra_database_query(
         sql != "SELECT region, amount FROM orders"
         for sql, _, _ in fake_driver.queried_sql
     )
+
+
+class StaticSourceRepository:
+    def __init__(self, source: DataSource, policy: PolicySnapshot) -> None:
+        self.source = source
+        self.policy = policy
+
+    def get_public(self, data_source_id: str) -> DataSource:
+        return self.source
+
+    def credentials(self, data_source_id: str) -> DataSourceCredentials:
+        return DataSourceCredentials(self.source.id, "postgresql://localhost/test")
+
+    def policy_snapshot(self, data_source_id: str) -> PolicySnapshot:
+        return self.policy
+
+
+class CoordinatedApprovalRepository:
+    def __init__(
+        self,
+        repository: ApprovalRepository,
+        barrier: threading.Barrier,
+    ) -> None:
+        self.repository = repository
+        self.barrier = barrier
+
+    def list_for_task(self, task_id: str):
+        approvals = self.repository.list_for_task(task_id)
+        if not approvals:
+            self.barrier.wait(timeout=5)
+        return approvals
+
+    def resolve_once(self, task_id: str, action: ToolAction, reason: str):
+        self.barrier.wait(timeout=5)
+        return self.repository.resolve_once(task_id, action, reason)
+
+    def __getattr__(self, name: str):
+        return getattr(self.repository, name)
+
+
+class CoordinatedPathGateway(SqlSafetyGateway):
+    def __init__(self, *args, path_barrier: threading.Barrier, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.path_barrier = path_barrier
+
+    def _query_artifact_path(self, project_id: str, sql_hash: str):
+        path = super()._query_artifact_path(project_id, sql_hash)
+        self.path_barrier.wait(timeout=5)
+        return path
+
+
+class FailSecondRegistrationRepository:
+    def __init__(self, repository: ArtifactRepository) -> None:
+        self.repository = repository
+        self._lock = threading.Lock()
+        self._attempt = 0
+
+    def register(self, **kwargs):
+        with self._lock:
+            self._attempt += 1
+            if self._attempt == 2:
+                raise RuntimeError("Injected artifact registration failure")
+            return self.repository.register(**kwargs)
+
+    def __getattr__(self, name: str):
+        return getattr(self.repository, name)
+
+
+def _build_threaded_gateway(tmp_path, fake_driver, rules):
+    database_path = tmp_path / "concurrent-gateway.sqlite3"
+    connection = sqlite3.connect(database_path, check_same_thread=False, timeout=5)
+    migrate(connection)
+    settings = Settings(data_dir=tmp_path / "app-data", database_path=database_path)
+    workspace = WorkspaceService(settings)
+    project = ProjectRepository(connection).create("Concurrent gateway")
+    workspace.create_project(project.id)
+    tasks = TaskRepository(connection)
+    task = tasks.create(project.id, "Run governed PostgreSQL")
+    source = DataSource(
+        id="source-concurrent",
+        project_id=project.id,
+        name="Warehouse",
+        dialect="postgres",
+        policy_version=1,
+        created_at="now",
+        updated_at="now",
+    )
+    sources = StaticSourceRepository(
+        source,
+        PolicySnapshot(
+            data_source_id=source.id,
+            version=1,
+            rules=rules,
+        ),
+    )
+    approvals = ApprovalRepository(connection)
+    return (
+        connection,
+        settings,
+        workspace,
+        tasks,
+        task,
+        source,
+        sources,
+        approvals,
+    )
+
+
+def test_concurrent_gateway_calls_cannot_exceed_shared_connection_budget(
+    tmp_path,
+    fake_driver,
+) -> None:
+    database_path = tmp_path / "concurrent-budget.sqlite3"
+    connection = sqlite3.connect(database_path, check_same_thread=False, timeout=5)
+    migrate(connection)
+    settings = Settings(
+        data_dir=tmp_path / "app-data",
+        database_path=database_path,
+        postgres_max_queries_per_task=1,
+    )
+    workspace = WorkspaceService(settings)
+    project = ProjectRepository(connection).create("Concurrent budget")
+    workspace.create_project(project.id)
+    tasks = TaskRepository(connection)
+    task = tasks.create(project.id, "Run one PostgreSQL query")
+    source = DataSource(
+        id="source-concurrent",
+        project_id=project.id,
+        name="Warehouse",
+        dialect="postgres",
+        policy_version=1,
+        created_at="now",
+        updated_at="now",
+    )
+    sources = StaticSourceRepository(
+        source,
+        PolicySnapshot(
+            data_source_id=source.id,
+            version=1,
+            rules={("orders", None): AccessLevel.ALLOWED},
+        ),
+    )
+    approvals = ApprovalRepository(connection)
+    gateway = SqlSafetyGateway(
+        connection=connection,
+        settings=settings,
+        sources=sources,
+        validator=SqlAstValidator(),
+        approvals=approvals,
+        artifacts=ArtifactRepository(connection, workspace),
+        workspace=workspace,
+        tasks=tasks,
+        driver=fake_driver,
+    )
+    barrier = threading.Barrier(2)
+    outcomes = []
+    errors = []
+
+    def execute(sql: str) -> None:
+        barrier.wait()
+        try:
+            outcomes.append(gateway.execute(task.id, project.id, source.id, sql))
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = (
+        threading.Thread(target=execute, args=("SELECT region FROM orders",)),
+        threading.Thread(target=execute, args=("SELECT amount FROM orders",)),
+    )
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert errors == []
+    assert all(not thread.is_alive() for thread in threads)
+    assert sorted(outcome.status for outcome in outcomes) == ["denied", "succeeded"]
+    denied = next(outcome for outcome in outcomes if outcome.status == "denied")
+    assert denied.error_category == "query_budget_exhausted"
+    assert connection.execute(
+        "SELECT attempts FROM task_query_budget WHERE task_id = ?", (task.id,)
+    ).fetchone()[0] == 1
+    connection.close()
+
+
+def test_concurrent_restricted_queries_share_one_pending_approval(
+    tmp_path,
+    fake_driver,
+) -> None:
+    (
+        connection,
+        settings,
+        workspace,
+        tasks,
+        task,
+        source,
+        sources,
+        approvals,
+    ) = _build_threaded_gateway(
+        tmp_path,
+        fake_driver,
+        {
+            ("orders", None): AccessLevel.ALLOWED,
+            ("orders", "customer_email"): AccessLevel.APPROVAL_REQUIRED,
+        },
+    )
+    connection.close()
+    approval_barrier = threading.Barrier(2)
+    connections = tuple(
+        sqlite3.connect(settings.database_path, check_same_thread=False, timeout=5)
+        for _ in range(2)
+    )
+    gateways = tuple(
+        SqlSafetyGateway(
+            connection=thread_connection,
+            settings=settings,
+            sources=sources,
+            validator=SqlAstValidator(),
+            approvals=CoordinatedApprovalRepository(
+                ApprovalRepository(thread_connection), approval_barrier
+            ),
+            artifacts=ArtifactRepository(thread_connection, workspace),
+            workspace=workspace,
+            tasks=TaskRepository(thread_connection),
+            driver=fake_driver,
+        )
+        for thread_connection in connections
+    )
+    start = threading.Barrier(2)
+    outcomes = []
+    errors = []
+
+    def execute(gateway: SqlSafetyGateway) -> None:
+        start.wait()
+        try:
+            outcomes.append(
+                gateway.execute(
+                    task.id,
+                    task.project_id,
+                    source.id,
+                    "SELECT customer_email FROM orders",
+                )
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = tuple(
+        threading.Thread(target=execute, args=(gateway,)) for gateway in gateways
+    )
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert errors == []
+    assert all(not thread.is_alive() for thread in threads)
+    assert {outcome.status for outcome in outcomes} == {"approval_required"}
+    assert len({outcome.approval_id for outcome in outcomes}) == 1
+    assert len(ApprovalRepository(connections[0]).list_for_task(task.id)) == 1
+    for thread_connection in connections:
+        thread_connection.close()
+
+
+def test_existing_approved_action_is_not_shadowed_by_newer_pending_record(
+    sql_gateway,
+    source_repository,
+    approval_repository,
+    task,
+) -> None:
+    source = _create_source(source_repository, task.project_id)
+    sql = "SELECT customer_email FROM orders"
+    first = sql_gateway.execute(task.id, task.project_id, source.id, sql)
+    approval_repository.decide(first.approval_id, approved=True)
+    approved_action = approval_repository.get(first.approval_id).action
+    shadow = approval_repository.request(
+        task.id,
+        approved_action,
+        "Concurrent duplicate pending approval",
+    )
+
+    outcome = sql_gateway.execute(task.id, task.project_id, source.id, sql)
+
+    assert outcome.status == "succeeded"
+    assert approval_repository.get(first.approval_id).status == "consumed"
+    assert approval_repository.get(shadow.id).status == "pending"
+
+
+def test_concurrent_registration_failure_never_deletes_successful_artifact(
+    tmp_path,
+    fake_driver,
+) -> None:
+    (
+        connection,
+        settings,
+        workspace,
+        tasks,
+        task,
+        source,
+        sources,
+        approvals,
+    ) = _build_threaded_gateway(
+        tmp_path,
+        fake_driver,
+        {("orders", None): AccessLevel.ALLOWED},
+    )
+    artifacts = ArtifactRepository(connection, workspace)
+    gateway = CoordinatedPathGateway(
+        connection=connection,
+        settings=settings,
+        sources=sources,
+        validator=SqlAstValidator(),
+        approvals=approvals,
+        artifacts=FailSecondRegistrationRepository(artifacts),
+        workspace=workspace,
+        tasks=tasks,
+        driver=fake_driver,
+        path_barrier=threading.Barrier(2),
+    )
+    start = threading.Barrier(2)
+    outcomes = []
+    errors = []
+
+    def execute() -> None:
+        start.wait()
+        try:
+            outcomes.append(
+                gateway.execute(
+                    task.id,
+                    task.project_id,
+                    source.id,
+                    "SELECT region FROM orders",
+                )
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = (threading.Thread(target=execute), threading.Thread(target=execute))
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert len(outcomes) == 1
+    assert outcomes[0].status == "succeeded"
+    assert len(errors) == 1
+    assert all(not thread.is_alive() for thread in threads)
+    registered = artifacts.list_for_task(task.id)
+    assert len(registered) == 1
+    assert registered[0].path.is_file()
+    assert registered[0].path.read_text(encoding="utf-8") == (
+        "region,amount\nEast,10\n"
+    )
+    connection.close()
 
 
 @pytest.mark.parametrize(

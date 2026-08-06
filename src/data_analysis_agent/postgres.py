@@ -15,7 +15,7 @@ from data_analysis_agent.data_sources import (
     AccessLevel,
     DataSourceRepository,
 )
-from data_analysis_agent.db import utc_now
+from data_analysis_agent.db import sqlite_connection_lock, utc_now
 from data_analysis_agent.domain import ArtifactType, TaskStatus
 from data_analysis_agent.permissions import ApprovalRepository, ToolAction
 from data_analysis_agent.repositories import (
@@ -231,6 +231,7 @@ class SqlSafetyGateway:
         driver: PostgresDriver | None = None,
     ) -> None:
         self._connection = connection
+        self._metadata_lock = sqlite_connection_lock(connection)
         self.settings = settings
         self.sources = sources
         self.validator = validator
@@ -298,6 +299,8 @@ class SqlSafetyGateway:
         except BaseException as exc:
             return _driver_error(exc, query_hash=validated.sql_hash)
         risk = ExplainRiskPolicy(self.settings).classify(plan)
+        if not self._policy_version_matches(data_source_id, policy.version):
+            return _policy_changed(validated.sql_hash, risk)
         if risk.level == "extreme":
             return _denied(
                 "extreme_query_risk",
@@ -309,42 +312,36 @@ class SqlSafetyGateway:
         approval_reason = _approval_reason(validated, risk)
         if approval_reason is not None:
             action = _approval_action(data_source_id, validated, policy.version)
-            matching = tuple(
-                approval
-                for approval in self.approvals.list_for_task(task_id)
-                if approval.action == action
+            if not self._policy_version_matches(data_source_id, policy.version):
+                return _policy_changed(validated.sql_hash, risk)
+            resolution = self.approvals.resolve_once(
+                task_id,
+                action,
+                approval_reason,
             )
-            latest = matching[-1] if matching else None
-            if latest is not None and latest.status == "pending":
-                return SqlGatewayOutcome(
-                    status="approval_required",
-                    query_hash=validated.sql_hash,
-                    risk=risk,
-                    approval_id=latest.id,
-                    message=latest.reason,
-                )
-            if latest is not None and latest.status == "rejected":
+            if resolution.status == "rejected":
                 return _denied(
                     "approval_rejected",
                     "The exact PostgreSQL query was rejected",
                     query_hash=validated.sql_hash,
                     risk=risk,
                 )
-            if not self.approvals.consume_approved(task_id, action):
-                approval = self.approvals.request(task_id, action, approval_reason)
+            if resolution.status == "pending":
+                approval = resolution.approval
                 current_task = self.tasks.get(task_id)
-                if current_task.status is not TaskStatus.NEEDS_INPUT:
-                    self.tasks.transition(task_id, TaskStatus.NEEDS_INPUT)
-                self.tasks.append_event(
-                    task_id,
-                    "approval.requested",
-                    {
-                        "approval_id": approval.id,
-                        "sql_hash": validated.sql_hash,
-                        "policy_version": policy.version,
-                        "reason": approval_reason,
-                    },
-                )
+                if resolution.created:
+                    if current_task.status is not TaskStatus.NEEDS_INPUT:
+                        self.tasks.transition(task_id, TaskStatus.NEEDS_INPUT)
+                    self.tasks.append_event(
+                        task_id,
+                        "approval.requested",
+                        {
+                            "approval_id": approval.id,
+                            "sql_hash": validated.sql_hash,
+                            "policy_version": policy.version,
+                            "reason": approval_reason,
+                        },
+                    )
                 return SqlGatewayOutcome(
                     status="approval_required",
                     query_hash=validated.sql_hash,
@@ -353,6 +350,8 @@ class SqlSafetyGateway:
                     message=approval_reason,
                 )
 
+        if not self._policy_version_matches(data_source_id, policy.version):
+            return _policy_changed(validated.sql_hash, risk)
         try:
             raw_columns, raw_rows = self.driver.query(
                 credentials.dsn,
@@ -417,41 +416,55 @@ class SqlSafetyGateway:
         )
 
     def _consume_budget(self, task_id: str) -> bool:
-        try:
-            self._connection.execute("BEGIN IMMEDIATE")
-            row = self._connection.execute(
-                "SELECT attempts FROM task_query_budget WHERE task_id = ?",
-                (task_id,),
-            ).fetchone()
-            attempts = int(row["attempts"] if row is not None else 0)
-            if attempts >= self.settings.postgres_max_queries_per_task:
+        with self._metadata_lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                row = self._connection.execute(
+                    "SELECT attempts FROM task_query_budget WHERE task_id = ?",
+                    (task_id,),
+                ).fetchone()
+                attempts = int(row["attempts"] if row is not None else 0)
+                if attempts >= self.settings.postgres_max_queries_per_task:
+                    self._connection.rollback()
+                    return False
+                self._connection.execute(
+                    "INSERT INTO task_query_budget(task_id, attempts, updated_at) "
+                    "VALUES (?, 1, ?) ON CONFLICT(task_id) DO UPDATE SET "
+                    "attempts = attempts + 1, updated_at = excluded.updated_at",
+                    (task_id, utc_now()),
+                )
+                self._connection.commit()
+                return True
+            except Exception:
                 self._connection.rollback()
-                return False
-            self._connection.execute(
-                "INSERT INTO task_query_budget(task_id, attempts, updated_at) "
-                "VALUES (?, 1, ?) ON CONFLICT(task_id) DO UPDATE SET "
-                "attempts = attempts + 1, updated_at = excluded.updated_at",
-                (task_id, utc_now()),
-            )
-            self._connection.commit()
-            return True
-        except Exception:
-            self._connection.rollback()
-            raise
+                raise
+
+    def _policy_version_matches(
+        self,
+        data_source_id: str,
+        expected_version: int,
+    ) -> bool:
+        try:
+            return self.sources.get_public(data_source_id).policy_version == expected_version
+        except RecordNotFoundError:
+            return False
 
     def _query_artifact_path(self, project_id: str, sql_hash: str) -> Path:
         base = self.workspace.resolve_inside(
             project_id,
             f"derived/postgres-query-{sql_hash[:12]}.csv",
         )
-        if not base.exists():
-            return base
-        suffix = 2
+        base.parent.mkdir(parents=True, exist_ok=True)
+        candidate = base
+        suffix = 1
         while True:
-            candidate = base.with_name(f"{base.stem}-{suffix}{base.suffix}")
-            if not candidate.exists():
+            try:
+                candidate.touch(exist_ok=False)
                 return candidate
+            except FileExistsError:
+                pass
             suffix += 1
+            candidate = base.with_name(f"{base.stem}-{suffix}{base.suffix}")
 
 
 def _configure_read_only(
@@ -545,6 +558,15 @@ def _result_limit(sql_hash: str, risk: ExplainRisk) -> SqlGatewayOutcome:
         error_category="result_limit",
         message="The PostgreSQL result exceeded the configured output limit",
         retryable=True,
+    )
+
+
+def _policy_changed(sql_hash: str, risk: ExplainRisk) -> SqlGatewayOutcome:
+    return _denied(
+        "policy_changed",
+        "The data-access policy changed while the query was being checked",
+        query_hash=sql_hash,
+        risk=risk,
     )
 
 

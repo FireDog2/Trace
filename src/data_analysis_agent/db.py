@@ -2,8 +2,19 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import UTC, datetime
+from threading import Lock, RLock
 
 from data_analysis_agent.settings import Settings
+
+
+_CONNECTION_LOCKS_GUARD = Lock()
+_CONNECTION_LOCKS: dict[int, RLock] = {}
+
+
+def sqlite_connection_lock(connection: sqlite3.Connection) -> RLock:
+    connection_id = id(connection)
+    with _CONNECTION_LOCKS_GUARD:
+        return _CONNECTION_LOCKS.setdefault(connection_id, RLock())
 
 
 MIGRATION_1_SQL = """
