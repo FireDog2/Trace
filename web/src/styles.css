@@ -1255,13 +1255,16 @@ select:focus-visible, summary:focus-visible {
 .model-settings-backdrop {
   z-index: 40;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   place-items: center;
+  justify-content: stretch;
   padding: 24px;
   background: rgba(3, 4, 5, 0.78);
   backdrop-filter: blur(16px);
 }
 
 .model-settings {
+  justify-self: center;
   width: min(760px, 92vw);
   height: auto;
   max-height: min(780px, 90dvh);
