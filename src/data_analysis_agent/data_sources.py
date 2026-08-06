@@ -4,11 +4,12 @@ import sqlite3
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from data_analysis_agent.db import utc_now
 from data_analysis_agent.model_config import SecretProtector
-from data_analysis_agent.repositories import RecordNotFoundError
+from data_analysis_agent.repositories import RecordNotFoundError, RepositoryError
 
 
 class AccessLevel(StrEnum):
@@ -63,22 +64,28 @@ class DataSourceRepository:
         self._secret_protector = secret_protector
 
     def create(self, project_id: str, name: str, dsn: str) -> DataSource:
+        normalized_dsn = _postgres_dsn(dsn)
         source_id = str(uuid4())
         now = utc_now()
-        self._connection.execute(
-            "INSERT INTO data_sources("
-            "id, project_id, name, dialect, protected_dsn, policy_version, created_at, updated_at"
-            ") VALUES (?, ?, ?, 'postgres', ?, 1, ?, ?)",
-            (
-                source_id,
-                project_id,
-                name,
-                sqlite3.Binary(self._secret_protector.protect(dsn)),
-                now,
-                now,
-            ),
-        )
-        self._connection.commit()
+        try:
+            self._connection.execute(
+                "INSERT INTO data_sources("
+                "id, project_id, name, dialect, protected_dsn, policy_version, "
+                "created_at, updated_at"
+                ") VALUES (?, ?, ?, 'postgres', ?, 1, ?, ?)",
+                (
+                    source_id,
+                    project_id,
+                    name,
+                    sqlite3.Binary(self._secret_protector.protect(normalized_dsn)),
+                    now,
+                    now,
+                ),
+            )
+            self._connection.commit()
+        except sqlite3.IntegrityError as exc:
+            self._connection.rollback()
+            raise RepositoryError("Unable to create data source") from exc
         return self.get_public(source_id)
 
     def get_public(self, data_source_id: str) -> DataSource:
@@ -112,13 +119,15 @@ class DataSourceRepository:
         data_source_id: str,
         rules: dict[tuple[str, str | None], AccessLevel],
     ) -> PolicySnapshot:
-        normalized_rules = {
-            (
+        normalized_rules: dict[tuple[str, str | None], AccessLevel] = {}
+        for (table, column), level in rules.items():
+            key = (
                 _normalize_identifier(table),
                 _normalize_identifier(column) if column is not None else None,
-            ): AccessLevel(level)
-            for (table, column), level in rules.items()
-        }
+            )
+            if key in normalized_rules:
+                raise ValueError(f"Duplicate data-access policy: {key}")
+            normalized_rules[key] = AccessLevel(level)
         now = utc_now()
         try:
             self._connection.execute("BEGIN IMMEDIATE")
@@ -158,6 +167,20 @@ class DataSourceRepository:
             raise
 
     def policy_snapshot(self, data_source_id: str) -> PolicySnapshot:
+        owns_transaction = not self._connection.in_transaction
+        if owns_transaction:
+            self._connection.execute("BEGIN")
+        try:
+            snapshot = self._read_policy_snapshot(data_source_id)
+            if owns_transaction:
+                self._connection.commit()
+            return snapshot
+        except Exception:
+            if owns_transaction:
+                self._connection.rollback()
+            raise
+
+    def _read_policy_snapshot(self, data_source_id: str) -> PolicySnapshot:
         source = self.get_public(data_source_id)
         rows = self._connection.execute(
             "SELECT table_name, column_name, access_level FROM data_access_policies "
@@ -195,3 +218,16 @@ def _data_source_from_row(row: sqlite3.Row) -> DataSource:
 
 def _normalize_identifier(value: str) -> str:
     return value if value.startswith('"') and value.endswith('"') else value.lower()
+
+
+def _postgres_dsn(value: str) -> str:
+    normalized = value.strip()
+    try:
+        parsed = urlsplit(normalized)
+    except ValueError as exc:
+        raise ValueError("Data source must use a valid PostgreSQL DSN") from exc
+    if parsed.scheme not in {"postgres", "postgresql"} or not (
+        parsed.netloc or parsed.path.lstrip("/")
+    ):
+        raise ValueError("Data source must use a valid PostgreSQL DSN")
+    return normalized
