@@ -12,12 +12,14 @@ from data_analysis_agent.postgres import SqlSafetyGateway
 from data_analysis_agent.sql_safety import SqlAstValidator
 from data_analysis_agent.tools import (
     ToolCall,
+    ToolContext,
     ToolDefinition,
     ToolHandlerError,
     ToolInput,
     ToolRegistry,
     build_tool_registry,
 )
+from data_analysis_agent.execution import QueryTimeoutError
 from data_analysis_agent.team import AgentRole, TeamRepository
 
 
@@ -427,3 +429,20 @@ def test_approved_tool_action_is_allowed_once(
     assert allowed.success is True
     repeated = tool_registry.execute(call, tool_context)
     assert repeated.error_category == "approval_required"
+def test_duckdb_timeout_is_returned_as_retryable_query_timeout(
+    monkeypatch, tool_registry, duckdb_executor, task
+) -> None:
+    def timeout(*_args, **_kwargs):
+        raise QueryTimeoutError("local query exceeded its time limit")
+
+    monkeypatch.setattr(duckdb_executor, "query", timeout)
+
+    result = tool_registry.execute(
+        ToolCall("duck-timeout", "query_data", {"sql": "SELECT 1", "bindings": {}}),
+        ToolContext(task.project_id, task.id),
+    )
+
+    assert result.success is False
+    assert result.error_category == "query_timeout"
+    assert result.retryable is True
+    assert "time limit" not in result.message.lower()

@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from data_analysis_agent.datasets import DatasetService
 from data_analysis_agent.domain import ArtifactType, PlanStepDraft, TaskStatus
-from data_analysis_agent.execution import DuckDBExecutor, PythonExecutor
+from data_analysis_agent.execution import DuckDBExecutor, PythonExecutor, QueryTimeoutError
 from data_analysis_agent.permissions import (
     ApprovalRepository,
     PermissionLevel,
@@ -431,11 +431,18 @@ def build_tool_registry(
     def query_data(arguments: ToolInput, context: ToolContext) -> HandlerResult:
         assert isinstance(arguments, QueryDataInput)
         _ensure_running(tasks, context.task_id)
-        result = duckdb_executor.query(
-            context.project_id,
-            arguments.sql,
-            arguments.bindings,
-        )
+        try:
+            result = duckdb_executor.query(
+                context.project_id,
+                arguments.sql,
+                arguments.bindings,
+            )
+        except QueryTimeoutError as exc:
+            raise ToolHandlerError(
+                "DuckDB query exceeded its time limit",
+                category="query_timeout",
+                retryable=True,
+            ) from exc
         artifact_ids = (result.artifact.id,) if result.artifact else ()
         return HandlerResult(
             {

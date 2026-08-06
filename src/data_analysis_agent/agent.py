@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import time
+from dataclasses import asdict, replace
 from hashlib import sha256
+from typing import Callable
 
 from data_analysis_agent.domain import Task, TaskStatus
 from data_analysis_agent.providers import (
@@ -16,6 +19,7 @@ from data_analysis_agent.repositories import (
     ProtectedToolMessageRepository,
     TaskRepository,
 )
+from data_analysis_agent.recovery import RecoveryPolicy, RecoveryState
 from data_analysis_agent.settings import Settings
 from data_analysis_agent.tools import ToolContext, ToolRegistry, ToolResult
 from data_analysis_agent.tracing import TraceContext, TraceRecorder, TraceRepository
@@ -28,6 +32,7 @@ supporting artifact. Ask one focused question when a metric definition or
 required dataset is missing."""
 
 _PROTECTED_TOOL_NAMES = frozenset({"query_database", "await_teammates"})
+_TRANSIENT_PROVIDER_ERRORS = frozenset({"timeout", "network", "rate_limit", "upstream"})
 
 
 class AgentRunner:
@@ -40,6 +45,7 @@ class AgentRunner:
         tasks: TaskRepository,
         secret_protector: SecretProtector | None = None,
         traces: TraceRepository | None = None,
+        retry_sleep: Callable[[float], None] | None = None,
     ) -> None:
         self._settings = settings
         self._provider = provider
@@ -51,6 +57,7 @@ class AgentRunner:
         )
         self._traces = traces
         self._trace_recorder = TraceRecorder(traces) if traces is not None else None
+        self._retry_sleep = retry_sleep or time.sleep
 
     def run(self, task_id: str, trace_context: TraceContext | None = None) -> Task:
         task = self._tasks.get(task_id)
@@ -71,11 +78,15 @@ class AgentRunner:
         trace("agent.started", "running", {"role": "lead"})
         context = ToolContext(project_id=task.project_id, task_id=task.id)
         action_count = 0
+        recovery = RecoveryState(
+            RecoveryPolicy(max_attempts=self._settings.max_tool_attempts)
+        )
         last_signature = ""
         repeated_count = 0
         while action_count < self._settings.max_tool_actions:
             try:
-                response = self._provider.complete(self._build_request(task_id))
+                request = self._build_request(task_id)
+                response = self._complete_model(request, trace)
                 trace("model.completed", "completed", {"tool_call_count": len(response.tool_calls), "has_text": bool(response.text.strip())})
             except (ProviderError, ProtectedMessageError) as exc:
                 result = self._fail_task(task_id, "provider_error", str(exc)); trace("agent.completed", "failed", {"category": "provider_error"})
@@ -147,6 +158,20 @@ class AgentRunner:
 
                 trace("tool.started", "running", {"tool": call.name})
                 result = self._tools.execute(call, context)
+                if not result.success:
+                    recovery_decision = recovery.record(
+                        signature,
+                        result.error_category,
+                        retryable=result.retryable,
+                    )
+                    if result.retryable:
+                        diagnostics = dict(result.diagnostics or {})
+                        diagnostics["recovery"] = asdict(recovery_decision)
+                        result = replace(
+                            result,
+                            retryable=recovery_decision.retry_allowed,
+                            diagnostics=diagnostics,
+                        )
                 trace("tool.completed", "completed" if result.success else "failed", {"tool": call.name, "success": result.success, "error_category": result.error_category})
                 protected_result: bytes | None = None
                 if call.name in _PROTECTED_TOOL_NAMES and result.success:
@@ -181,6 +206,33 @@ class AgentRunner:
         if owns_trace:
             self._traces.finish_run(trace_context.run_id, "failed", "tool_action_limit")
         return result
+
+    def _complete_model(
+        self,
+        request: ModelRequest,
+        trace: Callable[[str, str, dict[str, object]], None],
+    ):
+        for retry_number in range(self._settings.model_max_retries + 1):
+            try:
+                return self._provider.complete(request)
+            except ProviderError as exc:
+                retryable = exc.category in _TRANSIENT_PROVIDER_ERRORS
+                if not retryable or retry_number >= self._settings.model_max_retries:
+                    raise
+                delay = min(4.0, 0.25 * (2**retry_number))
+                trace(
+                    "model.retry",
+                    "retrying",
+                    {
+                        "category": exc.category,
+                        "attempt": retry_number + 1,
+                        "remaining": self._settings.model_max_retries - retry_number,
+                        "delay_seconds": delay,
+                    },
+                )
+                self._retry_sleep(delay)
+
+        raise RuntimeError("unreachable")
 
     def resume(self, task_id: str, user_message: str) -> Task:
         task = self._tasks.get(task_id)

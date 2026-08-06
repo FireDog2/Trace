@@ -322,7 +322,11 @@ def _build_services(
     )
     tools = build_tool_registry(
         datasets=datasets,
-        duckdb_executor=DuckDBExecutor(workspace, artifacts),
+        duckdb_executor=DuckDBExecutor(
+            workspace,
+            artifacts,
+            timeout_seconds=settings.duckdb_timeout_seconds,
+        ),
         python_executor=PythonExecutor(
             settings,
             workspace,

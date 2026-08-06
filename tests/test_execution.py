@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from data_analysis_agent.domain import ArtifactType, ExecutionStatus
-from data_analysis_agent.execution import ReadOnlyQueryError
+import threading
+
+import pytest
+
+import data_analysis_agent.execution as execution_module
+from data_analysis_agent.execution import DuckDBExecutor, QueryTimeoutError, ReadOnlyQueryError
 
 
 def test_duckdb_rejects_mutating_sql(duckdb_executor, dataset_artifact) -> None:
@@ -28,6 +33,36 @@ def test_duckdb_queries_registered_csv(duckdb_executor, dataset_artifact) -> Non
     assert result.columns == ("region", "profit")
     assert result.row_count == 3
     assert result.preview[0] == {"region": "East", "profit": 208}
+
+
+def test_duckdb_timeout_interrupts_and_closes_connection(
+    monkeypatch, workspace, artifact_repository, project
+) -> None:
+    interrupted = threading.Event()
+
+    class BlockingConnection:
+        closed = False
+
+        def execute(self, sql: str):
+            assert sql == "SELECT 1"
+            assert interrupted.wait(1)
+            raise RuntimeError("query interrupted")
+
+        def interrupt(self) -> None:
+            interrupted.set()
+
+        def close(self) -> None:
+            self.closed = True
+
+    connection = BlockingConnection()
+    monkeypatch.setattr(execution_module.duckdb, "connect", lambda **_: connection)
+    executor = DuckDBExecutor(workspace, artifact_repository, timeout_seconds=0.01)
+
+    with pytest.raises(QueryTimeoutError, match="time limit"):
+        executor.query(project.id, "SELECT 1", {})
+
+    assert interrupted.is_set()
+    assert connection.closed is True
 
 
 def test_python_timeout_is_structured(python_executor, task) -> None:
