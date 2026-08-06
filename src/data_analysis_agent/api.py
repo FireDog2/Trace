@@ -333,7 +333,10 @@ def create_app(
     async def request_validation_handler(_, exc: RequestValidationError):
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            content={"detail": _safe_request_validation_errors(exc)},
+            content={
+                "detail": "Invalid request",
+                "error_count": len(exc.errors()),
+            },
         )
 
     @app.exception_handler(RecordNotFoundError)
@@ -370,7 +373,10 @@ def create_app(
         except SecretStorageUnavailable as exc:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
         except ModelConfigurationError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Invalid model configuration",
+            ) from exc
         return _model_configuration_response(services.model_configs)
 
     @app.get("/api/projects", response_model=list[ProjectResponse])
@@ -816,16 +822,3 @@ def _model_configuration_response(
 
 def _json_error(status_code: int, detail: str):
     return JSONResponse(status_code=status_code, content={"detail": detail})
-
-
-def _safe_request_validation_errors(
-    exc: RequestValidationError,
-) -> list[dict[str, object]]:
-    return [
-        {
-            "loc": list(error["loc"]),
-            "type": str(error["type"]),
-            "msg": "Invalid request value",
-        }
-        for error in exc.errors()
-    ]

@@ -187,7 +187,10 @@ class ToolRegistry:
                 error_category="validation_error",
                 message="Tool arguments did not match the schema",
                 retryable=True,
-                diagnostics={"errors": _safe_validation_errors(exc)},
+                diagnostics={
+                    "error_count": len(exc.errors()),
+                    "types": sorted({str(error["type"]) for error in exc.errors()}),
+                },
             )
 
         try:
@@ -275,11 +278,12 @@ class ToolRegistry:
                 pauses_task=handled.pauses_task,
             )
         except ToolHandlerError as exc:
+            message = _public_tool_message(exc.category)
             self._tasks.finish_tool_execution(
                 execution_id,
                 "failed",
                 exc.category,
-                str(exc),
+                message,
             )
             self._tasks.append_event(
                 context.task_id,
@@ -295,9 +299,9 @@ class ToolRegistry:
                 success=False,
                 output={},
                 error_category=exc.category,
-                message=str(exc),
+                message=message,
                 retryable=exc.retryable,
-                diagnostics=exc.diagnostics,
+                diagnostics=_safe_tool_diagnostics(exc.category),
                 pauses_task=exc.pauses_task,
             )
         except Exception:
@@ -601,15 +605,44 @@ def build_tool_registry(
     return ToolRegistry(definitions, permission_policy, approvals, tasks, artifacts)
 
 
-def _safe_validation_errors(exc: ValidationError) -> list[dict[str, object]]:
-    return [
-        {
-            "loc": list(error["loc"]),
-            "type": str(error["type"]),
-            "msg": "Invalid tool argument",
-        }
-        for error in exc.errors(include_url=False)
-    ]
+_TOOL_PUBLIC_MESSAGES = {
+    "approval_required": "Approval is required",
+    "credential_error": "Data source credentials are unavailable",
+    "policy_denied": "Database query was denied",
+    "resource_not_found": "Database query was denied",
+    "project_scope_denied": "Database query was denied",
+    "unsupported_database": "Database query was denied",
+    "unsafe_statement": "Database query was denied",
+    "read_only_required": "Database query was denied",
+    "parse_error": "Database query was denied",
+    "query_timeout": "Database query could not be completed",
+    "connection_error": "Database query could not be completed",
+}
+
+_DATABASE_REASON_CODES = frozenset(
+    {
+        "credential_error",
+        "policy_denied",
+        "resource_not_found",
+        "project_scope_denied",
+        "unsupported_database",
+        "unsafe_statement",
+        "read_only_required",
+        "parse_error",
+        "query_timeout",
+        "connection_error",
+    }
+)
+
+
+def _public_tool_message(category: str) -> str:
+    return _TOOL_PUBLIC_MESSAGES.get(category, "Tool failed")
+
+
+def _safe_tool_diagnostics(category: str) -> dict[str, str] | None:
+    if category in _DATABASE_REASON_CODES:
+        return {"reason_code": category}
+    return None
 
 
 def _ensure_running(tasks: TaskRepository, task_id: str) -> None:

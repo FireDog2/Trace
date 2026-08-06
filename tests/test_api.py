@@ -232,7 +232,7 @@ def test_builtin_model_configuration_rejects_endpoint_override(settings) -> None
         )
 
         assert response.status_code == 422
-        assert "official Base URL" in response.json()["detail"]
+        assert response.json() == {"detail": "Invalid model configuration"}
 
 
 def test_unconfigured_task_is_rejected_before_creation(settings) -> None:
@@ -462,7 +462,34 @@ def test_data_source_api_validation_never_reflects_sensitive_input(settings) -> 
 
     assert response.status_code == 422
     assert secret not in response.text
-    assert response.json()["detail"][0].keys() <= {"loc", "type", "msg"}
+    assert response.json() == {"detail": "Invalid request", "error_count": 2}
+
+
+def test_api_validation_never_reflects_a_sensitive_extra_field_name(settings) -> None:
+    secret_key = "postgresql://analyst:password@host/ciphertext"
+    with TestClient(create_app(settings, secret_protector=RecordingProtector())) as client:
+        project = client.post("/api/projects", json={"name": "Review"}).json()
+        response = client.post(
+            f"/api/projects/{project['id']}/data-sources",
+            json={"name": "Warehouse", "dsn": "postgresql://localhost/review", secret_key: "x"},
+        )
+
+    assert response.status_code == 422
+    assert secret_key not in response.text
+    assert response.json() == {"detail": "Invalid request", "error_count": 1}
+
+
+def test_model_configuration_error_never_reflects_model_input(settings) -> None:
+    secret = "postgresql://analyst:password@host/ciphertext"
+    with TestClient(create_app(settings, secret_protector=RecordingProtector())) as client:
+        response = client.put(
+            "/api/model-config",
+            json={"provider": "openai", "model": secret, "api_key": "key"},
+        )
+
+    assert response.status_code == 422
+    assert secret not in response.text
+    assert response.json() == {"detail": "Invalid model configuration"}
 
 
 def test_missing_data_source_uses_fixed_404_without_identifier(settings) -> None:

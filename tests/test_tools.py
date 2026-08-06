@@ -5,7 +5,14 @@ from data_analysis_agent.permissions import ApprovalRepository, PermissionPolicy
 from data_analysis_agent.data_sources import AccessLevel, DataSourceRepository
 from data_analysis_agent.postgres import SqlSafetyGateway
 from data_analysis_agent.sql_safety import SqlAstValidator
-from data_analysis_agent.tools import ToolCall, build_tool_registry
+from data_analysis_agent.tools import (
+    ToolCall,
+    ToolDefinition,
+    ToolHandlerError,
+    ToolInput,
+    ToolRegistry,
+    build_tool_registry,
+)
 
 
 def test_registry_exposes_exact_mvp_tool_set(tool_registry) -> None:
@@ -141,7 +148,56 @@ def test_tool_validation_never_reflects_sensitive_input(tool_registry, tool_cont
     assert result.error_category == "validation_error"
     assert secret not in str(result)
     assert result.diagnostics is not None
-    assert result.diagnostics["errors"][0].keys() <= {"loc", "type", "msg"}
+    assert result.diagnostics == {"error_count": 2, "types": ["extra_forbidden", "string_too_long"]}
+
+
+def test_tool_validation_never_reflects_sensitive_argument_name(tool_registry, tool_context) -> None:
+    secret_key = "postgresql://analyst:password@host/ciphertext"
+    result = tool_registry.execute(
+        ToolCall(
+            id="validation-secret-key",
+            name="query_database",
+            arguments={"data_source_id": "source-1", "sql": "SELECT 1", secret_key: "x"},
+        ),
+        tool_context,
+    )
+
+    assert result.error_category == "validation_error"
+    assert secret_key not in str(result)
+    assert result.diagnostics == {"error_count": 1, "types": ["extra_forbidden"]}
+
+
+def test_tool_handler_error_never_reflects_or_persists_secret_diagnostics(
+    tool_context,
+    task_repository,
+    artifact_repository,
+    db_connection,
+) -> None:
+    secret = "postgresql://analyst:password@host/ciphertext"
+
+    def fail(arguments: ToolInput, context) -> None:
+        del arguments, context
+        raise ToolHandlerError(secret, category="unsafe_category", diagnostics={"dsn": secret})
+
+    registry = ToolRegistry(
+        (ToolDefinition("query_data", "test", ToolInput, fail),),
+        PermissionPolicy(),
+        ApprovalRepository(db_connection),
+        task_repository,
+        artifact_repository,
+    )
+    result = registry.execute(
+        ToolCall(id="unsafe-call", name="query_data", arguments={}), tool_context
+    )
+
+    assert result.error_category == "unsafe_category"
+    assert secret not in str(result)
+    assert result.message == "Tool failed"
+    assert result.diagnostics is None
+    stored = db_connection.execute(
+        "SELECT error_message FROM tool_executions WHERE task_id = ?", (tool_context.task_id,)
+    ).fetchone()[0]
+    assert stored == "Tool failed"
 
 
 def test_tool_rejects_cross_project_context_before_execution(
