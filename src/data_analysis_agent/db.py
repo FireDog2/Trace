@@ -125,6 +125,39 @@ CREATE TABLE IF NOT EXISTS model_configuration (
 );
 """
 
+MIGRATION_3_SQL = """
+CREATE TABLE data_sources (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id),
+    name TEXT NOT NULL,
+    dialect TEXT NOT NULL CHECK(dialect = 'postgres'),
+    protected_dsn BLOB NOT NULL,
+    policy_version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(project_id, name)
+);
+
+CREATE TABLE data_access_policies (
+    id TEXT PRIMARY KEY,
+    data_source_id TEXT NOT NULL REFERENCES data_sources(id),
+    table_name TEXT NOT NULL,
+    column_name TEXT,
+    access_level TEXT NOT NULL CHECK(
+        access_level IN ('allowed', 'approval_required', 'denied')
+    ),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(data_source_id, table_name, column_name)
+);
+
+CREATE TABLE task_query_budget (
+    task_id TEXT PRIMARY KEY REFERENCES tasks(id),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+"""
+
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
@@ -165,5 +198,11 @@ def migrate(connection: sqlite3.Connection) -> None:
         connection.execute(
             "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
             (2, utc_now()),
+        )
+    if 3 not in applied:
+        connection.executescript(MIGRATION_3_SQL)
+        connection.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+            (3, utc_now()),
         )
     connection.commit()

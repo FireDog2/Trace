@@ -16,7 +16,9 @@ dependencies = [
     "plotly>=5.24,<7",
     "polars>=1.12,<2",
     "pydantic>=2.9,<3",
+    "psycopg[binary]>=3.2,<4",
     "python-multipart>=0.0.12,<1",
+    "sqlglot>=27,<28",
     "uvicorn>=0.32,<1",
 ]
 
