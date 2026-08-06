@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -24,6 +25,9 @@ from data_analysis_agent.repositories import (
     TaskRepository,
 )
 from data_analysis_agent.workspace import WorkspaceService
+
+if TYPE_CHECKING:
+    from data_analysis_agent.team import TeamManager, TeamRepository
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +137,20 @@ class RequestUserInputInput(ToolInput):
     question: str = Field(min_length=1)
 
 
+class SpawnTeammateInput(ToolInput):
+    role: str
+    objective: str = Field(min_length=1, max_length=2_000)
+
+
+class AwaitTeammatesInput(ToolInput):
+    agent_ids: list[str] = Field(min_length=1, max_length=3)
+    timeout_seconds: int = Field(default=30, ge=1, le=120)
+
+
+class CancelTeammateInput(ToolInput):
+    agent_id: str = Field(min_length=1)
+
+
 Handler = Callable[[ToolInput, ToolContext], HandlerResult]
 
 
@@ -158,6 +176,12 @@ class ToolRegistry:
         self._approvals = approvals
         self._tasks = tasks
         self._artifacts = artifacts
+        self._team_coordinator: dict[str, Any] | None = None
+
+    def configure_team(self, manager: "TeamManager", repository: "TeamRepository") -> None:
+        if self._team_coordinator is None:
+            self._team_coordinator = {}
+        self._team_coordinator.update({"manager": manager, "repository": repository})
 
     def schemas(self) -> tuple[ToolSchema, ...]:
         return tuple(
@@ -362,7 +386,9 @@ def build_tool_registry(
     permission_policy: PermissionPolicy,
     approvals: ApprovalRepository,
     sql_gateway: SqlSafetyGateway | None = None,
+    include_coordination_tools: bool = False,
 ) -> ToolRegistry:
+    coordinator: dict[str, Any] = {}
     def inspect_workspace(
         arguments: ToolInput,
         context: ToolContext,
@@ -561,6 +587,40 @@ def build_tool_registry(
             pauses_task=True,
         )
 
+    def _owned_run(agent_id: str, context: ToolContext):
+        repository = coordinator["repository"]
+        run = repository.get_run(agent_id)
+        if run.task_id != context.task_id:
+            raise ToolHandlerError("Teammate does not belong to this task", category="permission_denied", retryable=False)
+        return run
+
+    def spawn_teammate(arguments: ToolInput, context: ToolContext) -> HandlerResult:
+        from data_analysis_agent.team import AgentRole, TeamCapacityError
+        assert isinstance(arguments, SpawnTeammateInput)
+        try:
+            run = coordinator["manager"].spawn(context.task_id, AgentRole(arguments.role), arguments.objective)
+        except (ValueError, TeamCapacityError):
+            raise ToolHandlerError("Teammate capacity is unavailable", category="permission_denied", retryable=False) from None
+        return HandlerResult({"agent_id": run.id, "role": run.role.value, "status": run.status.value})
+
+    def list_teammates(arguments: ToolInput, context: ToolContext) -> HandlerResult:
+        del arguments
+        runs = coordinator["manager"].list(context.task_id)
+        return HandlerResult({"agents": [_safe_run(run) for run in runs]})
+
+    def await_teammates(arguments: ToolInput, context: ToolContext) -> HandlerResult:
+        assert isinstance(arguments, AwaitTeammatesInput)
+        for agent_id in arguments.agent_ids:
+            _owned_run(agent_id, context)
+        runs = coordinator["manager"].await_runs(tuple(arguments.agent_ids), arguments.timeout_seconds)
+        return HandlerResult({"agents": [_rich_run(run) for run in runs]})
+
+    def cancel_teammate(arguments: ToolInput, context: ToolContext) -> HandlerResult:
+        assert isinstance(arguments, CancelTeammateInput)
+        _owned_run(arguments.agent_id, context)
+        run = coordinator["manager"].cancel(arguments.agent_id)
+        return HandlerResult({"agent_id": run.id, "status": run.status.value})
+
     definitions = (
         ToolDefinition(
             "inspect_workspace",
@@ -617,7 +677,44 @@ def build_tool_registry(
             request_user_input,
         ),
     )
-    return ToolRegistry(definitions, permission_policy, approvals, tasks, artifacts)
+    if include_coordination_tools:
+        definitions += (
+            ToolDefinition("spawn_teammate", "Start one role-scoped teammate.", SpawnTeammateInput, spawn_teammate),
+            ToolDefinition("list_teammates", "List teammates for this task.", ToolInput, list_teammates),
+            ToolDefinition("await_teammates", "Wait briefly for selected teammates.", AwaitTeammatesInput, await_teammates),
+            ToolDefinition("cancel_teammate", "Request cancellation of one teammate.", CancelTeammateInput, cancel_teammate),
+        )
+    registry = ToolRegistry(definitions, permission_policy, approvals, tasks, artifacts)
+    registry._team_coordinator = coordinator
+    return registry
+
+
+def _safe_run(run: Any) -> dict[str, Any]:
+    return {
+        "agent_id": run.id,
+        "role": run.role.value,
+        "status": run.status.value,
+        "result_summary": _result_summary(run.result_json),
+        "error_category": run.error_category,
+    }
+
+
+def _rich_run(run: Any) -> dict[str, Any]:
+    value = _safe_run(run)
+    value["result"] = json.loads(run.result_json) if run.result_json else None
+    value["error"] = run.error_message
+    return value
+
+
+def _result_summary(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    summary = parsed.get("summary") if isinstance(parsed, dict) else None
+    return summary if isinstance(summary, str) else "Teammate completed a structured handoff"
 
 
 _TOOL_PUBLIC_MESSAGES = {

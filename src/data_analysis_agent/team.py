@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import sqlite3
 import json
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from hashlib import sha256
-from threading import Event
+from threading import Event, RLock
 from time import monotonic
+from typing import Callable
 from uuid import uuid4
 
 from data_analysis_agent.db import (
@@ -39,6 +41,10 @@ class AgentRunStatus(StrEnum):
 
 class InvalidAgentRunTransition(RuntimeError):
     """Raised when a teammate run state change violates its lifecycle."""
+
+
+class TeamCapacityError(RuntimeError):
+    """Raised when a parent task already has its active teammate quota."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +137,19 @@ class TeamRepository:
 
     @sqlite_connection_guarded
     def create_run(self, task_id: str, role: AgentRole, objective: str) -> AgentRun:
+        return self._create_run(task_id, role, objective, max_active=None)
+
+    @sqlite_connection_guarded
+    def create_run_if_capacity(
+        self, task_id: str, role: AgentRole, objective: str, *, max_active: int = 3
+    ) -> AgentRun:
+        if not 1 <= max_active <= 3:
+            raise ValueError("max_active must be between 1 and 3")
+        return self._create_run(task_id, role, objective, max_active=max_active)
+
+    def _create_run(
+        self, task_id: str, role: AgentRole, objective: str, *, max_active: int | None
+    ) -> AgentRun:
         normalized_objective = objective.strip()
         if not normalized_objective:
             raise ValueError("Agent objective must not be empty")
@@ -143,6 +162,13 @@ class TeamRepository:
         )
         try:
             self._connection.execute("BEGIN IMMEDIATE")
+            if max_active is not None:
+                active = int(self._connection.execute(
+                    "SELECT COUNT(*) FROM agent_runs WHERE task_id = ? "
+                    "AND status IN ('created', 'working', 'waiting')", (task_id,)
+                ).fetchone()[0])
+                if active >= max_active:
+                    raise TeamCapacityError("At most three teammates may be active")
             self._connection.execute(
                 "INSERT INTO agent_runs("
                 "id, task_id, role, objective, status, result_json, error_category, "
@@ -663,6 +689,106 @@ class TeammateRunner:
             return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
         except (TypeError, ValueError) as exc:
             raise ValueError("invalid handoff") from exc
+
+
+RunnerFactory = Callable[[AgentRole, Event], TeammateRunner]
+
+
+class TeamManager:
+    """Owns local execution handles while SQLite remains the source of truth."""
+
+    def __init__(
+        self, repository: TeamRepository, settings: Settings, runner_factory: RunnerFactory
+    ) -> None:
+        self._repository = repository
+        self._settings = settings
+        self._runner_factory = runner_factory
+        self._executor = ThreadPoolExecutor(max_workers=settings.max_active_teammates)
+        self._lock = RLock()
+        self._futures: dict[str, Future[AgentRun]] = {}
+        self._cancel_events: dict[str, Event] = {}
+        self._closed = False
+
+    def spawn(self, task_id: str, role: AgentRole, objective: str) -> AgentRun:
+        run = self._repository.create_run_if_capacity(
+            task_id, role, objective, max_active=self._settings.max_active_teammates
+        )
+        event = Event()
+        with self._lock:
+            if self._closed:
+                self._repository.request_cancel(run.id)
+                self._repository.transition_run(run.id, AgentRunStatus.CANCELLED)
+                return self._repository.get_run(run.id)
+            self._cancel_events[run.id] = event
+            try:
+                future = self._executor.submit(self._execute, run.id, AgentRole(role), event)
+            except BaseException:
+                self._cancel_events.pop(run.id, None)
+                return self._repository.fail_run(run.id, "provider_error")
+            self._futures[run.id] = future
+            future.add_done_callback(lambda completed, run_id=run.id: self._cleanup_done(run_id, completed))
+        return run
+
+    def list(self, task_id: str) -> tuple[AgentRun, ...]:
+        return self._repository.list_runs(task_id)
+
+    def await_runs(self, run_ids: tuple[str, ...], timeout_seconds: int) -> tuple[AgentRun, ...]:
+        if not 1 <= timeout_seconds <= 120:
+            raise ValueError("timeout_seconds must be between 1 and 120")
+        if not 1 <= len(run_ids) <= 3:
+            raise ValueError("one to three agent IDs are required")
+        with self._lock:
+            futures = [self._futures.get(run_id) for run_id in run_ids]
+        wait([future for future in futures if future is not None], timeout=timeout_seconds)
+        return tuple(self._repository.get_run(run_id) for run_id in run_ids)
+
+    def cancel(self, agent_run_id: str) -> AgentRun:
+        run = self._repository.request_cancel(agent_run_id)
+        with self._lock:
+            event = self._cancel_events.get(agent_run_id)
+            future = self._futures.get(agent_run_id)
+        if event is not None:
+            event.set()
+        if future is not None and future.cancel():
+            try:
+                return self._repository.transition_run(agent_run_id, AgentRunStatus.CANCELLED)
+            except InvalidAgentRunTransition:
+                pass
+        return self._repository.get_run(agent_run_id)
+
+    def shutdown(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            run_ids = tuple(self._cancel_events)
+            events = tuple(self._cancel_events.values())
+        for event in events:
+            event.set()
+        for run_id in run_ids:
+            self._repository.request_cancel(run_id)
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+    def _execute(self, run_id: str, role: AgentRole, event: Event) -> AgentRun:
+        try:
+            return self._runner_factory(role, event).run(run_id)
+        except BaseException:
+            try:
+                current = self._repository.get_run(run_id)
+                if current.status in _ACTIVE_STATUSES:
+                    return self._repository.fail_run(run_id, "provider_error")
+                return current
+            except BaseException:
+                raise
+
+    def _cleanup_done(self, run_id: str, future: Future[AgentRun]) -> None:
+        try:
+            future.result()
+        except BaseException:
+            pass
+        with self._lock:
+            self._futures.pop(run_id, None)
+            self._cancel_events.pop(run_id, None)
 
 
 def _safe_tool_call(call: ToolCall) -> dict[str, object]:

@@ -56,6 +56,7 @@ from data_analysis_agent.repositories import (
 )
 from data_analysis_agent.settings import Settings
 from data_analysis_agent.tools import ToolRegistry, build_tool_registry
+from data_analysis_agent.team import AgentRole, TeamManager, TeamRepository, TeammateRunner
 from data_analysis_agent.workspace import WorkspaceError, WorkspaceService
 
 
@@ -212,6 +213,8 @@ class AppServices:
     provider: ModelProvider | None
     provider_factory: ProviderFactory
     secret_protector: SecretProtector
+    team_repository: TeamRepository
+    team_manager: TeamManager
 
     def agent(self) -> AgentRunner:
         return AgentRunner(
@@ -282,8 +285,10 @@ def build_services(
         permission_policy=PermissionPolicy(),
         approvals=approvals,
         sql_gateway=sql_gateway,
+        include_coordination_tools=True,
     )
-    return AppServices(
+    team_repository = TeamRepository(connection)
+    services = AppServices(
         settings=settings,
         connection=connection,
         workspace=workspace,
@@ -299,7 +304,31 @@ def build_services(
         provider=provider,
         provider_factory=provider_factory,
         secret_protector=protector,
+        team_repository=team_repository,
+        team_manager=None,  # type: ignore[arg-type]
     )
+    def runner_factory(role: AgentRole, cancel_event):
+        worker = build_services(settings, None, protector, provider_factory)
+        runner = TeammateRunner(
+            settings=settings,
+            provider=worker.resolve_provider(),
+            tools=worker.tools,
+            repository=worker.team_repository,
+            cancel_event=cancel_event,
+            secret_protector=protector,
+        )
+        original_run = runner.run
+        def run_and_close(run_id: str):
+            try:
+                return original_run(run_id)
+            finally:
+                worker.team_manager.shutdown()
+                worker.connection.close()
+        runner.run = run_and_close  # type: ignore[method-assign]
+        return runner
+    services.team_manager = TeamManager(team_repository, settings, runner_factory)
+    tools.configure_team(services.team_manager, team_repository)
+    return services
 
 
 def create_app(
@@ -317,9 +346,11 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        services.team_repository.mark_interrupted_runs()
         try:
             yield
         finally:
+            services.team_manager.shutdown()
             services.connection.close()
 
     app = FastAPI(

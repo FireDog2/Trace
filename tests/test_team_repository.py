@@ -14,6 +14,7 @@ from data_analysis_agent.team import (
     AgentRunStatus,
     InvalidAgentRunTransition,
     TeamRepository,
+    TeamCapacityError,
 )
 from data_analysis_agent.db import migrate
 from data_analysis_agent.repositories import ProjectRepository, TaskRepository
@@ -161,3 +162,11 @@ def test_two_sqlite_connections_allow_exactly_one_worker_claim(tmp_path) -> None
     assert sum(item is not None for item in outcomes) == 1
     assert one.get_run(run.id).worker_token in {"one", "two"}
     first.close(); second.close()
+
+
+def test_create_run_if_capacity_rejects_a_fourth_active_run(db_connection, task) -> None:
+    repository = TeamRepository(db_connection)
+    for _ in range(3):
+        repository.create_run_if_capacity(task.id, AgentRole.SQL, "Bounded", max_active=3)
+    with pytest.raises(TeamCapacityError):
+        repository.create_run_if_capacity(task.id, AgentRole.SQL, "Fourth", max_active=3)

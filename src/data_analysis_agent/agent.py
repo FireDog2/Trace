@@ -26,6 +26,8 @@ create reproducible artifacts. Never claim a business finding without a
 supporting artifact. Ask one focused question when a metric definition or
 required dataset is missing."""
 
+_PROTECTED_TOOL_NAMES = frozenset({"query_database", "await_teammates"})
+
 
 class AgentRunner:
     def __init__(
@@ -90,7 +92,7 @@ class AgentRunner:
                 {"tool_calls": [_safe_tool_call(call) for call in response.tool_calls]},
                 ensure_ascii=False, separators=(",", ":"),
             )
-            if any(call.name == "query_database" for call in response.tool_calls):
+            if any(call.name in _PROTECTED_TOOL_NAMES for call in response.tool_calls):
                 if self._protected_messages is None:
                     return self._fail_task(task_id, "message_protection_error", "Protected tool message storage is unavailable")
                 try:
@@ -128,7 +130,7 @@ class AgentRunner:
 
                 result = self._tools.execute(call, context)
                 protected_result: bytes | None = None
-                if call.name == "query_database" and result.success:
+                if call.name in _PROTECTED_TOOL_NAMES and result.success:
                     assert self._protected_messages is not None
                     try:
                         protected_result = self._protected_messages.protect(_tool_result_json(result))
@@ -286,6 +288,14 @@ def _tool_result_json(result: ToolResult) -> str:
 def _safe_tool_result_json(result: ToolResult, tool_name: str) -> str:
     payload = _tool_result_payload(result)
     output = result.output if isinstance(result.output, dict) else {}
+    if tool_name == "await_teammates":
+        agents = output.get("agents") if isinstance(output.get("agents"), list) else []
+        payload["output"] = {"agents": [
+            {key: item.get(key) for key in ("agent_id", "role", "status", "result_summary", "error_category")}
+            for item in agents if isinstance(item, dict)
+        ]}
+        payload["diagnostics"] = None
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     if tool_name != "query_database":
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     payload["output"] = {key: output.get(key) for key in
