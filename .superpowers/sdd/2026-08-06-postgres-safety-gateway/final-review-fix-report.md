@@ -31,4 +31,4 @@
 
 Migration 4 is `CREATE TABLE IF NOT EXISTS` plus a recorded migration version, so rerunning after a missing version record is safe. The in-flight policy fence is intentionally source-scoped and has bounded stale recovery; a live process that exceeds twice its configured statement timeout can be treated as stale, so deployments should retain a timeout appropriate for their database/network envelope. The integration coverage deliberately does not discover a DSN or connect to any default/local database.
 
-Commit: `e9c7685` (the final amended hash is reported with delivery).
+Implementation commit: `93a502a`.
