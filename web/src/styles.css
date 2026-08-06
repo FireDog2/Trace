@@ -1,51 +1,81 @@
 :root {
   font-family: Inter, "Noto Sans SC", "Microsoft YaHei UI", "Segoe UI", sans-serif;
-  color: #102a32;
-  background: #eef2ef;
+  color: #e7e3da;
+  background: #090b0d;
+  color-scheme: dark;
   font-synthesis: none;
-  --paper: #f7f8f5;
-  --surface: #ffffff;
-  --paper-deep: #e8eeeb;
-  --ink: #102a32;
-  --muted: #68787c;
-  --rule: #d9e1de;
-  --rule-strong: #b9c7c3;
-  --trace: #0b8f7a;
-  --trace-dark: #087363;
-  --trace-soft: #e1f1ed;
-  --signal: #b96a16;
-  --signal-soft: #fff5e7;
-  --danger: #a94339;
-  --shadow: 0 18px 48px rgba(16, 42, 50, 0.16);
+  --obsidian: #090b0d;
+  --graphite: #101316;
+  --carbon: #15191d;
+  --carbon-raised: #1a1f24;
+  --fog: #e7e3da;
+  --silver: #b4b5b2;
+  --slate: #83898f;
+  --rule: #282d31;
+  --rule-strong: #3a4147;
+  --gold: #b99a5e;
+  --gold-bright: #d0b578;
+  --gold-deep: #806a3d;
+  --gold-soft: rgba(185, 154, 94, 0.12);
+  --danger: #c46d62;
+  --danger-soft: rgba(196, 109, 98, 0.12);
+  --shadow: 0 28px 80px rgba(0, 0, 0, 0.48);
   --mono: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+  --paper: var(--obsidian);
+  --surface: var(--graphite);
+  --paper-deep: var(--carbon);
+  --ink: var(--fog);
+  --muted: var(--slate);
+  --trace: var(--gold);
+  --trace-dark: var(--gold-bright);
+  --trace-soft: var(--gold-soft);
+  --signal: var(--gold);
+  --signal-soft: var(--gold-soft);
 }
 
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; }
-body { margin: 0; min-width: 320px; overflow: hidden; }
+body { margin: 0; min-width: 320px; overflow: hidden; background: var(--obsidian); }
 button, input, textarea, select { color: inherit; font: inherit; }
 button { touch-action: manipulation; }
 button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible,
 select:focus-visible, summary:focus-visible {
-  outline: 2px solid var(--trace);
-  outline-offset: 2px;
+  outline: 2px solid var(--gold-bright);
+  outline-offset: 3px;
+}
+
+::selection { background: rgba(185, 154, 94, 0.3); color: var(--fog); }
+* { scrollbar-color: var(--rule-strong) transparent; scrollbar-width: thin; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 999px; background: var(--rule-strong); background-clip: padding-box; }
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .app-shell {
   display: grid;
-  grid-template-columns: 268px minmax(0, 1fr);
+  grid-template-columns: 328px minmax(0, 1fr);
   height: 100dvh;
   min-height: 0;
   overflow: hidden;
-  background: var(--paper);
+  background: var(--obsidian);
 }
 
 .app-shell.with-conversation {
-  grid-template-columns: 268px minmax(540px, 1fr) clamp(350px, 28vw, 420px);
+  grid-template-columns: 328px minmax(620px, 1fr) clamp(380px, 28vw, 440px);
 }
 
 .app-shell.conversation-collapsed {
-  grid-template-columns: 268px minmax(0, 1fr);
+  grid-template-columns: 328px minmax(0, 1fr);
 }
 
 .project-rail, .task-workbench, .conversation-panel {
@@ -58,7 +88,7 @@ select:focus-visible, summary:focus-visible {
   overflow-y: auto;
   overscroll-behavior: contain;
   border-right: 1px solid var(--rule);
-  background: #f9faf7;
+  background: var(--graphite);
   scrollbar-width: thin;
 }
 
@@ -67,7 +97,7 @@ select:focus-visible, summary:focus-visible {
   grid-template-rows: auto minmax(0, 1fr) auto auto;
   overflow: hidden;
   border-left: 1px solid var(--rule);
-  background: var(--surface);
+  background: var(--graphite);
 }
 
 .conversation-panel[hidden] { display: none; }
@@ -76,11 +106,7 @@ select:focus-visible, summary:focus-visible {
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 32px clamp(28px, 3.4vw, 54px) 48px;
-  background-color: var(--paper);
-  background-image:
-    linear-gradient(rgba(16, 42, 50, 0.026) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(16, 42, 50, 0.026) 1px, transparent 1px);
-  background-size: 28px 28px;
+  background: var(--obsidian);
   scrollbar-width: thin;
 }
 
