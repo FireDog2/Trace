@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from threading import Event
 
 import pytest
@@ -11,7 +12,7 @@ from data_analysis_agent.domain import TaskStatus
 from data_analysis_agent.model_config import SecretStorageUnavailable
 from data_analysis_agent.permissions import ToolAction
 from data_analysis_agent.providers import ModelResponse, ScriptedProvider
-from data_analysis_agent.team import AgentRole
+from data_analysis_agent.team import AgentRole, AgentRunStatus
 
 
 def test_build_services_closes_open_connection_when_construction_fails(settings, monkeypatch) -> None:
@@ -69,6 +70,80 @@ def test_worker_runner_factory_closes_fresh_worker_on_each_failure(
     with pytest.raises(RuntimeError):
         runner.run(run.id)
     assert worker_connection.closed is True
+    assert main.connection.execute("SELECT 1").fetchone()[0] == 1
+    main.team_manager.shutdown()  # type: ignore[union-attr]
+    main.connection.close()
+
+
+def test_production_worker_builder_failure_closes_its_real_fresh_connection(
+    settings, monkeypatch
+) -> None:
+    """The API's actual worker factory owns a connection even before services exist."""
+    main = api_module.build_services(settings, ScriptedProvider(()))
+    opened: list[sqlite3.Connection] = []
+    real_connect = api_module.connect_database
+
+    def recording_connect(worker_settings):
+        connection = real_connect(worker_settings)
+        opened.append(connection)
+        return connection
+
+    monkeypatch.setattr(api_module, "connect_database", recording_connect)
+    monkeypatch.setattr(
+        api_module,
+        "_build_services",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("worker assembly failed")),
+    )
+    runner = main.team_manager._runner_factory(AgentRole.SQL, Event())  # type: ignore[union-attr]
+
+    with pytest.raises(RuntimeError, match="worker assembly failed"):
+        runner.run("unused-run")
+
+    assert len(opened) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened[0].execute("SELECT 1")
+    assert main.connection.execute("SELECT 1").fetchone()[0] == 1
+    main.team_manager.shutdown()  # type: ignore[union-attr]
+    main.connection.close()
+
+
+@pytest.mark.parametrize("failure", ("get_run", "fail_run"))
+def test_production_worker_failure_handler_closes_fresh_connection_on_repository_error(
+    settings, monkeypatch, failure
+) -> None:
+    main = api_module.build_services(settings, ScriptedProvider(()))
+    opened: list[sqlite3.Connection] = []
+    real_connect = api_module.connect_database
+
+    def recording_connect(worker_settings):
+        connection = real_connect(worker_settings)
+        opened.append(connection)
+        return connection
+
+    monkeypatch.setattr(api_module, "connect_database", recording_connect)
+    if failure == "get_run":
+        monkeypatch.setattr(
+            api_module.TeamRepository,
+            "get_run",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("read failed")),
+        )
+    else:
+        class ActiveRun:
+            status = AgentRunStatus.CREATED
+
+        monkeypatch.setattr(api_module.TeamRepository, "get_run", lambda *args, **kwargs: ActiveRun())
+        monkeypatch.setattr(
+            api_module.TeamRepository,
+            "fail_run",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("write failed")),
+        )
+
+    with pytest.raises(RuntimeError):
+        main.team_manager._worker_failure_handler("unused-run")  # type: ignore[union-attr]
+
+    assert len(opened) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened[0].execute("SELECT 1")
     assert main.connection.execute("SELECT 1").fetchone()[0] == 1
     main.team_manager.shutdown()  # type: ignore[union-attr]
     main.connection.close()

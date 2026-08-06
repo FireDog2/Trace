@@ -75,6 +75,22 @@ def test_lead_coordination_tools_execute_with_real_registry_and_enforce_ownershi
     rejected = tool_registry.execute(ToolCall("foreign", "cancel_teammate", {"agent_id": foreign.id}), tool_context)
     assert rejected.error_category == "permission_denied"
 
+    mixed = tool_registry.execute(
+        ToolCall("mixed", "await_teammates", {"agent_ids": [run_id, foreign.id], "timeout_seconds": 1}),
+        tool_context,
+    )
+    unknown_id = tool_registry.execute(
+        ToolCall("missing", "await_teammates", {"agent_ids": ["does-not-exist"], "timeout_seconds": 1}),
+        tool_context,
+    )
+    too_many = tool_registry.execute(
+        ToolCall("many", "await_teammates", {"agent_ids": [run_id] * 4, "timeout_seconds": 1}),
+        tool_context,
+    )
+    assert mixed.error_category == "permission_denied"
+    assert unknown_id.error_category == "permission_denied"
+    assert too_many.error_category == "validation_error"
+
     restricted = tool_registry.restrict(frozenset({"inspect_workspace"}))
     assert {schema.name for schema in restricted.schemas()} == {"inspect_workspace"}
     unknown = restricted.execute(ToolCall("no-op", "spawn_teammate", {}), tool_context)
