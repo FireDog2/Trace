@@ -45,7 +45,6 @@ def test_live_gateway_read_only_search_path_values_and_timeout(postgres_dsn: str
             with setup.cursor() as cursor:
                 cursor.execute(f"CREATE TABLE public.{table} (amount numeric, occurred_at timestamptz, token uuid, payload bytea, restricted text)")
                 cursor.execute(f"INSERT INTO public.{table} VALUES (%s, %s, %s, %s, %s)", (Decimal("2.50"), datetime.now(UTC), uuid4(), b"value", "restricted"))
-                cursor.execute(f"INSERT INTO public.{table}(amount, occurred_at, token, payload, restricted) SELECT 1, now(), '00000000-0000-0000-0000-000000000001'::uuid, 'x'::bytea, 'restricted' FROM generate_series(1, 1000)")
                 cursor.execute(f"CREATE SCHEMA {schema}")
                 cursor.execute(f"CREATE TABLE {schema}.{table} (shadow_only text)")
                 cursor.execute(f"CREATE SEQUENCE public.{sequence}")
@@ -68,16 +67,20 @@ def test_live_gateway_read_only_search_path_values_and_timeout(postgres_dsn: str
         assert isinstance(outcome.preview[0]["amount"], str)
         assert outcome.preview[0]["payload"].startswith("base64:")
 
+        with psycopg.connect(postgres_dsn) as pressure:
+            with pressure.cursor() as cursor:
+                cursor.execute(f"INSERT INTO public.{table}(amount, occurred_at, token, payload, restricted) SELECT 1, now(), '00000000-0000-0000-0000-000000000001'::uuid, 'x'::bytea, 'restricted' FROM generate_series(1, 1000)")
+        pressure_task = TaskRepository(connection).create(project.id, "Verify governed timeout")
         restricted_sql = f"SELECT sum(length(a.restricted)) FROM {table} AS a CROSS JOIN {table} AS b"
-        restricted = gateway.execute(task.id, project.id, source.id, restricted_sql)
+        restricted = gateway.execute(pressure_task.id, project.id, source.id, restricted_sql)
         assert restricted.status == "approval_required"
         ApprovalRepository(connection).decide(restricted.approval_id, approved=True)
-        gateway.settings = replace(settings, postgres_statement_timeout_ms=5)
-        timed_out = gateway.execute(task.id, project.id, source.id, restricted_sql)
+        gateway.settings = replace(settings, postgres_statement_timeout_ms=2)
+        timed_out = gateway.execute(pressure_task.id, project.id, source.id, restricted_sql)
         assert timed_out.status == "retryable_error" and timed_out.error_category == "query_timeout"
         assert ApprovalRepository(connection).get(restricted.approval_id).status == "consumed"
-        assert connection.execute("SELECT attempts FROM task_query_budget WHERE task_id = ?", (task.id,)).fetchone()[0] == 2
-        attempt = connection.execute("SELECT status, error_category FROM database_query_attempts WHERE task_id = ? ORDER BY started_at DESC LIMIT 1", (task.id,)).fetchone()
+        assert connection.execute("SELECT attempts FROM task_query_budget WHERE task_id = ?", (pressure_task.id,)).fetchone()[0] == 1
+        attempt = connection.execute("SELECT status, error_category FROM database_query_attempts WHERE task_id = ? ORDER BY started_at DESC LIMIT 1", (pressure_task.id,)).fetchone()
         assert tuple(attempt) == ("failed", "query_timeout")
         driver = PsycopgDriver()
         with pytest.raises(psycopg.Error):

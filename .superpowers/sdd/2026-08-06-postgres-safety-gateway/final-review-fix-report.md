@@ -48,3 +48,7 @@ Round-2 verification: focused agent/gateway tests passed (44); default suite pas
 - Protected query tool-call payloads are encrypted before any SQLite write and inserted atomically with their safe message envelope. Successful rich database results use the same one-transaction path; safe error/pause results never require a second protected write.
 - Migration 6 now uses `BEGIN IMMEDIATE` for the complete rebuild, index creation, and migration-version record. Interrupted legacy `*_repaired` tables have deterministic recovery, and foreign keys are restored on exit.
 - The opt-in live test includes a restricted, approved cross-join statement with a short timeout and asserts the durable consumed approval, budget, and failed attempt category. It remains skipped unless `TEST_POSTGRES_DSN` is explicitly supplied.
+
+## Round 4/5
+
+The live test now materializes and verifies the single-row JSON-safe gateway result before inserting pressure rows. The timeout uses a separate task, so its durable budget assertion is exactly one dispatched approved attempt. The live module still collects and skips cleanly without `TEST_POSTGRES_DSN`; deterministic gateway tests continue to cover the same successful and derived-limit paths without a database.
