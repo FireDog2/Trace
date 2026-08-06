@@ -18,6 +18,7 @@ from data_analysis_agent.repositories import (
 )
 from data_analysis_agent.settings import Settings
 from data_analysis_agent.tools import ToolContext, ToolRegistry, ToolResult
+from data_analysis_agent.tracing import TraceContext, TraceRecorder, TraceRepository
 
 
 SYSTEM_PROMPT = """You are a careful data analyst operating inside a persistent
@@ -38,6 +39,7 @@ class AgentRunner:
         tools: ToolRegistry,
         tasks: TaskRepository,
         secret_protector: SecretProtector | None = None,
+        traces: TraceRepository | None = None,
     ) -> None:
         self._settings = settings
         self._provider = provider
@@ -47,8 +49,10 @@ class AgentRunner:
             ProtectedToolMessageRepository(tasks._connection, secret_protector)
             if secret_protector is not None else None
         )
+        self._traces = traces
+        self._trace_recorder = TraceRecorder(traces) if traces is not None else None
 
-    def run(self, task_id: str) -> Task:
+    def run(self, task_id: str, trace_context: TraceContext | None = None) -> Task:
         task = self._tasks.get(task_id)
         if task.status in {
             TaskStatus.COMPLETED,
@@ -57,6 +61,14 @@ class AgentRunner:
         }:
             return task
 
+        owns_trace = self._traces is not None and trace_context is None
+        if owns_trace:
+            run = self._traces.start_run(task_id)
+            trace_context = TraceContext(run.id, task_id)
+        def trace(event_type: str, status: str, payload: dict[str, object]) -> None:
+            if trace_context is not None and self._trace_recorder is not None:
+                self._trace_recorder.event(trace_context, event_type, status, payload)
+        trace("agent.started", "running", {"role": "lead"})
         context = ToolContext(project_id=task.project_id, task_id=task.id)
         action_count = 0
         last_signature = ""
@@ -64,8 +76,11 @@ class AgentRunner:
         while action_count < self._settings.max_tool_actions:
             try:
                 response = self._provider.complete(self._build_request(task_id))
+                trace("model.completed", "completed", {"tool_call_count": len(response.tool_calls), "has_text": bool(response.text.strip())})
             except (ProviderError, ProtectedMessageError) as exc:
-                return self._fail_task(task_id, "provider_error", str(exc))
+                result = self._fail_task(task_id, "provider_error", str(exc)); trace("agent.completed", "failed", {"category": "provider_error"})
+                if owns_trace: self._traces.finish_run(trace_context.run_id, "failed", "provider_error")
+                return result
 
             if response.text.strip():
                 message = self._tasks.add_message(
@@ -80,7 +95,9 @@ class AgentRunner:
                 )
 
             if not response.tool_calls:
-                return self._complete_task(task_id)
+                result = self._complete_task(task_id); trace("agent.completed", "completed", {})
+                if owns_trace: self._traces.finish_run(trace_context.run_id, "completed")
+                return result
 
             raw_tool_calls = {
                 "tool_calls": [
@@ -128,7 +145,9 @@ class AgentRunner:
                         "The same tool call failed to make progress",
                     )
 
+                trace("tool.started", "running", {"tool": call.name})
                 result = self._tools.execute(call, context)
+                trace("tool.completed", "completed" if result.success else "failed", {"tool": call.name, "success": result.success, "error_category": result.error_category})
                 protected_result: bytes | None = None
                 if call.name in _PROTECTED_TOOL_NAMES and result.success:
                     assert self._protected_messages is not None
@@ -147,15 +166,21 @@ class AgentRunner:
                             ToolResult(call_id=cancelled.id, success=False, output={}, error_category="cancelled_due_to_pause", message="Cancelled because an earlier tool call paused the task", retryable=False),
                             cancelled.name,
                         )
-                    return self._tasks.get(task_id)
+                    current = self._tasks.get(task_id); trace("agent.completed", "completed", {"paused": True})
+                    if owns_trace: self._traces.finish_run(trace_context.run_id, "completed")
+                    return current
                 if action_count >= self._settings.max_tool_actions:
                     break
 
-        return self._fail_task(
+        result = self._fail_task(
             task_id,
             "tool_action_limit",
             "Tool action limit reached",
         )
+        trace("agent.completed", "failed", {"category": "tool_action_limit"})
+        if owns_trace:
+            self._traces.finish_run(trace_context.run_id, "failed", "tool_action_limit")
+        return result
 
     def resume(self, task_id: str, user_message: str) -> Task:
         task = self._tasks.get(task_id)

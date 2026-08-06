@@ -14,6 +14,7 @@ from data_analysis_agent.permissions import ToolAction
 from data_analysis_agent.providers import ModelResponse, ScriptedProvider
 from data_analysis_agent.team import AgentRole, AgentRunStatus
 from data_analysis_agent.tools import ToolCall, ToolContext
+from data_analysis_agent.tracing import TraceContext
 
 
 def test_build_services_closes_open_connection_when_construction_fails(settings, monkeypatch) -> None:
@@ -29,6 +30,24 @@ def test_build_services_closes_open_connection_when_construction_fails(settings,
     with pytest.raises(RuntimeError, match="builder failed"):
         api_module.build_services(settings)
     assert connection.closed is True
+
+
+def test_trace_routes_replay_without_execution_and_accept_completed_run(settings) -> None:
+    app = create_app(settings, ScriptedProvider(()))
+    services = app.state.services
+    project = services.projects.create("Trace route")
+    task = services.tasks.create(project.id, "Replay safely")
+    run = services.traces.start_run(task.id)
+    services.trace_recorder.event(TraceContext(run.id, task.id), "tool.completed", "completed", {"dsn": "postgresql://secret", "row_count": 3})
+    services.traces.finish_run(run.id, "completed")
+    with TestClient(app) as client:
+        replay = client.get(f"/api/runs/{run.id}/trace")
+        accepted = client.post(f"/api/runs/{run.id}/accept")
+        runs = client.get(f"/api/tasks/{task.id}/runs")
+    assert replay.status_code == 200 and replay.json()[0]["sequence"] == 1
+    assert "secret" not in replay.text
+    assert accepted.status_code == 200 and accepted.json()["accepted"] is True
+    assert runs.json()[0]["id"] == run.id
 
 
 @pytest.mark.parametrize("failure", ("provider", "runner_constructor", "runner_run"))

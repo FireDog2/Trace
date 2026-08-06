@@ -1,6 +1,9 @@
 import type {
   ApprovalDecision,
   AgentRun,
+  AnalysisRun,
+  TraceEvent,
+  SkillCandidate,
   Artifact,
   Project,
   Task,
@@ -20,6 +23,11 @@ export interface ApiClient {
   createTask(projectId: string, objective: string): Promise<Task>;
   getTask(taskId: string): Promise<TaskDetail>;
   listAgents(taskId: string): Promise<AgentRun[]>;
+  listRuns(taskId: string): Promise<AnalysisRun[]>;
+  getTrace(runId: string): Promise<TraceEvent[]>;
+  acceptRun(runId: string): Promise<AnalysisRun>;
+  createSkillCandidate(runId: string): Promise<SkillCandidate>;
+  decideSkillCandidate(candidateId: string, approved: boolean): Promise<SkillCandidate>;
   sendMessage(taskId: string, content: string): Promise<Task>;
   decideApproval(approvalId: string, approved: boolean): Promise<ApprovalDecision>;
   getModelConfiguration(): Promise<ModelConfigurationStatus>;
@@ -93,6 +101,12 @@ export class HttpApiClient implements ApiClient {
   listAgents(taskId: string): Promise<AgentRun[]> {
     return this.request(`/api/tasks/${taskId}/agents`);
   }
+
+  listRuns(taskId: string): Promise<AnalysisRun[]> { return this.request(`/api/tasks/${taskId}/runs`); }
+  getTrace(runId: string): Promise<TraceEvent[]> { return this.request(`/api/runs/${runId}/trace`); }
+  acceptRun(runId: string): Promise<AnalysisRun> { return this.request(`/api/runs/${runId}/accept`, { method: "POST" }); }
+  createSkillCandidate(runId: string): Promise<SkillCandidate> { return this.request(`/api/runs/${runId}/skill-candidates`, { method: "POST" }); }
+  decideSkillCandidate(candidateId: string, approved: boolean): Promise<SkillCandidate> { return this.request(`/api/skill-candidates/${candidateId}/decision`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ approved }) }); }
 
   sendMessage(taskId: string, content: string): Promise<Task> {
     return this.request(`/api/tasks/${taskId}/messages`, {

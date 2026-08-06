@@ -57,6 +57,8 @@ from data_analysis_agent.repositories import (
 from data_analysis_agent.settings import Settings
 from data_analysis_agent.tools import ToolRegistry, build_tool_registry
 from data_analysis_agent.team import AgentRole, TeamManager, TeamRepository, TeammateRunner
+from data_analysis_agent.tracing import AnalysisRun, TraceEvent, TraceRecorder, TraceRepository
+from data_analysis_agent.skills import SkillCandidate, SkillCandidateRepository, WorkflowCurator
 from data_analysis_agent.workspace import WorkspaceError, WorkspaceService
 
 
@@ -171,6 +173,15 @@ class AgentRunResponse(ApiModel):
     started_at: str | None
     completed_at: str | None
 
+class AnalysisRunResponse(ApiModel):
+    id: str; task_id: str; status: str; accepted: bool; started_at: str; completed_at: str | None; error_category: str | None
+
+class TraceEventResponse(ApiModel):
+    id: str; run_id: str; task_id: str; agent_id: str | None; parent_event_id: str | None; sequence: int; event_type: str; status: str; payload: dict[str, object]; duration_ms: int | None; attempt: int; error_category: str | None; artifact_ids: list[str]
+
+class SkillCandidateDecision(ApiModel):
+    approved: bool
+
 
 class SendMessageRequest(ApiModel):
     content: str = Field(min_length=1, max_length=20_000)
@@ -229,6 +240,9 @@ class AppServices:
     secret_protector: SecretProtector
     team_repository: TeamRepository
     team_manager: TeamManager | None
+    traces: TraceRepository
+    trace_recorder: TraceRecorder
+    skill_candidates: SkillCandidateRepository
 
     def agent(self) -> AgentRunner:
         return AgentRunner(
@@ -237,6 +251,7 @@ class AppServices:
             tools=self.tools,
             tasks=self.tasks,
             secret_protector=self.secret_protector,
+            traces=self.traces,
         )
 
     def resolve_provider(self) -> ModelProvider:
@@ -325,6 +340,8 @@ def _build_services(
         include_database_query=not with_team_manager,
     )
     team_repository = TeamRepository(connection, tasks.append_event)
+    traces = TraceRepository(connection)
+    skill_candidates = SkillCandidateRepository(connection)
     services = AppServices(
         settings=settings,
         connection=connection,
@@ -343,6 +360,9 @@ def _build_services(
         secret_protector=protector,
         team_repository=team_repository,
         team_manager=None,
+        traces=traces,
+        trace_recorder=TraceRecorder(traces),
+        skill_candidates=skill_candidates,
     )
     if not with_team_manager:
         return services
@@ -709,6 +729,35 @@ def create_app(
         services.tasks.get(task_id)
         return [_agent_run_response(run) for run in services.team_repository.list_runs(task_id)]
 
+    @app.get("/api/tasks/{task_id}/runs", response_model=list[AnalysisRunResponse])
+    def list_analysis_runs(task_id: str) -> list[AnalysisRunResponse]:
+        services.tasks.get(task_id)
+        return [_analysis_run_response(run) for run in services.traces.list_runs(task_id)]
+
+    @app.get("/api/runs/{run_id}/trace", response_model=list[TraceEventResponse])
+    def get_trace(run_id: str) -> list[TraceEventResponse]:
+        return [_trace_event_response(event) for event in services.traces.events_for_run(run_id)]
+
+    @app.post("/api/runs/{run_id}/accept", response_model=AnalysisRunResponse)
+    def accept_trace_run(run_id: str) -> AnalysisRunResponse:
+        try: return _analysis_run_response(services.traces.accept_run(run_id))
+        except ValueError as exc: raise HTTPException(status_code=409, detail="Run cannot be accepted") from exc
+
+    @app.post("/api/runs/{run_id}/skill-candidates", status_code=status.HTTP_201_CREATED)
+    def create_skill_candidate(run_id: str):
+        try:
+            candidate = WorkflowCurator(services.traces, services.skill_candidates, services.resolve_provider()).create_candidate(run_id, services.settings.model)
+            return _skill_candidate_response(candidate)
+        except ValueError as exc: raise HTTPException(status_code=409, detail="Run cannot produce a skill candidate") from exc
+
+    @app.get("/api/skill-candidates/{candidate_id}")
+    def get_skill_candidate(candidate_id: str): return _skill_candidate_response(services.skill_candidates.get(candidate_id))
+
+    @app.post("/api/skill-candidates/{candidate_id}/decision")
+    def decide_skill_candidate(candidate_id: str, request: SkillCandidateDecision):
+        try: return _skill_candidate_response(services.skill_candidates.decide(candidate_id, request.approved))
+        except ValueError as exc: raise HTTPException(status_code=409, detail="Skill candidate cannot be decided") from exc
+
     @app.post("/api/tasks/{task_id}/messages", response_model=TaskResponse)
     def send_message(
         task_id: str,
@@ -945,6 +994,15 @@ def _agent_run_response(run) -> AgentRunResponse:
         started_at=run.started_at,
         completed_at=run.completed_at,
     )
+
+def _analysis_run_response(run: AnalysisRun) -> AnalysisRunResponse:
+    return AnalysisRunResponse(id=run.id, task_id=run.task_id, status=run.status, accepted=run.accepted, started_at=run.started_at, completed_at=run.completed_at, error_category=run.error_category)
+
+def _trace_event_response(event: TraceEvent) -> TraceEventResponse:
+    return TraceEventResponse(id=event.id, run_id=event.run_id, task_id=event.task_id, agent_id=event.agent_id, parent_event_id=event.parent_event_id, sequence=event.sequence, event_type=event.event_type, status=event.status, payload=event.payload, duration_ms=event.duration_ms, attempt=event.attempt, error_category=event.error_category, artifact_ids=list(event.artifact_ids))
+
+def _skill_candidate_response(candidate: SkillCandidate) -> dict[str, object]:
+    return {"id": candidate.id, "source_run_id": candidate.source_run_id, "name": candidate.name, "version": candidate.version, "markdown": candidate.markdown, "status": candidate.status, "enabled": candidate.enabled, "generated_by_model": candidate.generated_by_model, "reviewed_at": candidate.reviewed_at, "created_at": candidate.created_at}
 
 
 def _result_summary(result_json: str | None) -> str | None:

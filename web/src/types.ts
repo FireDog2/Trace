@@ -67,6 +67,21 @@ export interface AgentRun {
   completed_at: string | null;
 }
 
+export interface AnalysisRun {
+  id: string; task_id: string; status: "running" | "completed" | "failed" | "cancelled";
+  accepted: boolean; started_at: string; completed_at: string | null; error_category: string | null;
+}
+export interface TraceEvent {
+  id: string; run_id: string; task_id: string; agent_id: string | null; parent_event_id: string | null;
+  sequence: number; event_type: string; status: string; payload: Record<string, unknown>;
+  duration_ms: number | null; attempt: number; error_category: string | null; artifact_ids: string[];
+}
+export interface SkillCandidate {
+  id: string; source_run_id: string; name: string; version: number; markdown: string;
+  status: "candidate" | "approved" | "rejected"; enabled: boolean; generated_by_model: string;
+  reviewed_at: string | null; created_at: string;
+}
+
 export interface ApprovalDecision {
   id: string;
   status: string;
