@@ -398,3 +398,54 @@ def test_unavailable_secret_storage_returns_service_unavailable(settings) -> Non
 
         assert response.status_code == 503
         assert response.json()["detail"] == "Secure storage is unavailable"
+
+
+def test_data_source_api_never_returns_dsn(settings) -> None:
+    with TestClient(
+        create_app(settings, secret_protector=RecordingProtector())
+    ) as client:
+        project = client.post("/api/projects", json={"name": "Review"}).json()
+
+        response = client.post(
+            f"/api/projects/{project['id']}/data-sources",
+            json={
+                "name": "Warehouse",
+                "dsn": "postgresql://analyst:secret@localhost/portfolio",
+            },
+        )
+
+        assert response.status_code == 201
+        assert "dsn" not in response.json()
+        assert "secret" not in response.text
+        assert client.get(
+            f"/api/projects/{project['id']}/data-sources"
+        ).json() == [response.json()]
+
+
+def test_data_source_policy_and_schema_apis_are_project_scoped(settings) -> None:
+    app = create_app(settings, secret_protector=RecordingProtector())
+
+    class SchemaDriver:
+        def inspect_schema(self, dsn: str):
+            assert "secret" not in dsn
+            return {"orders": ("region", "amount")}
+
+    app.state.services.sql_gateway.driver = SchemaDriver()
+    with TestClient(app) as client:
+        project = client.post("/api/projects", json={"name": "Review"}).json()
+        source = client.post(
+            f"/api/projects/{project['id']}/data-sources",
+            json={"name": "Warehouse", "dsn": "postgresql://localhost/portfolio"},
+        ).json()
+
+        policy = client.put(
+            f"/api/data-sources/{source['id']}/policies",
+            json={"rules": [{"table": "orders", "column": None, "access": "allowed"}]},
+        )
+
+        assert policy.status_code == 200
+        assert policy.json()["version"] == 2
+        schema = client.get(f"/api/data-sources/{source['id']}/schema")
+        assert schema.status_code == 200
+        assert schema.json()["tables"] == {"orders": ["region", "amount"]}
+        assert "postgresql://" not in schema.text

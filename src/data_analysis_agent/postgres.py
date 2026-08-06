@@ -245,6 +245,10 @@ class SqlSafetyGateway:
             lock_timeout_ms=settings.postgres_lock_timeout_ms,
         )
 
+    def inspect_schema(self, data_source_id: str) -> SchemaCatalog:
+        credentials = self.sources.credentials(data_source_id)
+        return self.driver.inspect_schema(credentials.dsn)
+
     def execute(
         self,
         task_id: str,

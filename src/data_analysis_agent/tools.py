@@ -15,6 +15,7 @@ from data_analysis_agent.permissions import (
     PermissionPolicy,
     ToolAction,
 )
+from data_analysis_agent.postgres import SqlSafetyGateway
 from data_analysis_agent.reporting import ReportService
 from data_analysis_agent.repositories import ArtifactRepository, TaskRepository
 from data_analysis_agent.workspace import WorkspaceService
@@ -67,11 +68,13 @@ class ToolHandlerError(RuntimeError):
         category: str = "tool_error",
         retryable: bool = True,
         diagnostics: dict[str, Any] | None = None,
+        pauses_task: bool = False,
     ) -> None:
         super().__init__(message)
         self.category = category
         self.retryable = retryable
         self.diagnostics = diagnostics
+        self.pauses_task = pauses_task
 
 
 class ToolInput(BaseModel):
@@ -90,6 +93,11 @@ class InspectDatasetInput(ToolInput):
 class QueryDataInput(ToolInput):
     sql: str = Field(min_length=1)
     bindings: dict[str, str]
+
+
+class QueryDatabaseInput(ToolInput):
+    data_source_id: str
+    sql: str = Field(min_length=1, max_length=50_000)
 
 
 class RunPythonInput(ToolInput):
@@ -272,6 +280,7 @@ class ToolRegistry:
                 message=str(exc),
                 retryable=exc.retryable,
                 diagnostics=exc.diagnostics,
+                pauses_task=exc.pauses_task,
             )
         except Exception as exc:
             self._tasks.finish_tool_execution(
@@ -315,6 +324,7 @@ def build_tool_registry(
     tasks: TaskRepository,
     permission_policy: PermissionPolicy,
     approvals: ApprovalRepository,
+    sql_gateway: SqlSafetyGateway | None = None,
 ) -> ToolRegistry:
     def inspect_workspace(
         arguments: ToolInput,
@@ -370,6 +380,52 @@ def build_tool_registry(
                 "artifact_id": result.artifact.id if result.artifact else None,
             },
             artifact_ids,
+        )
+
+    def query_database(arguments: ToolInput, context: ToolContext) -> HandlerResult:
+        assert isinstance(arguments, QueryDatabaseInput)
+        if sql_gateway is None:
+            raise ToolHandlerError(
+                "PostgreSQL analysis is not configured",
+                category="database_unavailable",
+                retryable=False,
+            )
+        _ensure_running(tasks, context.task_id)
+        outcome = sql_gateway.execute(
+            context.task_id,
+            context.project_id,
+            arguments.data_source_id,
+            arguments.sql,
+        )
+        if outcome.status == "succeeded":
+            return HandlerResult(
+                {
+                    "status": outcome.status,
+                    "preview": list(outcome.preview),
+                    "row_count": outcome.row_count,
+                    "risk": outcome.risk.level if outcome.risk else None,
+                    "query_hash": outcome.query_hash,
+                    "artifact_id": outcome.artifact_id,
+                },
+                (outcome.artifact_id,) if outcome.artifact_id else (),
+            )
+        if outcome.status == "approval_required":
+            raise ToolHandlerError(
+                outcome.message or "PostgreSQL query requires approval",
+                category="approval_required",
+                retryable=False,
+                pauses_task=True,
+            )
+        if outcome.status == "denied":
+            raise ToolHandlerError(
+                outcome.message or "PostgreSQL query was denied",
+                category=outcome.error_category or "database_denied",
+                retryable=False,
+            )
+        raise ToolHandlerError(
+            outcome.message or "PostgreSQL query could not be completed",
+            category=outcome.error_category or "database_error",
+            retryable=outcome.retryable,
         )
 
     def run_python(arguments: ToolInput, context: ToolContext) -> HandlerResult:
@@ -486,6 +542,12 @@ def build_tool_registry(
             "Run one read-only DuckDB SQL query against registered dataset bindings.",
             QueryDataInput,
             query_data,
+        ),
+        ToolDefinition(
+            "query_database",
+            "Run a governed, read-only PostgreSQL query against a configured data source.",
+            QueryDatabaseInput,
+            query_database,
         ),
         ToolDefinition(
             "run_python",

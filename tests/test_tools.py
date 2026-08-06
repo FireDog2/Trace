@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from data_analysis_agent.domain import TaskStatus
-from data_analysis_agent.permissions import ApprovalRepository
-from data_analysis_agent.tools import ToolCall
+from data_analysis_agent.permissions import ApprovalRepository, PermissionPolicy
+from data_analysis_agent.data_sources import AccessLevel, DataSourceRepository
+from data_analysis_agent.postgres import SqlSafetyGateway
+from data_analysis_agent.sql_safety import SqlAstValidator
+from data_analysis_agent.tools import ToolCall, build_tool_registry
 
 
 def test_registry_exposes_exact_mvp_tool_set(tool_registry) -> None:
@@ -10,12 +13,81 @@ def test_registry_exposes_exact_mvp_tool_set(tool_registry) -> None:
         "inspect_workspace",
         "inspect_dataset",
         "query_data",
+        "query_database",
         "run_python",
         "save_artifact",
         "write_report",
         "update_plan",
         "request_user_input",
     }
+
+
+def test_registry_exposes_database_query_tool(tool_registry) -> None:
+    assert "query_database" in {schema.name for schema in tool_registry.schemas()}
+
+
+def test_query_database_returns_structured_gateway_outcome(
+    db_connection,
+    settings,
+    source_repository,
+    approval_repository,
+    artifact_repository,
+    workspace,
+    task_repository,
+    fake_driver,
+    tool_context,
+    dataset_service,
+    duckdb_executor,
+    python_executor,
+    report_service,
+) -> None:
+    source = source_repository.create(
+        tool_context.project_id,
+        "Warehouse",
+        "postgresql://analyst:secret@localhost/portfolio",
+    )
+    source_repository.replace_policies(
+        source.id,
+        {("orders", None): AccessLevel.ALLOWED},
+    )
+    gateway = SqlSafetyGateway(
+        connection=db_connection,
+        settings=settings,
+        sources=source_repository,
+        validator=SqlAstValidator(),
+        approvals=approval_repository,
+        artifacts=artifact_repository,
+        workspace=workspace,
+        tasks=task_repository,
+        driver=fake_driver,
+    )
+    database_tool_registry = build_tool_registry(
+        datasets=dataset_service,
+        duckdb_executor=duckdb_executor,
+        python_executor=python_executor,
+        workspace=workspace,
+        artifacts=artifact_repository,
+        reports=report_service,
+        tasks=task_repository,
+        permission_policy=PermissionPolicy(),
+        approvals=approval_repository,
+        sql_gateway=gateway,
+    )
+
+    result = database_tool_registry.execute(
+        ToolCall(
+            id="database-call",
+            name="query_database",
+            arguments={"data_source_id": source.id, "sql": "SELECT region FROM orders"},
+        ),
+        tool_context,
+    )
+
+    assert result.success is True
+    assert result.output["status"] == "succeeded"
+    assert result.output["artifact_id"]
+    assert "dsn" not in result.output
+    assert "secret" not in str(result)
 
 
 def test_inspect_dataset_tool_returns_real_profile(

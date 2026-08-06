@@ -25,10 +25,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from data_analysis_agent.agent import AgentRunner
 from data_analysis_agent.datasets import DatasetError, DatasetService
+from data_analysis_agent.data_sources import AccessLevel, DataSource, DataSourceRepository, PolicySnapshot
 from data_analysis_agent.db import connect_database
 from data_analysis_agent.domain import Artifact, Project, Task, TaskStatus
 from data_analysis_agent.execution import DuckDBExecutor, PythonExecutor
 from data_analysis_agent.permissions import ApprovalRepository, PermissionPolicy
+from data_analysis_agent.postgres import SqlSafetyGateway
+from data_analysis_agent.sql_safety import SqlAstValidator
 from data_analysis_agent.model_config import (
     MODEL_PROVIDER_CATALOG,
     ModelConfigurationError,
@@ -69,6 +72,37 @@ class ProjectResponse(ApiModel):
     status: str
     created_at: str
     updated_at: str
+
+
+class CreateDataSourceRequest(ApiModel):
+    name: str = Field(min_length=1, max_length=120)
+    dsn: str = Field(min_length=1, max_length=4_000)
+
+
+class DataSourceResponse(ApiModel):
+    id: str
+    project_id: str
+    name: str
+    dialect: str
+    policy_version: int
+    created_at: str
+    updated_at: str
+
+
+class PolicyRuleRequest(ApiModel):
+    table: str = Field(min_length=1, max_length=255)
+    column: str | None = Field(default=None, min_length=1, max_length=255)
+    access: AccessLevel
+
+
+class ReplacePoliciesRequest(ApiModel):
+    rules: list[PolicyRuleRequest]
+
+
+class PolicyResponse(ApiModel):
+    data_source_id: str
+    version: int
+    rules: list[PolicyRuleRequest]
 
 
 class CreateTaskRequest(ApiModel):
@@ -170,6 +204,8 @@ class AppServices:
     artifacts: ArtifactRepository
     datasets: DatasetService
     approvals: ApprovalRepository
+    data_sources: DataSourceRepository
+    sql_gateway: SqlSafetyGateway
     model_configs: ModelConfigurationRepository
     tools: ToolRegistry
     provider: ModelProvider | None
@@ -206,11 +242,23 @@ def build_services(
     artifacts = ArtifactRepository(connection, workspace)
     datasets = DatasetService(workspace, artifacts)
     approvals = ApprovalRepository(connection)
+    protector = secret_protector or WindowsDpapiProtector()
     model_configs = ModelConfigurationRepository(
         connection,
-        secret_protector or WindowsDpapiProtector(),
+        protector,
     )
+    data_sources = DataSourceRepository(connection, protector)
     reports = ReportService(workspace, artifacts, tasks)
+    sql_gateway = SqlSafetyGateway(
+        connection=connection,
+        settings=settings,
+        sources=data_sources,
+        validator=SqlAstValidator(),
+        approvals=approvals,
+        artifacts=artifacts,
+        workspace=workspace,
+        tasks=tasks,
+    )
     tools = build_tool_registry(
         datasets=datasets,
         duckdb_executor=DuckDBExecutor(workspace, artifacts),
@@ -226,6 +274,7 @@ def build_services(
         tasks=tasks,
         permission_policy=PermissionPolicy(),
         approvals=approvals,
+        sql_gateway=sql_gateway,
     )
     return AppServices(
         settings=settings,
@@ -236,6 +285,8 @@ def build_services(
         artifacts=artifacts,
         datasets=datasets,
         approvals=approvals,
+        data_sources=data_sources,
+        sql_gateway=sql_gateway,
         model_configs=model_configs,
         tools=tools,
         provider=provider,
@@ -325,6 +376,74 @@ def create_app(
         project = services.projects.create(request.name)
         WorkspaceService(settings).create_project(project.id)
         return _project_response(project)
+
+    @app.get(
+        "/api/projects/{project_id}/data-sources",
+        response_model=list[DataSourceResponse],
+    )
+    def list_data_sources(project_id: str) -> list[DataSourceResponse]:
+        services.projects.get(project_id)
+        return [
+            _data_source_response(source)
+            for source in services.data_sources.list_for_project(project_id)
+        ]
+
+    @app.post(
+        "/api/projects/{project_id}/data-sources",
+        response_model=DataSourceResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_data_source(
+        project_id: str,
+        request: CreateDataSourceRequest,
+    ) -> DataSourceResponse:
+        services.projects.get(project_id)
+        try:
+            source = services.data_sources.create(project_id, request.name, request.dsn)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Data source must use a valid PostgreSQL DSN",
+            ) from exc
+        return _data_source_response(source)
+
+    @app.put(
+        "/api/data-sources/{source_id}/policies",
+        response_model=PolicyResponse,
+    )
+    def replace_data_source_policies(
+        source_id: str,
+        request: ReplacePoliciesRequest,
+    ) -> PolicyResponse:
+        rules = {(rule.table, rule.column): rule.access for rule in request.rules}
+        if len(rules) != len(request.rules):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Duplicate data-access policy",
+            )
+        try:
+            snapshot = services.data_sources.replace_policies(source_id, rules)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Invalid data-access policy",
+            ) from exc
+        return _policy_response(snapshot)
+
+    @app.get("/api/data-sources/{source_id}/schema")
+    def inspect_data_source_schema(source_id: str) -> dict[str, object]:
+        services.data_sources.get_public(source_id)
+        try:
+            catalog = services.sql_gateway.inspect_schema(source_id)
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "category": "connection_error",
+                    "message": "The PostgreSQL schema could not be inspected",
+                },
+            )
+        return {"data_source_id": source_id, "tables": catalog}
 
     @app.get(
         "/api/projects/{project_id}/artifacts",
@@ -595,6 +714,29 @@ def _project_response(project: Project) -> ProjectResponse:
         status=project.status.value,
         created_at=project.created_at,
         updated_at=project.updated_at,
+    )
+
+
+def _data_source_response(source: DataSource) -> DataSourceResponse:
+    return DataSourceResponse(
+        id=source.id,
+        project_id=source.project_id,
+        name=source.name,
+        dialect=source.dialect,
+        policy_version=source.policy_version,
+        created_at=source.created_at,
+        updated_at=source.updated_at,
+    )
+
+
+def _policy_response(snapshot: PolicySnapshot) -> PolicyResponse:
+    return PolicyResponse(
+        data_source_id=snapshot.data_source_id,
+        version=snapshot.version,
+        rules=[
+            PolicyRuleRequest(table=table, column=column, access=access)
+            for (table, column), access in snapshot.rules.items()
+        ],
     )
 
 
