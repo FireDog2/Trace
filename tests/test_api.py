@@ -449,3 +449,29 @@ def test_data_source_policy_and_schema_apis_are_project_scoped(settings) -> None
         assert schema.status_code == 200
         assert schema.json()["tables"] == {"orders": ["region", "amount"]}
         assert "postgresql://" not in schema.text
+
+
+def test_data_source_api_validation_never_reflects_sensitive_input(settings) -> None:
+    secret = "postgresql://analyst:password@host/secret-db"
+    with TestClient(create_app(settings, secret_protector=RecordingProtector())) as client:
+        project = client.post("/api/projects", json={"name": "Review"}).json()
+        response = client.post(
+            f"/api/projects/{project['id']}/data-sources",
+            json={"name": "Warehouse", "dsn": secret * 200, "password": secret},
+        )
+
+    assert response.status_code == 422
+    assert secret not in response.text
+    assert response.json()["detail"][0].keys() <= {"loc", "type", "msg"}
+
+
+def test_missing_data_source_uses_fixed_404_without_identifier(settings) -> None:
+    hostile_id = "source-password-ciphertext"
+    with TestClient(create_app(settings, secret_protector=RecordingProtector())) as client:
+        for response in (
+            client.put(f"/api/data-sources/{hostile_id}/policies", json={"rules": []}),
+            client.get(f"/api/data-sources/{hostile_id}/schema"),
+        ):
+            assert response.status_code == 404
+            assert response.json() == {"detail": "Data source not found"}
+            assert hostile_id not in response.text

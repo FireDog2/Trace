@@ -127,6 +127,111 @@ def test_invalid_tool_arguments_return_structured_error(
     assert result.retryable is True
 
 
+def test_tool_validation_never_reflects_sensitive_input(tool_registry, tool_context) -> None:
+    secret = "postgresql://analyst:password@host/ciphertext"
+    result = tool_registry.execute(
+        ToolCall(
+            id="validation-secret",
+            name="query_database",
+            arguments={"data_source_id": "source-1", "sql": secret * 2_000, "dsn": secret},
+        ),
+        tool_context,
+    )
+
+    assert result.error_category == "validation_error"
+    assert secret not in str(result)
+    assert result.diagnostics is not None
+    assert result.diagnostics["errors"][0].keys() <= {"loc", "type", "msg"}
+
+
+def test_tool_rejects_cross_project_context_before_execution(
+    tool_registry,
+    tool_context,
+    project_repository,
+    task_repository,
+    db_connection,
+) -> None:
+    other_project = project_repository.create("Other project")
+    other_task = task_repository.create(other_project.id, "Other task")
+    result = tool_registry.execute(
+        ToolCall(id="cross-project", name="inspect_workspace", arguments={}),
+        type(tool_context)(project_id=tool_context.project_id, task_id=other_task.id),
+    )
+
+    assert result.error_category == "project_scope_denied"
+    assert result.retryable is False
+    assert db_connection.execute(
+        "SELECT COUNT(*) FROM tool_executions WHERE task_id = ?", (other_task.id,)
+    ).fetchone()[0] == 0
+
+
+def test_query_database_credential_failure_is_never_persisted_or_reflected(
+    db_connection,
+    settings,
+    approval_repository,
+    artifact_repository,
+    workspace,
+    task_repository,
+    fake_driver,
+    tool_context,
+    dataset_service,
+    duckdb_executor,
+    python_executor,
+    report_service,
+) -> None:
+    secret = "postgresql://analyst:password@host/ciphertext"
+
+    class BrokenProtector:
+        def protect(self, value: str) -> bytes:
+            return value.encode()
+
+        def unprotect(self, value: bytes) -> str:
+            raise RuntimeError(secret)
+
+    sources = DataSourceRepository(db_connection, BrokenProtector())
+    source = sources.create(tool_context.project_id, "Warehouse", secret)
+    gateway = SqlSafetyGateway(
+        connection=db_connection,
+        settings=settings,
+        sources=sources,
+        validator=SqlAstValidator(),
+        approvals=approval_repository,
+        artifacts=artifact_repository,
+        workspace=workspace,
+        tasks=task_repository,
+        driver=fake_driver,
+    )
+    registry = build_tool_registry(
+        datasets=dataset_service,
+        duckdb_executor=duckdb_executor,
+        python_executor=python_executor,
+        workspace=workspace,
+        artifacts=artifact_repository,
+        reports=report_service,
+        tasks=task_repository,
+        permission_policy=PermissionPolicy(),
+        approvals=approval_repository,
+        sql_gateway=gateway,
+    )
+
+    result = registry.execute(
+        ToolCall(
+            id="credential-failure",
+            name="query_database",
+            arguments={"data_source_id": source.id, "sql": "SELECT region FROM orders"},
+        ),
+        tool_context,
+    )
+
+    assert result.error_category == "credential_error"
+    assert secret not in str(result)
+    stored = db_connection.execute(
+        "SELECT error_message FROM tool_executions WHERE task_id = ?",
+        (tool_context.task_id,),
+    ).fetchone()[0]
+    assert secret not in stored
+
+
 def test_approved_tool_action_is_allowed_once(
     tool_registry,
     tool_context,

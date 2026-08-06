@@ -14,6 +14,7 @@ import psycopg
 
 from data_analysis_agent.data_sources import (
     AccessLevel,
+    CredentialError,
     DataSourceRepository,
 )
 from data_analysis_agent.db import sqlite_connection_lock, utc_now
@@ -273,7 +274,15 @@ class SqlSafetyGateway:
             )
 
         policy = self.sources.policy_snapshot(data_source_id)
-        credentials = self.sources.credentials(data_source_id)
+        try:
+            credentials = self.sources.credentials(data_source_id)
+        except CredentialError:
+            return SqlGatewayOutcome(
+                status="retryable_error",
+                error_category="credential_error",
+                message="Data source credentials are unavailable",
+                retryable=False,
+            )
         try:
             catalog = self.driver.inspect_schema(credentials.dsn)
             validated = self.validator.validate(sql, catalog, policy)

@@ -17,7 +17,11 @@ from data_analysis_agent.permissions import (
 )
 from data_analysis_agent.postgres import SqlSafetyGateway
 from data_analysis_agent.reporting import ReportService
-from data_analysis_agent.repositories import ArtifactRepository, TaskRepository
+from data_analysis_agent.repositories import (
+    ArtifactRepository,
+    RecordNotFoundError,
+    TaskRepository,
+)
 from data_analysis_agent.workspace import WorkspaceService
 
 
@@ -183,7 +187,21 @@ class ToolRegistry:
                 error_category="validation_error",
                 message="Tool arguments did not match the schema",
                 retryable=True,
-                diagnostics={"errors": exc.errors(include_url=False)},
+                diagnostics={"errors": _safe_validation_errors(exc)},
+            )
+
+        try:
+            task = self._tasks.get(context.task_id)
+        except RecordNotFoundError:
+            task = None
+        if task is None or task.project_id != context.project_id:
+            return ToolResult(
+                call_id=call.id,
+                success=False,
+                output={},
+                error_category="project_scope_denied",
+                message="Task does not belong to the requested project",
+                retryable=False,
             )
 
         normalized_arguments = arguments.model_dump(mode="json")
@@ -282,12 +300,12 @@ class ToolRegistry:
                 diagnostics=exc.diagnostics,
                 pauses_task=exc.pauses_task,
             )
-        except Exception as exc:
+        except Exception:
             self._tasks.finish_tool_execution(
                 execution_id,
                 "failed",
-                "tool_error",
-                str(exc),
+                "internal_tool_error",
+                "The tool could not be completed safely",
             )
             self._tasks.append_event(
                 context.task_id,
@@ -295,15 +313,15 @@ class ToolRegistry:
                 {
                     "execution_id": execution_id,
                     "tool_name": call.name,
-                    "error_category": "tool_error",
+                    "error_category": "internal_tool_error",
                 },
             )
             return ToolResult(
                 call_id=call.id,
                 success=False,
                 output={},
-                error_category="tool_error",
-                message=str(exc),
+                error_category="internal_tool_error",
+                message="The tool could not be completed safely",
                 retryable=True,
             )
 
@@ -581,6 +599,17 @@ def build_tool_registry(
         ),
     )
     return ToolRegistry(definitions, permission_policy, approvals, tasks, artifacts)
+
+
+def _safe_validation_errors(exc: ValidationError) -> list[dict[str, object]]:
+    return [
+        {
+            "loc": list(error["loc"]),
+            "type": str(error["type"]),
+            "msg": "Invalid tool argument",
+        }
+        for error in exc.errors(include_url=False)
+    ]
 
 
 def _ensure_running(tasks: TaskRepository, task_id: str) -> None:

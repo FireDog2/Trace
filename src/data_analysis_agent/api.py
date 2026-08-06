@@ -19,8 +19,9 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from data_analysis_agent.agent import AgentRunner
@@ -328,15 +329,24 @@ def create_app(
     )
     app.state.services = services
 
+    @app.exception_handler(RequestValidationError)
+    async def request_validation_handler(_, exc: RequestValidationError):
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content={"detail": _safe_request_validation_errors(exc)},
+        )
+
     @app.exception_handler(RecordNotFoundError)
     async def not_found_handler(_, exc: RecordNotFoundError):
-        return _json_error(status.HTTP_404_NOT_FOUND, str(exc))
+        del exc
+        return _json_error(status.HTTP_404_NOT_FOUND, "Resource not found")
 
     @app.exception_handler(DatasetError)
     @app.exception_handler(WorkspaceError)
     @app.exception_handler(RepositoryError)
     async def domain_error_handler(_, exc: Exception):
-        return _json_error(status.HTTP_400_BAD_REQUEST, str(exc))
+        del exc
+        return _json_error(status.HTTP_400_BAD_REQUEST, "Invalid request")
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
@@ -423,6 +433,11 @@ def create_app(
             )
         try:
             snapshot = services.data_sources.replace_policies(source_id, rules)
+        except RecordNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Data source not found",
+            ) from exc
         except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -432,9 +447,14 @@ def create_app(
 
     @app.get("/api/data-sources/{source_id}/schema")
     def inspect_data_source_schema(source_id: str) -> dict[str, object]:
-        services.data_sources.get_public(source_id)
         try:
+            services.data_sources.get_public(source_id)
             catalog = services.sql_gateway.inspect_schema(source_id)
+        except RecordNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Data source not found",
+            ) from exc
         except Exception:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -795,6 +815,17 @@ def _model_configuration_response(
 
 
 def _json_error(status_code: int, detail: str):
-    from fastapi.responses import JSONResponse
-
     return JSONResponse(status_code=status_code, content={"detail": detail})
+
+
+def _safe_request_validation_errors(
+    exc: RequestValidationError,
+) -> list[dict[str, object]]:
+    return [
+        {
+            "loc": list(error["loc"]),
+            "type": str(error["type"]),
+            "msg": "Invalid request value",
+        }
+        for error in exc.errors()
+    ]

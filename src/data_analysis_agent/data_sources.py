@@ -16,6 +16,10 @@ from data_analysis_agent.model_config import SecretProtector
 from data_analysis_agent.repositories import RecordNotFoundError, RepositoryError
 
 
+class CredentialError(RepositoryError):
+    """Raised when a data-source credential cannot be accessed safely."""
+
+
 class AccessLevel(StrEnum):
     ALLOWED = "allowed"
     APPROVAL_REQUIRED = "approval_required"
@@ -109,10 +113,11 @@ class DataSourceRepository:
         ).fetchone()
         if row is None:
             raise RecordNotFoundError(f"Data source not found: {data_source_id}")
-        return DataSourceCredentials(
-            id=row["id"],
-            dsn=self._secret_protector.unprotect(bytes(row["protected_dsn"])),
-        )
+        try:
+            dsn = self._secret_protector.unprotect(bytes(row["protected_dsn"]))
+        except BaseException as exc:
+            raise CredentialError("Data source credentials are unavailable") from exc
+        return DataSourceCredentials(id=row["id"], dsn=dsn)
 
     @sqlite_connection_guarded
     def list_for_project(self, project_id: str) -> tuple[DataSource, ...]:
