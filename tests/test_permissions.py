@@ -70,6 +70,11 @@ def test_query_database_sql_is_deferred_to_the_gateway(
     assert decision.level is PermissionLevel.ALLOW
 
 
+def test_lead_coordination_tools_are_automatic(policy: PermissionPolicy) -> None:
+    for tool_name in ("spawn_teammate", "list_teammates", "await_teammates", "cancel_teammate"):
+        assert policy.classify(ToolAction(tool_name, {})).level is PermissionLevel.ALLOW
+
+
 def test_approval_decision_is_persisted_once(
     approval_repository: ApprovalRepository,
     task,

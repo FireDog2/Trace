@@ -88,7 +88,7 @@ def test_request_cancel_is_idempotent_and_does_not_change_terminal_run(db_connec
     assert repository.cancel_requested(active.id) is True
 
 
-def test_startup_marks_only_running_and_waiting_runs_interrupted(db_connection, task) -> None:
+def test_startup_marks_unfinished_runs_interrupted(db_connection, task) -> None:
     repository = TeamRepository(db_connection)
     created = repository.create_run(task.id, AgentRole.KNOWLEDGE, "Remain queued")
     working = repository.create_run(task.id, AgentRole.SQL, "Interrupted query")
@@ -97,9 +97,8 @@ def test_startup_marks_only_running_and_waiting_runs_interrupted(db_connection, 
     repository.transition_run(waiting.id, AgentRunStatus.WORKING)
     repository.transition_run(waiting.id, AgentRunStatus.WAITING)
 
-    assert repository.mark_interrupted_runs() == 2
-    assert repository.get_run(created.id).status is AgentRunStatus.CREATED
-    for run_id in (working.id, waiting.id):
+    assert repository.mark_interrupted_runs() == 3
+    for run_id in (created.id, working.id, waiting.id):
         run = repository.get_run(run_id)
         assert run.status is AgentRunStatus.FAILED
         assert run.error_category == "interrupted"
@@ -170,3 +169,14 @@ def test_create_run_if_capacity_rejects_a_fourth_active_run(db_connection, task)
         repository.create_run_if_capacity(task.id, AgentRole.SQL, "Bounded", max_active=3)
     with pytest.raises(TeamCapacityError):
         repository.create_run_if_capacity(task.id, AgentRole.SQL, "Fourth", max_active=3)
+
+
+def test_startup_cancels_queued_cancel_request_and_interrupts_other_created_runs(db_connection, task) -> None:
+    repository = TeamRepository(db_connection)
+    queued = repository.create_run(task.id, AgentRole.SQL, "Queued")
+    stale = repository.create_run(task.id, AgentRole.SQL, "Stale")
+    repository.request_cancel(queued.id)
+
+    assert repository.mark_interrupted_runs() == 2
+    assert repository.get_run(queued.id).status is AgentRunStatus.CANCELLED
+    assert repository.get_run(stale.id).status is AgentRunStatus.FAILED

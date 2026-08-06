@@ -22,12 +22,7 @@ from data_analysis_agent.providers import ModelMessage, ModelProvider, ModelRequ
 from data_analysis_agent.repositories import ProtectedMessageError
 from data_analysis_agent.settings import Settings
 from data_analysis_agent.tools import ToolCall, ToolContext, ToolRegistry, ToolResult
-
-
-class AgentRole(StrEnum):
-    KNOWLEDGE = "knowledge"
-    SQL = "sql"
-    REPORT = "report"
+from data_analysis_agent.team_types import AgentRole
 
 
 class AgentRunStatus(StrEnum):
@@ -45,6 +40,10 @@ class InvalidAgentRunTransition(RuntimeError):
 
 class TeamCapacityError(RuntimeError):
     """Raised when a parent task already has its active teammate quota."""
+
+
+class TeamManagerClosed(RuntimeError):
+    """Raised when a manager has already begun non-blocking shutdown."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,7 +76,7 @@ class AgentMessage:
 
 
 RUN_TRANSITIONS: dict[AgentRunStatus, frozenset[AgentRunStatus]] = {
-    AgentRunStatus.CREATED: frozenset({AgentRunStatus.WORKING, AgentRunStatus.CANCELLED}),
+    AgentRunStatus.CREATED: frozenset({AgentRunStatus.WORKING, AgentRunStatus.FAILED, AgentRunStatus.CANCELLED}),
     AgentRunStatus.WORKING: frozenset(
         {
             AgentRunStatus.WAITING,
@@ -413,13 +412,19 @@ class TeamRepository:
         try:
             self._connection.execute("BEGIN IMMEDIATE")
             completed_at = utc_now()
-            cursor = self._connection.execute(
+            cancelled = self._connection.execute(
+                "UPDATE agent_runs SET status = 'cancelled', completed_at = ?, worker_token = NULL, worker_claimed_at = NULL "
+                "WHERE status = 'created' AND cancel_requested = 1",
+                (completed_at,),
+            )
+            interrupted = self._connection.execute(
                 "UPDATE agent_runs SET status = 'failed', error_category = 'interrupted', "
-                "error_message = ?, completed_at = ?, worker_token = NULL, worker_claimed_at = NULL WHERE status IN ('working', 'waiting')",
+                "error_message = ?, completed_at = ?, worker_token = NULL, worker_claimed_at = NULL "
+                "WHERE status IN ('created', 'working', 'waiting')",
                 (_SAFE_ERROR_MESSAGES["interrupted"], completed_at),
             )
             self._connection.commit()
-            return cursor.rowcount
+            return cancelled.rowcount + interrupted.rowcount
         except Exception:
             self._connection.rollback()
             raise
@@ -692,17 +697,20 @@ class TeammateRunner:
 
 
 RunnerFactory = Callable[[AgentRole, Event], TeammateRunner]
+WorkerFailureHandler = Callable[[str], AgentRun]
 
 
 class TeamManager:
     """Owns local execution handles while SQLite remains the source of truth."""
 
     def __init__(
-        self, repository: TeamRepository, settings: Settings, runner_factory: RunnerFactory
+        self, repository: TeamRepository, settings: Settings, runner_factory: RunnerFactory,
+        worker_failure_handler: WorkerFailureHandler | None = None,
     ) -> None:
         self._repository = repository
         self._settings = settings
         self._runner_factory = runner_factory
+        self._worker_failure_handler = worker_failure_handler
         self._executor = ThreadPoolExecutor(max_workers=settings.max_active_teammates)
         self._lock = RLock()
         self._futures: dict[str, Future[AgentRun]] = {}
@@ -710,15 +718,18 @@ class TeamManager:
         self._closed = False
 
     def spawn(self, task_id: str, role: AgentRole, objective: str) -> AgentRun:
+        with self._lock:
+            if self._closed:
+                raise TeamManagerClosed("Team manager is shut down")
         run = self._repository.create_run_if_capacity(
             task_id, role, objective, max_active=self._settings.max_active_teammates
         )
         event = Event()
         with self._lock:
+            # A shutdown racing after the first check is handled as a queued cancellation.
             if self._closed:
                 self._repository.request_cancel(run.id)
-                self._repository.transition_run(run.id, AgentRunStatus.CANCELLED)
-                return self._repository.get_run(run.id)
+                return self._repository.transition_run(run.id, AgentRunStatus.CANCELLED)
             self._cancel_events[run.id] = event
             try:
                 future = self._executor.submit(self._execute, run.id, AgentRole(role), event)
@@ -761,18 +772,25 @@ class TeamManager:
             if self._closed:
                 return
             self._closed = True
-            run_ids = tuple(self._cancel_events)
-            events = tuple(self._cancel_events.values())
-        for event in events:
+            pairs = tuple(self._cancel_events.items())
+            futures = dict(self._futures)
+        for run_id, event in pairs:
             event.set()
-        for run_id in run_ids:
             self._repository.request_cancel(run_id)
+            future = futures.get(run_id)
+            if future is not None and future.cancel():
+                try:
+                    self._repository.transition_run(run_id, AgentRunStatus.CANCELLED)
+                except InvalidAgentRunTransition:
+                    pass
         self._executor.shutdown(wait=False, cancel_futures=True)
 
     def _execute(self, run_id: str, role: AgentRole, event: Event) -> AgentRun:
         try:
             return self._runner_factory(role, event).run(run_id)
         except BaseException:
+            if self._worker_failure_handler is not None:
+                return self._worker_failure_handler(run_id)
             try:
                 current = self._repository.get_run(run_id)
                 if current.status in _ACTIVE_STATUSES:

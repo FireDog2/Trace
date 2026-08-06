@@ -214,7 +214,7 @@ class AppServices:
     provider_factory: ProviderFactory
     secret_protector: SecretProtector
     team_repository: TeamRepository
-    team_manager: TeamManager
+    team_manager: TeamManager | None
 
     def agent(self) -> AgentRunner:
         return AgentRunner(
@@ -240,6 +240,7 @@ def build_services(
     provider: ModelProvider | None = None,
     secret_protector: SecretProtector | None = None,
     provider_factory: ProviderFactory = provider_from_credentials,
+    with_team_manager: bool = True,
 ) -> AppServices:
     connection = connect_database(settings)
     workspace = WorkspaceService(settings)
@@ -305,28 +306,45 @@ def build_services(
         provider_factory=provider_factory,
         secret_protector=protector,
         team_repository=team_repository,
-        team_manager=None,  # type: ignore[arg-type]
+        team_manager=None,
     )
+    if not with_team_manager:
+        return services
+
     def runner_factory(role: AgentRole, cancel_event):
-        worker = build_services(settings, None, protector, provider_factory)
-        runner = TeammateRunner(
-            settings=settings,
-            provider=worker.resolve_provider(),
-            tools=worker.tools,
-            repository=worker.team_repository,
-            cancel_event=cancel_event,
-            secret_protector=protector,
-        )
-        original_run = runner.run
         def run_and_close(run_id: str):
+            worker = None
             try:
-                return original_run(run_id)
+                worker = build_services(settings, None, protector, provider_factory, with_team_manager=False)
+                return TeammateRunner(
+                    settings=settings,
+                    provider=worker.resolve_provider(),
+                    tools=worker.tools,
+                    repository=worker.team_repository,
+                    cancel_event=cancel_event,
+                    secret_protector=protector,
+                ).run(run_id)
             finally:
-                worker.team_manager.shutdown()
-                worker.connection.close()
-        runner.run = run_and_close  # type: ignore[method-assign]
-        return runner
-    services.team_manager = TeamManager(team_repository, settings, runner_factory)
+                if worker is not None:
+                    worker.connection.close()
+        class ClosingRunner:
+            run = staticmethod(run_and_close)
+        return ClosingRunner()
+    def worker_failure_handler(run_id: str):
+        worker_connection = connect_database(settings)
+        try:
+            worker_repository = TeamRepository(worker_connection)
+            current = worker_repository.get_run(run_id)
+            return (
+                worker_repository.fail_run(run_id, "provider_error")
+                if current.status.value in {"created", "working", "waiting"}
+                else current
+            )
+        finally:
+            worker_connection.close()
+    services.team_manager = TeamManager(
+        team_repository, settings, runner_factory, worker_failure_handler
+    )
     tools.configure_team(services.team_manager, team_repository)
     return services
 
@@ -350,6 +368,7 @@ def create_app(
         try:
             yield
         finally:
+            assert services.team_manager is not None
             services.team_manager.shutdown()
             services.connection.close()
 

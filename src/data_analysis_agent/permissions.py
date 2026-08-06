@@ -22,6 +22,10 @@ AUTOMATIC_TOOLS = frozenset(
         "write_report",
         "update_plan",
         "request_user_input",
+        "spawn_teammate",
+        "list_teammates",
+        "await_teammates",
+        "cancel_teammate",
     }
 )
 

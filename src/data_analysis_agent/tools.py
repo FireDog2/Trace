@@ -4,7 +4,7 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Annotated, Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -25,6 +25,7 @@ from data_analysis_agent.repositories import (
     TaskRepository,
 )
 from data_analysis_agent.workspace import WorkspaceService
+from data_analysis_agent.team_types import AgentRole
 
 if TYPE_CHECKING:
     from data_analysis_agent.team import TeamManager, TeamRepository
@@ -138,17 +139,17 @@ class RequestUserInputInput(ToolInput):
 
 
 class SpawnTeammateInput(ToolInput):
-    role: str
+    role: AgentRole
     objective: str = Field(min_length=1, max_length=2_000)
 
 
 class AwaitTeammatesInput(ToolInput):
-    agent_ids: list[str] = Field(min_length=1, max_length=3)
+    agent_ids: list[Annotated[str, Field(min_length=1, max_length=128)]] = Field(min_length=1, max_length=3)
     timeout_seconds: int = Field(default=30, ge=1, le=120)
 
 
 class CancelTeammateInput(ToolInput):
-    agent_id: str = Field(min_length=1)
+    agent_id: str = Field(min_length=1, max_length=128)
 
 
 Handler = Callable[[ToolInput, ToolContext], HandlerResult]
@@ -589,7 +590,10 @@ def build_tool_registry(
 
     def _owned_run(agent_id: str, context: ToolContext):
         repository = coordinator["repository"]
-        run = repository.get_run(agent_id)
+        try:
+            run = repository.get_run(agent_id)
+        except KeyError:
+            raise ToolHandlerError("Teammate was not found", category="permission_denied", retryable=False) from None
         if run.task_id != context.task_id:
             raise ToolHandlerError("Teammate does not belong to this task", category="permission_denied", retryable=False)
         return run
@@ -598,7 +602,7 @@ def build_tool_registry(
         from data_analysis_agent.team import AgentRole, TeamCapacityError
         assert isinstance(arguments, SpawnTeammateInput)
         try:
-            run = coordinator["manager"].spawn(context.task_id, AgentRole(arguments.role), arguments.objective)
+            run = coordinator["manager"].spawn(context.task_id, arguments.role, arguments.objective)
         except (ValueError, TeamCapacityError):
             raise ToolHandlerError("Teammate capacity is unavailable", category="permission_denied", retryable=False) from None
         return HandlerResult({"agent_id": run.id, "role": run.role.value, "status": run.status.value})
