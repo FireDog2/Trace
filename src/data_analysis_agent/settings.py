@@ -10,6 +10,9 @@ class Settings:
     database_path: Path
     python_timeout_seconds: int = 30
     max_tool_actions: int = 40
+    max_teammate_turns: int = 12
+    teammate_timeout_seconds: int = 120
+    max_active_teammates: int = 3
     model_timeout_seconds: int = 60
     postgres_statement_timeout_ms: int = 8_000
     postgres_lock_timeout_ms: int = 1_000
@@ -22,6 +25,12 @@ class Settings:
     def __post_init__(self) -> None:
         if not 1 <= self.postgres_max_rows <= 10_000:
             raise ValueError("postgres_max_rows must be between 1 and 10000")
+        if not 1 <= self.max_teammate_turns <= 100:
+            raise ValueError("max_teammate_turns must be between 1 and 100")
+        if not 1 <= self.teammate_timeout_seconds <= 3_600:
+            raise ValueError("teammate_timeout_seconds must be between 1 and 3600")
+        if not 1 <= self.max_active_teammates <= 3:
+            raise ValueError("max_active_teammates must be between 1 and 3")
 
     @classmethod
     def local(cls, data_dir: Path | None = None) -> "Settings":

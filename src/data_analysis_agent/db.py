@@ -270,6 +270,14 @@ CREATE INDEX IF NOT EXISTS idx_agent_messages_run_created
 ON agent_messages(agent_run_id, created_at);
 """
 
+MIGRATION_8_SQL = """
+CREATE TABLE IF NOT EXISTS protected_agent_message_payloads (
+    agent_message_id TEXT PRIMARY KEY REFERENCES agent_messages(id) ON DELETE CASCADE,
+    protected_content BLOB NOT NULL,
+    created_at TEXT NOT NULL
+);
+"""
+
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
@@ -356,6 +364,9 @@ def migrate(connection: sqlite3.Connection) -> None:
         except Exception:
             connection.rollback()
             raise
+    if 8 not in applied:
+        connection.executescript(MIGRATION_8_SQL)
+        connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (8, utc_now()))
     connection.execute("PRAGMA foreign_keys = ON")
     connection.commit()
 

@@ -44,6 +44,8 @@ class ToolSchema:
 class ToolContext:
     project_id: str
     task_id: str
+    agent_id: str | None = None
+    run_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +167,17 @@ class ToolRegistry:
                 input_schema=definition.input_model.model_json_schema(),
             )
             for definition in self._definitions.values()
+        )
+
+    def restrict(self, allowed_names: frozenset[str] | set[str]) -> "ToolRegistry":
+        """Return an independently scoped view sharing the same backing services."""
+        allowed = frozenset(allowed_names)
+        return ToolRegistry(
+            tuple(definition for name, definition in self._definitions.items() if name in allowed),
+            self._permission_policy,
+            self._approvals,
+            self._tasks,
+            self._artifacts,
         )
 
     def execute(self, call: ToolCall, context: ToolContext) -> ToolResult:

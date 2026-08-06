@@ -28,12 +28,13 @@ def test_migrate_creates_versioned_core_tables(db_connection) -> None:
         "data_sources",
         "data_access_policies",
         "task_query_budget",
-        "agent_runs",
-        "agent_messages",
+            "agent_runs",
+            "agent_messages",
+            "protected_agent_message_payloads",
     } <= names
     assert db_connection.execute(
         "SELECT version FROM schema_migrations ORDER BY version"
-    ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,)]
+    ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,)]
     for table in ("data_access_policies", "database_query_attempts"):
         assert any(
             row[2] == "data_sources"
