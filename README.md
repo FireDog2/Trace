@@ -33,9 +33,15 @@ The SQL path is: parse/allow-list -> schema and policy evaluation -> bounded `EX
 
 ## Quick start
 
-Requires Python 3.12 and Node 20.
+Requires Python 3.12, Node 20, and Docker Desktop. Only PostgreSQL runs in Docker;
+the API and web app stay on the host for fast edit/run development.
 
 ```powershell
+# Start the database once. The demo fixture is loaded on first volume creation.
+docker compose up -d postgres
+$env:PORTFOLIO_POSTGRES_DSN = "postgresql://portfolio:portfolio@localhost:5432/portfolio"
+# Use this DSN when creating the PostgreSQL source in the workbench.
+
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e ".[dev]"
@@ -45,12 +51,21 @@ data-analysis-agent serve --host 127.0.0.1 --port 8765
 npm --prefix web run dev
 ```
 
-The deterministic tests require no model API key or PostgreSQL. For optional live PostgreSQL checks, set `TEST_POSTGRES_DSN` (or use the synthetic fixture in [examples/postgres-business-review](examples/postgres-business-review)); never commit a DSN.
+Code changes do not require rebuilding or restarting the database container. Use
+`docker compose stop postgres` to stop it. To discard all local database data and
+reload the fixture, run `docker compose down -v` followed by
+`docker compose up -d postgres`.
+
+The checked-in `portfolio` password is for local disposable development only. The
+deterministic tests require no model API key or PostgreSQL. For live PostgreSQL
+checks, point `TEST_POSTGRES_DSN` at the local container; never commit a real DSN.
 
 ## Verification
 
 ```powershell
 python -m pytest tests/test_portfolio_acceptance.py -v
+$env:TEST_POSTGRES_DSN = "postgresql://portfolio:portfolio@localhost:5432/portfolio"
+python -m pytest tests/test_postgres_integration.py -v
 python -m pytest -v
 npm --prefix web test -- --run
 npm --prefix web run build

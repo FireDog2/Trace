@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: portfolio
+      POSTGRES_USER: portfolio
+      POSTGRES_PASSWORD: portfolio
+    ports:
+      - "${PORTFOLIO_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - portfolio-postgres-data:/var/lib/postgresql/data
+      - ./tests/fixtures/postgres_business_review.sql:/docker-entrypoint-initdb.d/001-business-review.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U portfolio -d portfolio"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+volumes:
+  portfolio-postgres-data:
