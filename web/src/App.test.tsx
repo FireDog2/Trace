@@ -168,6 +168,11 @@ describe("analysis workbench", () => {
     const projectContext = await screen.findByRole("navigation", { name: "项目上下文" });
     const conversation = await screen.findByRole("main", { name: "分析对话" });
     const artifacts = await screen.findByRole("complementary", { name: "最终产物" });
+    const shell = projectContext.parentElement;
+
+    expect(shell).not.toBeNull();
+    expect(shell?.querySelectorAll(":scope > nav, :scope > main, :scope > aside")).toHaveLength(3);
+    expect(shell?.querySelector(".task-workbench")).not.toBeInTheDocument();
 
     expect(projectContext.compareDocumentPosition(conversation)).toBe(
       Node.DOCUMENT_POSITION_FOLLOWING,
@@ -197,24 +202,21 @@ describe("analysis workbench", () => {
 
     fireEvent.click(toggle);
     expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(screen.queryByRole("textbox", { name: "给分析 Agent 留言" })).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给分析 Agent 留言" })).toBeVisible();
 
     fireEvent.click(screen.getByRole("button", { name: "关闭项目导航" }));
     expect(toggle).toHaveAttribute("aria-expanded", "false");
   });
 
-  it("keeps conversation separate from durable task artifacts", async () => {
+  it("renders the active task as conversation and durable artifact regions", async () => {
     render(<App api={fakeApiWithCompletedTask()} />);
 
-    expect(await screen.findByRole("heading", { name: "华东利润诊断" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "分析计划" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "分析产物" })).toBeVisible();
+    expect(await screen.findByRole("main", { name: "分析对话" })).toBeVisible();
+    expect(screen.getByRole("complementary", { name: "最终产物" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "最终产物" })).toBeVisible();
     expect(screen.getByRole("textbox", { name: "给分析 Agent 留言" })).toBeVisible();
     expect(screen.queryByRole("textbox", { name: "分析目标" })).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "物流成本趋势" })).toHaveAttribute(
-      "href",
-      "/api/artifacts/chart-1/content",
-    );
+    expect(screen.queryByRole("heading", { name: "华东利润诊断" })).not.toBeInTheDocument();
   });
 
   it("shows only the objective input before a task exists", async () => {
@@ -342,22 +344,4 @@ describe("analysis workbench", () => {
     });
   });
 
-  it("surfaces the latest Agent conclusion in the workbench", async () => {
-    render(<App api={fakeApiWithCompletedTask()} />);
-
-    expect(await screen.findByRole("heading", { name: "当前结论" })).toBeVisible();
-    expect(screen.getAllByText("物流成本增长是主要变化。").length).toBeGreaterThanOrEqual(1);
-  });
-
-  it("collapses and restores the conversation without leaving the task", async () => {
-    render(<App api={fakeApiWithCompletedTask()} />);
-
-    const collapse = await screen.findByRole("button", { name: "收起对话" });
-    fireEvent.click(collapse);
-
-    expect(screen.queryByRole("textbox", { name: "给分析 Agent 留言" })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "展开对话" }));
-
-    expect(screen.getByRole("textbox", { name: "给分析 Agent 留言" })).toBeVisible();
-  });
 });

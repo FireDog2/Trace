@@ -5,7 +5,6 @@ import { ArtifactWorkspace } from "./components/ArtifactWorkspace";
 import { Conversation } from "./components/Conversation";
 import { ModelSettings } from "./components/ModelSettings";
 import { ProjectNav } from "./components/ProjectNav";
-import { TaskWorkbench } from "./components/TaskWorkbench";
 import type {
   Artifact,
   ModelConfigurationStatus,
@@ -33,7 +32,6 @@ export function App({ api: suppliedApi }: AppProps) {
   const [error, setError] = useState<string | null>(null);
   const [modelConfiguration, setModelConfiguration] = useState<ModelConfigurationStatus | null>(null);
   const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
-  const [conversationOpen, setConversationOpen] = useState(true);
   const [projectNavOpen, setProjectNavOpen] = useState(false);
 
   useEffect(() => {
@@ -154,9 +152,7 @@ export function App({ api: suppliedApi }: AppProps) {
     setError(null);
   }
 
-  const shellClassName = task
-    ? `app-shell with-conversation${conversationOpen ? "" : " conversation-collapsed"}`
-    : "app-shell";
+  const shellClassName = task ? "app-shell with-conversation" : "app-shell";
 
   return (
     <div className={shellClassName}>
@@ -165,10 +161,7 @@ export function App({ api: suppliedApi }: AppProps) {
         className="project-drawer-toggle"
         aria-label="打开项目导航"
         aria-expanded={projectNavOpen}
-        onClick={() => {
-          setConversationOpen(false);
-          setProjectNavOpen(true);
-        }}
+        onClick={() => setProjectNavOpen(true)}
       >
         <span aria-hidden="true">TRACE</span>
         项目
@@ -198,14 +191,7 @@ export function App({ api: suppliedApi }: AppProps) {
 
       {error && <div className="error-banner" role="alert">{error}</div>}
 
-      {task ? (
-        <TaskWorkbench
-          task={task}
-          events={events}
-          conversationOpen={conversationOpen}
-          onOpenConversation={() => setConversationOpen(true)}
-        />
-      ) : (
+      {!task && (
         <main className="task-workbench empty-workbench">
           <div className="empty-sequence">DATA → PLAN → EVIDENCE</div>
           <h1>{selectedProjectId ? "提出第一个经营问题" : "创建一个分析项目"}</h1>
@@ -235,8 +221,6 @@ export function App({ api: suppliedApi }: AppProps) {
           events={events}
           onSend={sendMessage}
           onApproval={decideApproval}
-          onCollapse={() => setConversationOpen(false)}
-          hidden={!conversationOpen}
         />
       )}
 
