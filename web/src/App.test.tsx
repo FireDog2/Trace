@@ -162,6 +162,21 @@ function fakeApiWithCompletedTask(
 }
 
 describe("analysis workbench", () => {
+  it("renders project context, conversation, and artifacts in workspace order", async () => {
+    render(<App api={fakeApiWithCompletedTask()} />);
+
+    const projectContext = await screen.findByRole("navigation", { name: "项目上下文" });
+    const conversation = await screen.findByRole("main", { name: "分析对话" });
+    const artifacts = await screen.findByRole("complementary", { name: "最终产物" });
+
+    expect(projectContext.compareDocumentPosition(conversation)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(conversation.compareDocumentPosition(artifacts)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+  });
+
   it("uses the TRACE brand and groups model settings by responsibility", async () => {
     render(<App api={fakeApiWithCompletedTask()} />);
 

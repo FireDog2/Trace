@@ -54,7 +54,7 @@ export function Conversation({
   }
 
   return (
-    <aside className="conversation-panel" hidden={hidden} aria-label="分析协作对话">
+    <main className="conversation-panel" hidden={hidden} aria-label="分析对话">
       <header>
         <div className="conversation-heading-row">
           <div>
@@ -142,7 +142,7 @@ export function Conversation({
           </button>
         </div>
       </form>
-    </aside>
+    </main>
   );
 }
 

@@ -46,7 +46,7 @@ export function ProjectNav({
   }
 
   return (
-    <nav className={drawerOpen ? "project-rail drawer-open" : "project-rail"} aria-label="分析项目">
+    <nav className={drawerOpen ? "project-rail drawer-open" : "project-rail"} aria-label="项目上下文">
       <header className="brand-block">
         <span className="brand-index">LOCAL ANALYSIS SYSTEM</span>
         <strong>TRACE</strong>

@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
 import { HttpApiClient, type ApiClient } from "./api";
+import { ArtifactWorkspace } from "./components/ArtifactWorkspace";
 import { Conversation } from "./components/Conversation";
 import { ModelSettings } from "./components/ModelSettings";
 import { ProjectNav } from "./components/ProjectNav";
@@ -238,6 +239,8 @@ export function App({ api: suppliedApi }: AppProps) {
           hidden={!conversationOpen}
         />
       )}
+
+      {task && <ArtifactWorkspace task={task} />}
 
       {modelConfiguration && (
         <ModelSettings
