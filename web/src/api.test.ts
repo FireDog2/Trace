@@ -46,4 +46,12 @@ describe("HttpApiClient", () => {
     await expect(new HttpApiClient().listAgents("task-1")).resolves.toEqual(runs);
     expect(fetchMock).toHaveBeenCalledWith("/api/tasks/task-1/agents", undefined);
   });
+
+  it("handles an empty successful delete response", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(new HttpApiClient().deleteBusinessKnowledge("entry-1")).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith("/api/knowledge/entry-1", { method: "DELETE" });
+  });
 });

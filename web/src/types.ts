@@ -73,6 +73,17 @@ export interface PolicyRule { table: string; column: string | null; access: Acce
 export interface PolicySnapshot { data_source_id: string; version: number; rules: PolicyRule[]; }
 export interface DatabaseSchema { tables: Record<string, string[]>; }
 
+export type BusinessKnowledgeKind = "metric" | "term" | "rule";
+export interface BusinessKnowledgeEntry {
+  id: string; project_id: string; kind: BusinessKnowledgeKind; name: string;
+  definition: string; formula: string | null; dimensions: string[]; synonyms: string[];
+  source: string | null; version: number; created_at: string; updated_at: string;
+}
+export interface SaveBusinessKnowledge {
+  kind: BusinessKnowledgeKind; name: string; definition: string; formula?: string | null;
+  dimensions: string[]; synonyms: string[]; source?: string | null;
+}
+
 export interface AnalysisRun {
   id: string; task_id: string; status: "running" | "completed" | "failed" | "cancelled";
   accepted: boolean; started_at: string; completed_at: string | null; error_category: string | null;

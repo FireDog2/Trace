@@ -27,6 +27,10 @@ export interface ApiClient {
   getDataSourceSchema(sourceId: string): Promise<import("./types").DatabaseSchema>;
   getDataSourcePolicies(sourceId: string): Promise<import("./types").PolicySnapshot>;
   replaceDataSourcePolicies(sourceId: string, rules: import("./types").PolicyRule[]): Promise<import("./types").PolicySnapshot>;
+  listBusinessKnowledge(projectId: string): Promise<import("./types").BusinessKnowledgeEntry[]>;
+  createBusinessKnowledge(projectId: string, input: import("./types").SaveBusinessKnowledge): Promise<import("./types").BusinessKnowledgeEntry>;
+  updateBusinessKnowledge(entryId: string, input: import("./types").SaveBusinessKnowledge): Promise<import("./types").BusinessKnowledgeEntry>;
+  deleteBusinessKnowledge(entryId: string): Promise<void>;
   listAgents(taskId: string): Promise<AgentRun[]>;
   listRuns(taskId: string): Promise<AnalysisRun[]>;
   getTrace(runId: string): Promise<TraceEvent[]>;
@@ -108,6 +112,10 @@ export class HttpApiClient implements ApiClient {
   getDataSourceSchema(sourceId: string): Promise<import("./types").DatabaseSchema> { return this.request(`/api/data-sources/${sourceId}/schema`); }
   getDataSourcePolicies(sourceId: string): Promise<import("./types").PolicySnapshot> { return this.request(`/api/data-sources/${sourceId}/policies`); }
   replaceDataSourcePolicies(sourceId: string, rules: import("./types").PolicyRule[]): Promise<import("./types").PolicySnapshot> { return this.request(`/api/data-sources/${sourceId}/policies`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rules }) }); }
+  listBusinessKnowledge(projectId: string): Promise<import("./types").BusinessKnowledgeEntry[]> { return this.request(`/api/projects/${projectId}/knowledge`); }
+  createBusinessKnowledge(projectId: string, input: import("./types").SaveBusinessKnowledge): Promise<import("./types").BusinessKnowledgeEntry> { return this.request(`/api/projects/${projectId}/knowledge`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }); }
+  updateBusinessKnowledge(entryId: string, input: import("./types").SaveBusinessKnowledge): Promise<import("./types").BusinessKnowledgeEntry> { return this.request(`/api/knowledge/${entryId}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }); }
+  deleteBusinessKnowledge(entryId: string): Promise<void> { return this.request(`/api/knowledge/${entryId}`, { method: "DELETE" }); }
 
   listAgents(taskId: string): Promise<AgentRun[]> {
     return this.request(`/api/tasks/${taskId}/agents`);
@@ -195,6 +203,7 @@ export class HttpApiClient implements ApiClient {
         : body.detail?.message;
       throw new Error(message ?? `请求失败（${response.status}）`);
     }
+    if (response.status === 204) return undefined as T;
     return (await response.json()) as T;
   }
 }

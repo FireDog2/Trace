@@ -259,6 +259,7 @@ def test_production_lead_delegates_database_and_artifact_work_to_teammates(setti
         task = lead.tasks.create(project.id, "No direct SQL")
         lead_names = {schema.name for schema in lead.tools.schemas()}
         assert "query_database" not in lead_names
+        assert "search_business_knowledge" not in lead_names
         assert not {"run_python", "save_artifact", "write_report"} & lead_names
         assert {"spawn_teammate", "list_teammates", "await_teammates"} <= lead_names
         rejected = lead.tools.execute(
@@ -273,13 +274,76 @@ def test_production_lead_delegates_database_and_artifact_work_to_teammates(setti
         try:
             worker_names = {schema.name for schema in worker.tools.schemas()}
             assert {
-                "query_database", "run_python", "save_artifact", "write_report"
+                "query_database", "search_business_knowledge", "run_python",
+                "save_artifact", "write_report"
             } <= worker_names
+            lead.knowledge.create(
+                project.id,
+                kind="metric",
+                name="Gross profit",
+                definition="Revenue minus cost of goods sold.",
+                formula="revenue - cogs",
+            )
+            result = worker.tools.execute(
+                ToolCall(
+                    "knowledge-search",
+                    "search_business_knowledge",
+                    {"query": "gross profit"},
+                ),
+                ToolContext(project.id, task.id),
+            )
+            assert result.success
+            assert result.output["entries"][0]["formula"] == "revenue - cogs"
         finally:
             worker.connection.close()
     finally:
         lead.team_manager.shutdown()  # type: ignore[union-attr]
         lead.connection.close()
+
+
+def test_business_knowledge_api_crud_and_versioning(api_client) -> None:
+    project = api_client.post(
+        "/api/projects", json={"name": "Metric catalog"}
+    ).json()
+    payload = {
+        "kind": "metric",
+        "name": "Operating profit",
+        "definition": "Revenue minus operating costs.",
+        "formula": "revenue - operating_cost",
+        "dimensions": ["month", "region"],
+        "synonyms": ["Operating income", "EBIT"],
+        "source": "Finance handbook",
+    }
+
+    created_response = api_client.post(
+        f"/api/projects/{project['id']}/knowledge", json=payload
+    )
+    assert created_response.status_code == 201
+    created = created_response.json()
+    assert created["version"] == 1
+
+    listed = api_client.get(
+        f"/api/projects/{project['id']}/knowledge"
+    ).json()
+    assert listed == [created]
+
+    payload["definition"] = "Revenue minus all operating expenses."
+    updated_response = api_client.put(
+        f"/api/knowledge/{created['id']}", json=payload
+    )
+    assert updated_response.status_code == 200
+    assert updated_response.json()["version"] == 2
+
+    duplicate_response = api_client.post(
+        f"/api/projects/{project['id']}/knowledge", json=payload
+    )
+    assert duplicate_response.status_code == 409
+
+    deleted = api_client.delete(f"/api/knowledge/{created['id']}")
+    assert deleted.status_code == 204
+    assert api_client.get(
+        f"/api/projects/{project['id']}/knowledge"
+    ).json() == []
 
 
 def test_explicit_teammate_provider_factory_creates_fresh_workers_without_model_config(settings) -> None:

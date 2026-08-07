@@ -15,6 +15,7 @@ AUTOMATIC_TOOLS = frozenset(
     {
         "inspect_workspace",
         "inspect_dataset",
+        "search_business_knowledge",
         "query_data",
         "query_database",
         "run_python",

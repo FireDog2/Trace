@@ -30,6 +30,10 @@ from data_analysis_agent.data_sources import AccessLevel, CredentialError, DataS
 from data_analysis_agent.db import connect_database
 from data_analysis_agent.domain import Artifact, Project, Task, TaskStatus
 from data_analysis_agent.execution import DuckDBExecutor, PythonExecutor
+from data_analysis_agent.knowledge import (
+    BusinessKnowledgeEntry,
+    BusinessKnowledgeRepository,
+)
 from data_analysis_agent.permissions import ApprovalRepository, PermissionPolicy
 from data_analysis_agent.postgres import SqlSafetyGateway
 from data_analysis_agent.sql_safety import SqlAstValidator
@@ -92,6 +96,31 @@ class ProjectResponse(ApiModel):
 class CreateDataSourceRequest(ApiModel):
     name: str = Field(min_length=1, max_length=120)
     dsn: str = Field(min_length=1, max_length=4_000)
+
+
+class SaveBusinessKnowledgeRequest(ApiModel):
+    kind: str = Field(pattern="^(metric|term|rule)$")
+    name: str = Field(min_length=1, max_length=160)
+    definition: str = Field(min_length=1, max_length=4_000)
+    formula: str | None = Field(default=None, max_length=4_000)
+    dimensions: list[Annotated[str, Field(min_length=1, max_length=120)]] = Field(default_factory=list, max_length=30)
+    synonyms: list[Annotated[str, Field(min_length=1, max_length=120)]] = Field(default_factory=list, max_length=30)
+    source: str | None = Field(default=None, max_length=1_000)
+
+
+class BusinessKnowledgeResponse(ApiModel):
+    id: str
+    project_id: str
+    kind: str
+    name: str
+    definition: str
+    formula: str | None
+    dimensions: list[str]
+    synonyms: list[str]
+    source: str | None
+    version: int
+    created_at: str
+    updated_at: str
 
 
 class DataSourceResponse(ApiModel):
@@ -243,6 +272,7 @@ class AppServices:
     datasets: DatasetService
     approvals: ApprovalRepository
     data_sources: DataSourceRepository
+    knowledge: BusinessKnowledgeRepository
     sql_gateway: SqlSafetyGateway
     model_configs: ModelConfigurationRepository
     tools: ToolRegistry
@@ -320,6 +350,7 @@ def _build_services(
         protector,
         attempt_stale_after_seconds=(settings.postgres_statement_timeout_ms / 1000) * 2,
     )
+    knowledge = BusinessKnowledgeRepository(connection)
     reports = ReportService(workspace, artifacts, tasks)
     traces = TraceRepository(connection)
     sql_gateway = SqlSafetyGateway(
@@ -356,6 +387,8 @@ def _build_services(
         include_coordination_tools=True,
         include_database_query=not with_team_manager,
         include_artifact_writes=not with_team_manager,
+        knowledge=knowledge,
+        include_knowledge_search=not with_team_manager,
     )
     team_repository = TeamRepository(connection, tasks.append_event)
     skill_candidates = SkillCandidateRepository(connection)
@@ -369,6 +402,7 @@ def _build_services(
         datasets=datasets,
         approvals=approvals,
         data_sources=data_sources,
+        knowledge=knowledge,
         sql_gateway=sql_gateway,
         model_configs=model_configs,
         tools=tools,
@@ -549,6 +583,91 @@ def create_app(
         project = services.projects.create(request.name)
         WorkspaceService(settings).create_project(project.id)
         return _project_response(project)
+
+    @app.get(
+        "/api/projects/{project_id}/knowledge",
+        response_model=list[BusinessKnowledgeResponse],
+    )
+    def list_business_knowledge(
+        project_id: str,
+    ) -> list[BusinessKnowledgeResponse]:
+        services.projects.get(project_id)
+        return [
+            _business_knowledge_response(entry)
+            for entry in services.knowledge.list_for_project(project_id)
+        ]
+
+    @app.post(
+        "/api/projects/{project_id}/knowledge",
+        response_model=BusinessKnowledgeResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_business_knowledge(
+        project_id: str,
+        request: SaveBusinessKnowledgeRequest,
+    ) -> BusinessKnowledgeResponse:
+        services.projects.get(project_id)
+        try:
+            entry = services.knowledge.create(
+                project_id,
+                kind=request.kind,
+                name=request.name,
+                definition=request.definition,
+                formula=request.formula,
+                dimensions=tuple(request.dimensions),
+                synonyms=tuple(request.synonyms),
+                source=request.source,
+            )
+        except (RepositoryError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Business knowledge entry could not be created",
+            ) from exc
+        return _business_knowledge_response(entry)
+
+    @app.put(
+        "/api/knowledge/{entry_id}",
+        response_model=BusinessKnowledgeResponse,
+    )
+    def update_business_knowledge(
+        entry_id: str,
+        request: SaveBusinessKnowledgeRequest,
+    ) -> BusinessKnowledgeResponse:
+        try:
+            entry = services.knowledge.update(
+                entry_id,
+                kind=request.kind,
+                name=request.name,
+                definition=request.definition,
+                formula=request.formula,
+                dimensions=tuple(request.dimensions),
+                synonyms=tuple(request.synonyms),
+                source=request.source,
+            )
+        except RecordNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Business knowledge entry not found",
+            ) from exc
+        except (RepositoryError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Business knowledge entry could not be updated",
+            ) from exc
+        return _business_knowledge_response(entry)
+
+    @app.delete(
+        "/api/knowledge/{entry_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+    )
+    def delete_business_knowledge(entry_id: str) -> None:
+        try:
+            services.knowledge.delete(entry_id)
+        except RecordNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Business knowledge entry not found",
+            ) from exc
 
     @app.get(
         "/api/projects/{project_id}/data-sources",
@@ -1036,6 +1155,25 @@ def _data_source_response(source: DataSource) -> DataSourceResponse:
         policy_version=source.policy_version,
         created_at=source.created_at,
         updated_at=source.updated_at,
+    )
+
+
+def _business_knowledge_response(
+    entry: BusinessKnowledgeEntry,
+) -> BusinessKnowledgeResponse:
+    return BusinessKnowledgeResponse(
+        id=entry.id,
+        project_id=entry.project_id,
+        kind=entry.kind,
+        name=entry.name,
+        definition=entry.definition,
+        formula=entry.formula,
+        dimensions=list(entry.dimensions),
+        synonyms=list(entry.synonyms),
+        source=entry.source,
+        version=entry.version,
+        created_at=entry.created_at,
+        updated_at=entry.updated_at,
     )
 
 

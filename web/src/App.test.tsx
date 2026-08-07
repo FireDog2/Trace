@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import type { ApiClient } from "./api";
+import type { SaveBusinessKnowledge } from "./types";
 
 const PROVIDERS = [
   {
@@ -143,6 +144,10 @@ function fakeApiWithCompletedTask(
     getDataSourceSchema: async () => ({ tables: {} }),
     getDataSourcePolicies: async () => ({ data_source_id: "source-1", version: 1, rules: [] }),
     replaceDataSourcePolicies: async () => ({ data_source_id: "source-1", version: 1, rules: [] }),
+    listBusinessKnowledge: async () => [],
+    createBusinessKnowledge: async () => { throw new Error("Not used in this test"); },
+    updateBusinessKnowledge: async () => { throw new Error("Not used in this test"); },
+    deleteBusinessKnowledge: async () => { throw new Error("Not used in this test"); },
     listAgents: async () => [],
     listRuns: async () => [],
     getTrace: async () => [],
@@ -254,7 +259,7 @@ describe("analysis workbench", () => {
     expect(within(projectContext).getByText("Business Knowledge Base")).toBeVisible();
     expect(within(projectContext).getByText("已加载")).toBeVisible();
     expect(within(projectContext).getByRole("button", { name: "配置 PostgreSQL 数据源" })).toBeVisible();
-    expect(within(projectContext).getAllByText("下一阶段").length).toBeGreaterThanOrEqual(1);
+    expect(within(projectContext).getByRole("button", { name: "配置业务知识库" })).toBeVisible();
   });
 
   it("opens PostgreSQL governance from the project context", async () => {
@@ -264,6 +269,28 @@ describe("analysis workbench", () => {
 
     expect(screen.getByRole("dialog", { name: "数据库治理" })).toBeVisible();
     expect(screen.getByLabelText("PostgreSQL DSN")).toHaveAttribute("type", "password");
+  });
+
+  it("creates a versioned business metric from the knowledge drawer", async () => {
+    const api = fakeApiWithCompletedTask();
+    const create = vi.fn(async (_projectId: string, input: SaveBusinessKnowledge) => ({
+      id: "knowledge-1", project_id: "project-1", ...input,
+      formula: input.formula ?? null, source: input.source ?? null,
+      version: 1, created_at: "", updated_at: "",
+    }));
+    api.createBusinessKnowledge = create;
+    render(<App api={api} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "配置业务知识库" }));
+    expect(screen.getByRole("dialog", { name: "业务知识库" })).toBeVisible();
+    fireEvent.change(screen.getByLabelText("知识名称"), { target: { value: "经营利润" } });
+    fireEvent.change(screen.getByLabelText("知识定义"), { target: { value: "收入减去全部经营成本。" } });
+    fireEvent.change(screen.getByLabelText("知识公式"), { target: { value: "revenue - operating_cost" } });
+    fireEvent.click(screen.getByRole("button", { name: "添加到知识库" }));
+
+    await waitFor(() => expect(create).toHaveBeenCalled());
+    expect(await screen.findByRole("heading", { name: "经营利润" })).toBeVisible();
+    expect(screen.getByText("revenue - operating_cost")).toBeVisible();
   });
 
   it("shows durable agents and correlated trace in the evidence workspace", async () => {

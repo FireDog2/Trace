@@ -36,10 +36,11 @@ def test_migrate_creates_versioned_core_tables(db_connection) -> None:
             "agent_runs",
             "agent_messages",
             "protected_agent_message_payloads",
+            "business_knowledge_entries",
     } <= names
     assert db_connection.execute(
         "SELECT version FROM schema_migrations ORDER BY version"
-    ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,), (13,)]
+    ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,), (13,), (14,)]
     agent_run_columns = {row[1] for row in db_connection.execute("PRAGMA table_info(agent_runs)")}
     assert {"turns_used", "deadline_at", "trace_run_id", "parent_event_id"} <= agent_run_columns
     for table in ("data_access_policies", "database_query_attempts"):

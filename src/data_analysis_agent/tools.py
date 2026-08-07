@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from data_analysis_agent.datasets import DatasetService
 from data_analysis_agent.domain import ArtifactType, PlanStepDraft, TaskStatus
 from data_analysis_agent.execution import DuckDBExecutor, PythonExecutor, QueryTimeoutError
+from data_analysis_agent.knowledge import BusinessKnowledgeRepository
 from data_analysis_agent.permissions import (
     ApprovalRepository,
     PermissionLevel,
@@ -112,6 +113,11 @@ class QueryDataInput(ToolInput):
 class QueryDatabaseInput(ToolInput):
     data_source_id: str
     sql: str = Field(min_length=1, max_length=50_000)
+
+
+class SearchBusinessKnowledgeInput(ToolInput):
+    query: str = Field(min_length=1, max_length=500)
+    limit: int = Field(default=8, ge=1, le=20)
 
 
 class RunPythonInput(ToolInput):
@@ -393,6 +399,8 @@ def build_tool_registry(
     include_coordination_tools: bool = False,
     include_database_query: bool = True,
     include_artifact_writes: bool = True,
+    knowledge: BusinessKnowledgeRepository | None = None,
+    include_knowledge_search: bool = True,
 ) -> ToolRegistry:
     coordinator: dict[str, Any] = {}
 
@@ -584,6 +592,39 @@ def build_tool_registry(
             outcome.message or "PostgreSQL query could not be completed",
             category=outcome.error_category or "database_error",
             retryable=outcome.retryable,
+        )
+
+    def search_business_knowledge(
+        arguments: ToolInput, context: ToolContext
+    ) -> HandlerResult:
+        assert isinstance(arguments, SearchBusinessKnowledgeInput)
+        if knowledge is None:
+            raise ToolHandlerError(
+                "Business knowledge is not configured",
+                category="knowledge_unavailable",
+                retryable=False,
+            )
+        entries = knowledge.search(
+            context.project_id, arguments.query, limit=arguments.limit
+        )
+        return HandlerResult(
+            {
+                "query": arguments.query,
+                "entries": [
+                    {
+                        "id": entry.id,
+                        "kind": entry.kind,
+                        "name": entry.name,
+                        "definition": entry.definition,
+                        "formula": entry.formula,
+                        "dimensions": list(entry.dimensions),
+                        "synonyms": list(entry.synonyms),
+                        "source": entry.source,
+                        "version": entry.version,
+                    }
+                    for entry in entries
+                ],
+            }
         )
 
     def run_python(arguments: ToolInput, context: ToolContext) -> HandlerResult:
@@ -794,6 +835,15 @@ def build_tool_registry(
                 query_database,
             ),
         ) + definitions[3:]
+    if knowledge is not None and include_knowledge_search:
+        definitions = definitions[:2] + (
+            ToolDefinition(
+                "search_business_knowledge",
+                "Search the current project's governed metric definitions, business terms, formulas, dimensions, synonyms, and sources.",
+                SearchBusinessKnowledgeInput,
+                search_business_knowledge,
+            ),
+        ) + definitions[2:]
     if not include_artifact_writes:
         definitions = tuple(
             definition

@@ -120,7 +120,7 @@ _SAFE_ERROR_MESSAGES = {
 }
 
 ROLE_TOOLS: dict[AgentRole, frozenset[str]] = {
-    AgentRole.KNOWLEDGE: frozenset({"inspect_workspace", "inspect_dataset"}),
+    AgentRole.KNOWLEDGE: frozenset({"inspect_workspace", "inspect_dataset", "search_business_knowledge"}),
     AgentRole.SQL: frozenset({"inspect_workspace", "inspect_dataset", "query_data", "query_database"}),
     AgentRole.REPORT: frozenset({"inspect_workspace", "inspect_dataset", "run_python", "save_artifact", "write_report"}),
     AgentRole.CURATOR: frozenset(),

@@ -353,6 +353,27 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_one_curator_per_trace
 ON agent_runs(trace_run_id) WHERE role = 'curator';
 """
 
+MIGRATION_14_SQL = """
+CREATE TABLE IF NOT EXISTS business_knowledge_entries (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK(kind IN ('metric', 'term', 'rule')),
+    name TEXT NOT NULL,
+    definition TEXT NOT NULL,
+    formula TEXT,
+    dimensions_json TEXT NOT NULL DEFAULT '[]',
+    synonyms_json TEXT NOT NULL DEFAULT '[]',
+    source TEXT,
+    version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_business_knowledge_project_name
+ON business_knowledge_entries(project_id, name COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS idx_business_knowledge_project_updated
+ON business_knowledge_entries(project_id, updated_at);
+"""
+
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
@@ -494,6 +515,12 @@ def migrate(connection: sqlite3.Connection) -> None:
             "ON agent_runs(trace_run_id) WHERE role = 'curator'"
         )
         connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (13, utc_now()))
+    if 14 not in applied:
+        connection.executescript(MIGRATION_14_SQL)
+        connection.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+            (14, utc_now()),
+        )
     connection.execute("PRAGMA foreign_keys = ON")
     connection.commit()
 

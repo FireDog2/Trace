@@ -7,12 +7,12 @@ interface ProjectNavProps {
   selectedTaskId: string | null; onSelectProject(id: string): void; onSelectTask(id: string): void;
   onStartNewTask(): void; onCreateProject(name: string): Promise<void>; onUpload(file: File): Promise<void>;
   modelConfiguration: ModelConfigurationStatus | null; onOpenModelSettings(): void;
-  onOpenDataSources(): void; drawerOpen: boolean; onClose(): void; onCollapse(): void;
+  onOpenDataSources(): void; onOpenKnowledge(): void; drawerOpen: boolean; onClose(): void; onCollapse(): void;
 }
 
 export function ProjectNav({ projects, selectedProjectId, artifacts, tasks, selectedTaskId,
   onSelectProject, onSelectTask, onStartNewTask, onCreateProject, onUpload,
-  modelConfiguration, onOpenModelSettings, onOpenDataSources, drawerOpen, onClose,
+  modelConfiguration, onOpenModelSettings, onOpenDataSources, onOpenKnowledge, drawerOpen, onClose,
   onCollapse }: ProjectNavProps) {
   const [newProjectName, setNewProjectName] = useState("");
   const [creatingProject, setCreatingProject] = useState(false);
@@ -57,14 +57,15 @@ export function ProjectNav({ projects, selectedProjectId, artifacts, tasks, sele
         </article>)}
         {sourceDatasets.length === 0 && <article className="source-card empty"><span className="source-icon file" aria-hidden="true">FILE</span>
           <div><strong>CSV / Excel</strong><small>上传文件</small></div><i>尚未添加</i></article>}
-        <article className="source-card unavailable"><span className="source-icon knowledge" aria-hidden="true">KB</span>
-          <div><strong>Business Knowledge Base</strong><small>Knowledge Agent 业务口径</small></div><i>下一阶段</i></article>
+        <button type="button" className="source-card knowledge-source" onClick={onOpenKnowledge}
+          disabled={!selectedProjectId} aria-label="配置业务知识库"><span className="source-icon knowledge" aria-hidden="true">KB</span>
+          <span><strong>Business Knowledge Base</strong><small>Knowledge Agent 业务口径</small></span><i>配置口径</i></button>
       </div>
       {selectedProjectId && <details className="source-add-menu"><summary>＋ 添加数据源</summary><div>
         <button type="button" onClick={onOpenDataSources}>连接 PostgreSQL <span>可用</span></button>
         <label>上传 CSV / Excel <span>可用</span><input type="file" accept=".csv,.xlsx" onChange={(event) => {
           const file = event.target.files?.[0]; if (file) void onUpload(file); event.target.value = "";
-        }} /></label><button type="button" disabled>连接 Business Knowledge Base <span>下一阶段</span></button>
+        }} /></label><button type="button" onClick={onOpenKnowledge}>连接 Business Knowledge Base <span>可用</span></button>
       </div></details>}
     </section>
 

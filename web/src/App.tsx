@@ -4,6 +4,7 @@ import { HttpApiClient, type ApiClient } from "./api";
 import { ArtifactWorkspace } from "./components/ArtifactWorkspace";
 import { Conversation } from "./components/Conversation";
 import { DataSourceSettings } from "./components/DataSourceSettings";
+import { KnowledgeSettings } from "./components/KnowledgeSettings";
 import { ModelSettings } from "./components/ModelSettings";
 import { ProjectNav } from "./components/ProjectNav";
 import type {
@@ -42,6 +43,7 @@ export function App({ api: suppliedApi }: AppProps) {
   const [modelConfiguration, setModelConfiguration] = useState<ModelConfigurationStatus | null>(null);
   const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
   const [dataSourceSettingsOpen, setDataSourceSettingsOpen] = useState(false);
+  const [knowledgeSettingsOpen, setKnowledgeSettingsOpen] = useState(false);
   const [projectNavOpen, setProjectNavOpen] = useState(false);
   const [projectNavCollapsed, setProjectNavCollapsed] = useState(false);
   const [artifactWorkspaceOpen, setArtifactWorkspaceOpen] = useState(false);
@@ -162,7 +164,7 @@ export function App({ api: suppliedApi }: AppProps) {
       onStartNewTask={() => { setSelectedTaskId(null); setTask(null); setEvents([]); setProjectNavOpen(false); }}
       onCreateProject={createProject} onUpload={uploadDataset}
       modelConfiguration={modelConfiguration} onOpenModelSettings={() => setModelSettingsOpen(true)}
-      onOpenDataSources={() => setDataSourceSettingsOpen(true)} drawerOpen={projectNavOpen}
+      onOpenDataSources={() => setDataSourceSettingsOpen(true)} onOpenKnowledge={() => setKnowledgeSettingsOpen(true)} drawerOpen={projectNavOpen}
       onClose={() => setProjectNavOpen(false)} onCollapse={() => { setProjectNavOpen(false); setProjectNavCollapsed(true); }} />}
 
     {error && <div className="error-banner" role="alert">{error}</div>}
@@ -190,5 +192,7 @@ export function App({ api: suppliedApi }: AppProps) {
       }} />}
     <DataSourceSettings open={dataSourceSettingsOpen} projectId={selectedProjectId} api={api}
       onClose={() => setDataSourceSettingsOpen(false)} />
+    <KnowledgeSettings open={knowledgeSettingsOpen} projectId={selectedProjectId} api={api}
+      onClose={() => setKnowledgeSettingsOpen(false)} />
   </div>;
 }
