@@ -31,17 +31,29 @@ def postgres_dsn() -> str:
     return dsn
 
 
+@pytest.fixture
+def postgres_admin_dsn() -> str:
+    dsn = os.environ.get("TEST_POSTGRES_ADMIN_DSN")
+    if not dsn:
+        pytest.skip("TEST_POSTGRES_ADMIN_DSN is not set")
+    return dsn
+
+
 class _Protector:
     def protect(self, value: str) -> bytes: return b"test:" + value.encode()[::-1]
     def unprotect(self, value: bytes) -> str: return value.removeprefix(b"test:")[::-1].decode()
 
 
-def test_live_gateway_read_only_search_path_values_and_timeout(postgres_dsn: str, tmp_path: Path) -> None:
+def test_live_gateway_read_only_search_path_values_and_timeout(
+    postgres_dsn: str,
+    postgres_admin_dsn: str,
+    tmp_path: Path,
+) -> None:
     """Exercise the real gateway only against explicit disposable public objects."""
     token = uuid4().hex
     table, schema, sequence = (f"codex_pg_{token}", f"codex_shadow_{token}", f"codex_seq_{token}")
     try:
-        with psycopg.connect(postgres_dsn) as setup:
+        with psycopg.connect(postgres_admin_dsn) as setup:
             with setup.cursor() as cursor:
                 cursor.execute(f"CREATE TABLE public.{table} (amount numeric, occurred_at timestamptz, token uuid, payload bytea, restricted text)")
                 cursor.execute(f"INSERT INTO public.{table} VALUES (%s, %s, %s, %s, %s)", (Decimal("2.50"), datetime.now(UTC), uuid4(), b"value", "restricted"))
@@ -67,7 +79,7 @@ def test_live_gateway_read_only_search_path_values_and_timeout(postgres_dsn: str
         assert isinstance(outcome.preview[0]["amount"], str)
         assert outcome.preview[0]["payload"].startswith("base64:")
 
-        with psycopg.connect(postgres_dsn) as pressure:
+        with psycopg.connect(postgres_admin_dsn) as pressure:
             with pressure.cursor() as cursor:
                 cursor.execute(f"INSERT INTO public.{table}(amount, occurred_at, token, payload, restricted) SELECT 1, now(), '00000000-0000-0000-0000-000000000001'::uuid, 'x'::bytea, 'restricted' FROM generate_series(1, 1000)")
         pressure_task = TaskRepository(connection).create(project.id, "Verify governed timeout")
@@ -83,13 +95,20 @@ def test_live_gateway_read_only_search_path_values_and_timeout(postgres_dsn: str
         attempt = connection.execute("SELECT status, error_category FROM database_query_attempts WHERE task_id = ? ORDER BY started_at DESC LIMIT 1", (pressure_task.id,)).fetchone()
         assert tuple(attempt) == ("failed", "query_timeout")
         driver = PsycopgDriver()
+        with psycopg.connect(postgres_dsn) as read_only:
+            with read_only.cursor() as cursor:
+                with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
+                    cursor.execute(
+                        f"INSERT INTO public.{table}(amount) VALUES (1)"
+                    )
+            read_only.rollback()
         with pytest.raises(psycopg.Error):
             driver.query(postgres_dsn, f"SELECT nextval('public.{sequence}')", statement_timeout_ms=50, row_limit=1)
         with pytest.raises(psycopg.errors.QueryCanceled):
             driver.query(postgres_dsn, "SELECT pg_sleep(1)", statement_timeout_ms=50, row_limit=1)
         connection.close()
     finally:
-        with psycopg.connect(postgres_dsn, autocommit=True) as cleanup:
+        with psycopg.connect(postgres_admin_dsn, autocommit=True) as cleanup:
             with cleanup.cursor() as cursor:
                 cursor.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
                 cursor.execute(f"DROP TABLE IF EXISTS public.{table} CASCADE")

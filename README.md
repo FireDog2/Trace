@@ -39,7 +39,7 @@ the API and web app stay on the host for fast edit/run development.
 ```powershell
 # Start the database once. The demo fixture is loaded on first volume creation.
 docker compose up -d postgres
-$env:PORTFOLIO_POSTGRES_DSN = "postgresql://portfolio:portfolio@localhost:5432/portfolio"
+$env:PORTFOLIO_POSTGRES_DSN = "postgresql://portfolio_reader:portfolio_reader@localhost:5432/portfolio"
 # Use this DSN when creating the PostgreSQL source in the workbench.
 
 py -3.12 -m venv .venv
@@ -64,7 +64,8 @@ checks, point `TEST_POSTGRES_DSN` at the local container; never commit a real DS
 
 ```powershell
 python -m pytest tests/test_portfolio_acceptance.py -v
-$env:TEST_POSTGRES_DSN = "postgresql://portfolio:portfolio@localhost:5432/portfolio"
+$env:TEST_POSTGRES_ADMIN_DSN = "postgresql://portfolio:portfolio@localhost:5432/portfolio"
+$env:TEST_POSTGRES_DSN = "postgresql://portfolio_reader:portfolio_reader@localhost:5432/portfolio"
 python -m pytest tests/test_postgres_integration.py -v
 python -m pytest -v
 npm --prefix web test -- --run
