@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from data_analysis_agent.agent import AgentRunner
+from data_analysis_agent.agent import AgentRunner, SYSTEM_PROMPT
 from data_analysis_agent.domain import TaskStatus
 from data_analysis_agent.providers import ModelResponse, ProviderError, ScriptedProvider
 from data_analysis_agent.tools import ToolCall
@@ -18,6 +18,15 @@ def response_with_tool(name: str, arguments: dict) -> ModelResponse:
 
 def response_with_text(text: str) -> ModelResponse:
     return ModelResponse(text=text, tool_calls=())
+
+
+def test_lead_prompt_has_explicit_role_routing_contract() -> None:
+    prompt = " ".join(SYSTEM_PROMPT.split())
+    assert "Knowledge Agent" in prompt
+    assert "SQL Agent" in prompt
+    assert "Report Agent" in prompt
+    assert "Lead must not" in prompt
+    assert "at most three active teammates" in prompt
 
 
 def test_agent_executes_tools_and_completes(

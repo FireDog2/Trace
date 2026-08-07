@@ -355,6 +355,7 @@ def _build_services(
         trace_recorder=TraceRecorder(traces),
         include_coordination_tools=True,
         include_database_query=not with_team_manager,
+        include_artifact_writes=not with_team_manager,
     )
     team_repository = TeamRepository(connection, tasks.append_event)
     skill_candidates = SkillCandidateRepository(connection)

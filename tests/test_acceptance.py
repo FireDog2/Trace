@@ -10,7 +10,7 @@ from data_analysis_agent.tools import ToolCall
 
 
 class OperatingDiagnosisProvider:
-    """Deterministic model double that reacts to persisted tool results."""
+    """Deterministic Report Agent that reacts to persisted tool results."""
 
     def __init__(self) -> None:
         self.step = 0
@@ -18,21 +18,8 @@ class OperatingDiagnosisProvider:
     def complete(self, request: ModelRequest) -> ModelResponse:
         self.step += 1
         if self.step == 1:
-            return _tool_response(
-                "plan",
-                "update_plan",
-                {
-                    "steps": [
-                        "Inspect the operating dataset",
-                        "Compare East-region cost and profit movement",
-                        "Create evidence-linked outputs and report",
-                    ],
-                    "reason": "Start with data quality, then diagnose the regional change.",
-                },
-            )
-        if self.step == 2:
             return _tool_response("workspace", "inspect_workspace", {})
-        if self.step == 3:
+        if self.step == 2:
             workspace_result = _last_tool_output(request)
             dataset_id = next(
                 item["id"]
@@ -44,7 +31,7 @@ class OperatingDiagnosisProvider:
                 "inspect_dataset",
                 {"artifact_id": dataset_id, "sample_rows": 5},
             )
-        if self.step == 4:
+        if self.step == 3:
             return _tool_response(
                 "python",
                 "run_python",
@@ -56,7 +43,7 @@ class OperatingDiagnosisProvider:
                     ],
                 },
             )
-        if self.step == 5:
+        if self.step == 4:
             result = _last_tool_result(request)
             assert result["success"], result
             artifact_ids = result["output"]["artifact_ids"]
@@ -78,6 +65,59 @@ class OperatingDiagnosisProvider:
                     )
                 },
             )
+        report_id = _last_tool_output(request)["artifact_id"]
+        return ModelResponse(
+            text=json.dumps(
+                {
+                    "summary": "East profit weakened while logistics cost increased.",
+                    "report_artifact_id": report_id,
+                }
+            ),
+            tool_calls=(),
+        )
+
+
+class LeadDiagnosisProvider:
+    """Deterministic Lead that delegates all artifact production."""
+
+    def __init__(self) -> None:
+        self.step = 0
+
+    def complete(self, request: ModelRequest) -> ModelResponse:
+        self.step += 1
+        if self.step == 1:
+            return _tool_response(
+                "plan",
+                "update_plan",
+                {
+                    "steps": [
+                        "Delegate evidence-linked diagnosis and report",
+                        "Review the Report Agent handoff",
+                    ],
+                    "reason": "Artifact production belongs to the Report Agent.",
+                },
+            )
+        if self.step == 2:
+            return _tool_response(
+                "spawn-report",
+                "spawn_teammate",
+                {
+                    "role": "report",
+                    "objective": (
+                        "Inspect the operating dataset, diagnose the East profit "
+                        "decline, create a chart, and publish an evidence-linked report."
+                    ),
+                },
+            )
+        if self.step == 3:
+            agent_id = _last_tool_output(request)["agent_id"]
+            return _tool_response(
+                "await-report",
+                "await_teammates",
+                {"agent_ids": [agent_id], "timeout_seconds": 5},
+            )
+        handoff = _last_tool_output(request)["agents"][0]
+        assert handoff["status"] == "completed"
         return ModelResponse(
             text="Diagnosis complete. The report and its evidence are in the workspace.",
             tool_calls=(),
@@ -141,31 +181,41 @@ def _last_tool_result(request: ModelRequest) -> dict:
 
 
 def test_operating_diagnosis_creates_traceable_report(settings, operations_csv: Path):
-    provider = OperatingDiagnosisProvider()
-    services = build_services(settings, provider)
+    provider = LeadDiagnosisProvider()
+    services = build_services(
+        settings,
+        provider,
+        teammate_provider_factory=OperatingDiagnosisProvider,
+    )
     project = services.projects.create("Operating review")
     services.workspace.create_project(project.id)
     dataset = services.datasets.add_file(project.id, operations_csv)
     task = services.tasks.create(project.id, "Why did East profit decline?")
 
-    completed = services.agent().run(task.id)
+    try:
+        completed = services.agent().run(task.id)
 
-    assert completed.status is TaskStatus.COMPLETED
-    artifacts = services.artifacts.list_for_task(task.id)
-    assert {artifact.artifact_type for artifact in artifacts} >= {
-        ArtifactType.PYTHON_CODE,
-        ArtifactType.DERIVED_DATASET,
-        ArtifactType.CHART,
-        ArtifactType.MARKDOWN_REPORT,
-    }
-    report = next(
-        artifact
-        for artifact in artifacts
-        if artifact.artifact_type is ArtifactType.MARKDOWN_REPORT
-    )
-    markdown = report.path.read_text(encoding="utf-8")
-    assert "East" in markdown
-    assert "artifact://" in markdown
-    assert services.artifacts.evidence_for(report.id)
-    assert dataset.path.read_bytes() == operations_csv.read_bytes()
-    services.connection.close()
+        assert completed.status is TaskStatus.COMPLETED
+        artifacts = services.artifacts.list_for_task(task.id)
+        assert {artifact.artifact_type for artifact in artifacts} >= {
+            ArtifactType.PYTHON_CODE,
+            ArtifactType.DERIVED_DATASET,
+            ArtifactType.CHART,
+            ArtifactType.MARKDOWN_REPORT,
+        }
+        report = next(
+            artifact
+            for artifact in artifacts
+            if artifact.artifact_type is ArtifactType.MARKDOWN_REPORT
+        )
+        markdown = report.path.read_text(encoding="utf-8")
+        assert "East" in markdown
+        assert "artifact://" in markdown
+        assert services.artifacts.evidence_for(report.id)
+        assert dataset.path.read_bytes() == operations_csv.read_bytes()
+        runs = services.team_repository.list_runs(task.id)
+        assert len(runs) == 1 and runs[0].role.value == "report"
+        assert runs[0].status.value == "completed"
+    finally:
+        services.team_manager.shutdown()  # type: ignore[union-attr]
+        services.connection.close()

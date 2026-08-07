@@ -392,6 +392,7 @@ def build_tool_registry(
     trace_recorder: "TraceRecorder | None" = None,
     include_coordination_tools: bool = False,
     include_database_query: bool = True,
+    include_artifact_writes: bool = True,
 ) -> ToolRegistry:
     coordinator: dict[str, Any] = {}
 
@@ -793,9 +794,20 @@ def build_tool_registry(
                 query_database,
             ),
         ) + definitions[3:]
+    if not include_artifact_writes:
+        definitions = tuple(
+            definition
+            for definition in definitions
+            if definition.name not in {"run_python", "save_artifact", "write_report"}
+        )
     if include_coordination_tools:
         definitions += (
-            ToolDefinition("spawn_teammate", "Start one role-scoped teammate.", SpawnTeammateInput, spawn_teammate),
+            ToolDefinition(
+                "spawn_teammate",
+                "Start one role-scoped teammate: knowledge for business definitions, sql for governed evidence, or report for evidence-linked reports and charts.",
+                SpawnTeammateInput,
+                spawn_teammate,
+            ),
             ToolDefinition("list_teammates", "List teammates for this task.", ToolInput, list_teammates),
             ToolDefinition("await_teammates", "Wait briefly for selected teammates.", AwaitTeammatesInput, await_teammates),
             ToolDefinition("cancel_teammate", "Request cancellation of one teammate.", CancelTeammateInput, cancel_teammate),

@@ -251,7 +251,7 @@ def test_background_helpers_shutdown_teammates_before_closing_connection(
     assert events == [f"agent.{method}", "manager.shutdown", "connection.close"]
 
 
-def test_production_lead_rejects_database_query_but_sql_worker_keeps_it(settings) -> None:
+def test_production_lead_delegates_database_and_artifact_work_to_teammates(settings) -> None:
     protector = RecordingProtector()
     lead = api_module.build_services(settings, ScriptedProvider(()), protector)
     try:
@@ -259,6 +259,8 @@ def test_production_lead_rejects_database_query_but_sql_worker_keeps_it(settings
         task = lead.tasks.create(project.id, "No direct SQL")
         lead_names = {schema.name for schema in lead.tools.schemas()}
         assert "query_database" not in lead_names
+        assert not {"run_python", "save_artifact", "write_report"} & lead_names
+        assert {"spawn_teammate", "list_teammates", "await_teammates"} <= lead_names
         rejected = lead.tools.execute(
             ToolCall("lead-query", "query_database", {"data_source_id": "source", "sql": "SELECT 1"}),
             ToolContext(project.id, task.id),
@@ -269,7 +271,10 @@ def test_production_lead_rejects_database_query_but_sql_worker_keeps_it(settings
             settings, secret_protector=protector, with_team_manager=False,
         )
         try:
-            assert "query_database" in {schema.name for schema in worker.tools.schemas()}
+            worker_names = {schema.name for schema in worker.tools.schemas()}
+            assert {
+                "query_database", "run_python", "save_artifact", "write_report"
+            } <= worker_names
         finally:
             worker.connection.close()
     finally:
