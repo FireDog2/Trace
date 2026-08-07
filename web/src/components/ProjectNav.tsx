@@ -10,6 +10,7 @@ interface ProjectNavProps {
   selectedTaskId: string | null;
   onSelectProject(id: string): void;
   onSelectTask(id: string): void;
+  onStartNewTask(): void;
   onCreateProject(name: string): Promise<void>;
   onUpload(file: File): Promise<void>;
   modelConfiguration: ModelConfigurationStatus | null;
@@ -26,6 +27,7 @@ export function ProjectNav({
   selectedTaskId,
   onSelectProject,
   onSelectTask,
+  onStartNewTask,
   onCreateProject,
   onUpload,
   modelConfiguration,
@@ -35,6 +37,7 @@ export function ProjectNav({
 }: ProjectNavProps) {
   const [newProjectName, setNewProjectName] = useState("");
   const [creatingProject, setCreatingProject] = useState(false);
+  const sourceDatasets = artifacts.filter((artifact) => artifact.artifact_type === "source_dataset");
 
   async function submitProject(event: FormEvent) {
     event.preventDefault();
@@ -48,29 +51,15 @@ export function ProjectNav({
   return (
     <nav className={drawerOpen ? "project-rail drawer-open" : "project-rail"} aria-label="项目上下文">
       <header className="brand-block">
-        <span className="brand-index">LOCAL ANALYSIS SYSTEM</span>
-        <strong>TRACE</strong>
-        <p>每个结论，都有来路。</p>
-        <button type="button" className="rail-close" aria-label="关闭项目导航" onClick={onClose}>×</button>
+        <div className="brand-lockup">
+          <span className="brand-orbit" aria-hidden="true"><i /></span>
+          <div>
+            <strong>TRACE</strong>
+            <p>Evidence-first Analysis</p>
+          </div>
+        </div>
+        <button type="button" className="rail-close" aria-label="关闭项目上下文" onClick={onClose}>×</button>
       </header>
-
-      <button
-        type="button"
-        className={`model-route ${modelConfiguration?.configured ? "configured" : "unconfigured"}`}
-        aria-label={modelConfiguration?.configured ? "更改模型配置" : "配置模型"}
-        onClick={onOpenModelSettings}
-      >
-        <span className="model-route-label">
-          <span>MODEL ROUTE</span>
-          <i>{modelConfiguration?.configured ? "READY" : "SETUP"}</i>
-        </span>
-        <strong>{modelConfiguration?.configured ? modelConfiguration.model : "配置运行模型"}</strong>
-        <small>
-          {modelConfiguration?.configured
-            ? modelConfiguration.providers.find((item) => item.provider === modelConfiguration.provider)?.label
-            : "DeepSeek · OpenAI · 中转站"}
-        </small>
-      </button>
 
       <section className="rail-section project-section">
         <div className="section-heading">
@@ -114,7 +103,7 @@ export function ProjectNav({
               autoFocus
               aria-label="新项目名称"
               value={newProjectName}
-              placeholder="例如：2025 区域经营复盘"
+              placeholder="例如：Regional Growth Review"
               onChange={(event) => setNewProjectName(event.target.value)}
             />
             <button type="submit" aria-label="创建项目" disabled={!newProjectName.trim()}>创建</button>
@@ -122,41 +111,90 @@ export function ProjectNav({
         )}
       </section>
 
-      <section className="rail-section">
-        <div className="section-label">
-          数据 <span>{artifacts.filter((item) => item.artifact_type.includes("dataset")).length}</span>
-        </div>
-        <ul className="rail-list dataset-list">
-          {artifacts
-            .filter((artifact) => artifact.artifact_type.includes("dataset"))
-            .map((artifact) => (
-              <li key={artifact.id}>
-                <span className="file-mark">CSV</span>
-                <span title={artifact.title}>{artifact.title}</span>
-              </li>
-            ))}
-          {artifacts.filter((artifact) => artifact.artifact_type.includes("dataset")).length === 0 && (
-            <li className="rail-empty">尚未添加数据</li>
+      <section className="rail-section source-section">
+        <div className="section-label">数据源 <span>3 TYPES</span></div>
+        <div className="source-catalog">
+          <article className="source-card unavailable">
+            <span className="source-icon database" aria-hidden="true">DB</span>
+            <div><strong>PostgreSQL</strong><small>数据库连接</small></div>
+            <i>尚未接入</i>
+          </article>
+
+          {sourceDatasets.map((artifact) => (
+            <article className="source-card loaded" key={artifact.id}>
+              <span className="source-icon file" aria-hidden="true">CSV</span>
+              <div><strong title={artifact.title}>{artifact.title}</strong><small>上传文件</small></div>
+              <i>已加载</i>
+            </article>
+          ))}
+
+          {sourceDatasets.length === 0 && (
+            <article className="source-card empty">
+              <span className="source-icon file" aria-hidden="true">FILE</span>
+              <div><strong>CSV / Excel</strong><small>上传文件</small></div>
+              <i>尚未添加</i>
+            </article>
           )}
-        </ul>
+
+          <article className="source-card unavailable">
+            <span className="source-icon knowledge" aria-hidden="true">KB</span>
+            <div><strong>Business Knowledge Base</strong><small>Knowledge Agent 业务口径</small></div>
+            <i>尚未接入</i>
+          </article>
+        </div>
+
         {selectedProjectId && (
-          <label className="upload-control">
-            添加 CSV / Excel
-            <input
-              type="file"
-              accept=".csv,.xlsx"
-              onChange={(event) => {
-                const file = event.target.files?.[0];
-                if (file) void onUpload(file);
-                event.target.value = "";
-              }}
-            />
-          </label>
+          <details className="source-add-menu">
+            <summary>＋ 添加数据源</summary>
+            <div>
+              <button type="button" disabled>连接 PostgreSQL <span>尚未接入</span></button>
+              <label>
+                上传 CSV / Excel <span>可用</span>
+                <input
+                  type="file"
+                  accept=".csv,.xlsx"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) void onUpload(file);
+                    event.target.value = "";
+                  }}
+                />
+              </label>
+              <button type="button" disabled>连接 Business Knowledge Base <span>尚未接入</span></button>
+            </div>
+          </details>
         )}
       </section>
 
+      <section className="rail-section model-section">
+        <div className="section-label">模型</div>
+        <button
+          type="button"
+          className={`model-route ${modelConfiguration?.configured ? "configured" : "unconfigured"}`}
+          aria-label={modelConfiguration?.configured ? "更改模型配置" : "配置模型"}
+          onClick={onOpenModelSettings}
+        >
+          <span className="model-glyph" aria-hidden="true">AI</span>
+          <span>
+            <strong>{modelConfiguration?.configured ? modelConfiguration.model : "Configure model"}</strong>
+            <small>
+              {modelConfiguration?.configured
+                ? modelConfiguration.providers.find((item) => item.provider === modelConfiguration.provider)?.label
+                : "DeepSeek · OpenAI · Relay"}
+            </small>
+          </span>
+          <i>{modelConfiguration?.configured ? "READY" : "SETUP"}</i>
+        </button>
+      </section>
+
+      {selectedProjectId && (
+        <button type="button" className="new-analysis-button" onClick={onStartNewTask}>
+          <span aria-hidden="true">✦</span> 新建分析
+        </button>
+      )}
+
       <section className="rail-section task-index">
-        <div className="section-label">分析任务 <span>{tasks.length}</span></div>
+        <div className="section-label">任务历史 <span>{tasks.length}</span></div>
         <ul className="rail-list">
           {tasks.map((task) => (
             <li key={task.id}>

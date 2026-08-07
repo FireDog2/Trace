@@ -63,7 +63,7 @@ function fakeApiWithCompletedTask(
     listProjects: async () => [
       {
         id: "project-1",
-        name: "2026 经营复盘",
+        name: "2026 Business Review",
         status: "active",
         created_at: "2026-08-05T00:00:00Z",
         updated_at: "2026-08-05T00:00:00Z",
@@ -186,7 +186,7 @@ describe("analysis workbench", () => {
     render(<App api={fakeApiWithCompletedTask()} />);
 
     expect(await screen.findByText("TRACE", { selector: ".brand-block strong" })).toBeVisible();
-    expect(screen.getByText("LOCAL ANALYSIS SYSTEM")).toBeVisible();
+    expect(screen.getByText("Evidence-first Analysis")).toBeVisible();
 
     fireEvent.click(screen.getByRole("button", { name: "更改模型配置" }));
     expect(screen.getByRole("heading", { name: "模型供应商" })).toBeVisible();
@@ -196,7 +196,7 @@ describe("analysis workbench", () => {
   it("opens and closes the project console for narrow screens", async () => {
     render(<App api={fakeApiWithCompletedTask()} />);
 
-    const toggle = await screen.findByRole("button", { name: "打开项目导航" });
+    const toggle = await screen.findByRole("button", { name: "打开项目上下文" });
     expect(await screen.findByRole("textbox", { name: "给分析 Agent 留言" })).toBeVisible();
     expect(toggle).toHaveAttribute("aria-expanded", "false");
 
@@ -204,7 +204,7 @@ describe("analysis workbench", () => {
     expect(toggle).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByRole("textbox", { name: "给分析 Agent 留言" })).toBeVisible();
 
-    fireEvent.click(screen.getByRole("button", { name: "关闭项目导航" }));
+    fireEvent.click(screen.getByRole("button", { name: "关闭项目上下文" }));
     expect(toggle).toHaveAttribute("aria-expanded", "false");
   });
 
@@ -216,6 +216,42 @@ describe("analysis workbench", () => {
     expect(within(conversation).getByRole("heading", { name: "Agent 执行轨迹" })).toBeVisible();
     expect(within(conversation).getByText("检查数据")).toBeVisible();
     expect(within(conversation).getByRole("textbox", { name: "给分析 Agent 留言" })).toBeVisible();
+  });
+
+  it("shows the three honest source types in project context", async () => {
+    render(<App api={fakeApiWithCompletedTask()} />);
+
+    const projectContext = await screen.findByRole("navigation", { name: "项目上下文" });
+    expect(within(projectContext).getByText("PostgreSQL")).toBeVisible();
+    expect(await within(projectContext).findByText("operations.csv")).toBeVisible();
+    expect(within(projectContext).getByText("Business Knowledge Base")).toBeVisible();
+    expect(within(projectContext).getByText("已加载")).toBeVisible();
+    expect(within(projectContext).getAllByText("尚未接入").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("sorts final artifacts into accessible tabs and keeps the real link", async () => {
+    render(<App api={fakeApiWithCompletedTask()} />);
+
+    const artifacts = await screen.findByRole("complementary", { name: "最终产物" });
+    expect(within(artifacts).getByText("物流成本增长是主要变化。")).toBeVisible();
+
+    fireEvent.click(within(artifacts).getByRole("tab", { name: /图表/ }));
+    const artifactLink = within(artifacts).getByRole("link", { name: "打开 物流成本趋势" });
+    expect(artifactLink).toHaveAttribute("href", "/api/artifacts/chart-1/content");
+
+    fireEvent.click(within(artifacts).getByRole("tab", { name: /数据/ }));
+    expect(within(artifacts).getByText("暂无数据产物")).toBeVisible();
+  });
+
+  it("opens and closes the final artifact drawer", async () => {
+    render(<App api={fakeApiWithCompletedTask()} />);
+
+    const toggle = await screen.findByRole("button", { name: "打开最终产物" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(screen.getByRole("button", { name: "关闭最终产物" }));
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
   });
 
   it("shows only the objective input before a task exists", async () => {
@@ -317,14 +353,14 @@ describe("analysis workbench", () => {
     api.listProjects = async () => [
       {
         id: "project-1",
-        name: "2026 经营复盘",
+        name: "2026 Business Review",
         status: "active",
         created_at: "2026-08-05T00:00:00Z",
         updated_at: "2026-08-05T00:00:00Z",
       },
       {
         id: "project-2",
-        name: "渠道增长诊断",
+        name: "Channel Growth Diagnosis",
         status: "active",
         created_at: "2026-08-05T00:00:00Z",
         updated_at: "2026-08-05T00:00:00Z",
@@ -332,8 +368,8 @@ describe("analysis workbench", () => {
     ];
     render(<App api={api} />);
 
-    const currentProject = await screen.findByRole("button", { name: "2026 经营复盘" });
-    const nextProject = screen.getByRole("button", { name: "渠道增长诊断" });
+    const currentProject = await screen.findByRole("button", { name: "2026 Business Review" });
+    const nextProject = screen.getByRole("button", { name: "Channel Growth Diagnosis" });
     expect(currentProject).toHaveAttribute("aria-current", "page");
 
     fireEvent.click(nextProject);

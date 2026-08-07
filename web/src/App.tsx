@@ -33,6 +33,7 @@ export function App({ api: suppliedApi }: AppProps) {
   const [modelConfiguration, setModelConfiguration] = useState<ModelConfigurationStatus | null>(null);
   const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
   const [projectNavOpen, setProjectNavOpen] = useState(false);
+  const [artifactWorkspaceOpen, setArtifactWorkspaceOpen] = useState(false);
 
   useEffect(() => {
     void api
@@ -159,13 +160,26 @@ export function App({ api: suppliedApi }: AppProps) {
       <button
         type="button"
         className="project-drawer-toggle"
-        aria-label="打开项目导航"
+        aria-label="打开项目上下文"
         aria-expanded={projectNavOpen}
         onClick={() => setProjectNavOpen(true)}
       >
         <span aria-hidden="true">TRACE</span>
-        项目
+        项目上下文
       </button>
+
+      {task && (
+        <button
+          type="button"
+          className="artifact-drawer-toggle"
+          aria-label="打开最终产物"
+          aria-expanded={artifactWorkspaceOpen}
+          onClick={() => setArtifactWorkspaceOpen(true)}
+        >
+          最终产物
+          <span aria-hidden="true">{task.artifacts.length}</span>
+        </button>
+      )}
 
       <ProjectNav
         projects={projects}
@@ -179,6 +193,12 @@ export function App({ api: suppliedApi }: AppProps) {
         }}
         onSelectTask={(id) => {
           setSelectedTaskId(id);
+          setProjectNavOpen(false);
+        }}
+        onStartNewTask={() => {
+          setSelectedTaskId(null);
+          setTask(null);
+          setEvents([]);
           setProjectNavOpen(false);
         }}
         onCreateProject={createProject}
@@ -224,7 +244,13 @@ export function App({ api: suppliedApi }: AppProps) {
         />
       )}
 
-      {task && <ArtifactWorkspace task={task} />}
+      {task && (
+        <ArtifactWorkspace
+          task={task}
+          drawerOpen={artifactWorkspaceOpen}
+          onClose={() => setArtifactWorkspaceOpen(false)}
+        />
+      )}
 
       {modelConfiguration && (
         <ModelSettings

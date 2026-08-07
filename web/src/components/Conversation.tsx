@@ -159,7 +159,7 @@ export function Conversation({
           onChange={(event) => setContent(event.target.value)}
         />
         <div>
-          <span>⌘ ↵</span>
+          <span>Ctrl ↵</span>
           <button type="submit" disabled={sending || !content.trim()}>
             {sending ? "发送中" : "发送指令"}
           </button>
