@@ -4,9 +4,9 @@ An interview portfolio for Agent Engineer roles: a local workbench where a lead 
 
 > Screenshot/GIF slot: add a real recording here after the UI demo is captured.
 
-| Governed PostgreSQL | Bounded agent team | Replayable trace | Reviewed skill candidate |
+| Governed PostgreSQL | Business knowledge | Bounded agent team | Replayable trace and Skill |
 | --- | --- | --- | --- |
-| AST validation, policy checks, EXPLAIN heuristics and one-time approval | Lead may coordinate at most three role-scoped teammates | One correlated redacted timeline spans lead, teammates, SQL, approvals, retries and artifacts | An accepted run spawns a zero-tool Curator; candidates remain disabled |
+| AST validation, policy checks, EXPLAIN heuristics and one-time approval | Versioned metrics, terms and rules are searched by the Knowledge Agent | Lead may coordinate at most three role-scoped teammates | Correlated replay export plus a zero-tool Curator; candidates remain disabled |
 
 ```mermaid
 flowchart LR
@@ -23,10 +23,10 @@ flowchart LR
 ## 30-second demo
 
 1. Start the API and web app below.
-2. Create a PostgreSQL source and mark `manager_email` as approval-required.
+2. Create a PostgreSQL source, mark `manager_email` as approval-required, and register one business metric.
 3. Ask the question in [examples/postgres-business-review/question.md](examples/postgres-business-review/question.md).
 4. Inspect the approval, a safe `query_timeout` retry, the three teammate records, report evidence, and the correlated trace.
-5. Accept the completed run and inspect the durable Curator agent plus its disabled Skill Candidate.
+5. Export the complete replay JSON, then accept the run and inspect the durable Curator plus its disabled Skill Candidate.
 6. Open the checked-in [golden replay](examples/traces/golden-run.json). It is deterministic and redacted.
 
 The SQL path is: parse/allow-list -> schema and policy evaluation -> bounded `EXPLAIN` heuristic -> one-time approval where required -> read-only execution with timeout/result limits -> evidence artifact and trace. DuckDB also owns a watchdog deadline; model/provider and retryable tool failures use bounded retry state and explicit fallback metadata.
@@ -83,3 +83,4 @@ python scripts/export_golden_trace.py
 - Curator reads redacted trace summaries only, has no tools, and is created idempotently only after human acceptance. Candidate approval still leaves it disabled; this is not autonomous self-improvement.
 
 Read [architecture](docs/architecture.md), [SQL safety](docs/sql-safety.md), [multi-agent runtime](docs/multi-agent-runtime.md), [trace and skill](docs/trace-and-skill.md), [security](SECURITY.md), and [contributing](CONTRIBUTING.md) for implementation detail.
+The Chinese [portfolio acceptance checklist](docs/portfolio-checklist.zh-CN.md) maps the original interview requirements to implemented behavior and lists optional presentation polish separately.
