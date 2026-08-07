@@ -208,6 +208,21 @@ describe("analysis workbench", () => {
     expect(toggle).toHaveAttribute("aria-expanded", "false");
   });
 
+  it("collapses and restores the project workspace on desktop", async () => {
+    render(<App api={fakeApiWithCompletedTask()} />);
+
+    expect(await screen.findByRole("navigation", { name: "项目上下文" })).toBeVisible();
+    const conversation = await screen.findByRole("main", { name: "分析对话" });
+    fireEvent.click(screen.getByRole("button", { name: "收起项目上下文" }));
+
+    expect(screen.queryByRole("navigation", { name: "项目上下文" })).not.toBeInTheDocument();
+    expect(conversation.parentElement).toHaveClass("project-collapsed");
+
+    fireEvent.click(screen.getByRole("button", { name: "打开项目上下文" }));
+    expect(await screen.findByRole("navigation", { name: "项目上下文" })).toBeVisible();
+    expect(conversation.parentElement).not.toHaveClass("project-collapsed");
+  });
+
   it("keeps the question, execution trace, and composer in the center conversation", async () => {
     render(<App api={fakeApiWithCompletedTask()} />);
 

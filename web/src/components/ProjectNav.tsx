@@ -17,6 +17,7 @@ interface ProjectNavProps {
   onOpenModelSettings(): void;
   drawerOpen: boolean;
   onClose(): void;
+  onCollapse(): void;
 }
 
 export function ProjectNav({
@@ -34,6 +35,7 @@ export function ProjectNav({
   onOpenModelSettings,
   drawerOpen,
   onClose,
+  onCollapse,
 }: ProjectNavProps) {
   const [newProjectName, setNewProjectName] = useState("");
   const [creatingProject, setCreatingProject] = useState(false);
@@ -58,6 +60,7 @@ export function ProjectNav({
             <p>Evidence-first Analysis</p>
           </div>
         </div>
+        <button type="button" className="rail-collapse" aria-label="收起项目上下文" onClick={onCollapse}>‹</button>
         <button type="button" className="rail-close" aria-label="关闭项目上下文" onClick={onClose}>×</button>
       </header>
 

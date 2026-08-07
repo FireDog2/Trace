@@ -33,6 +33,7 @@ export function App({ api: suppliedApi }: AppProps) {
   const [modelConfiguration, setModelConfiguration] = useState<ModelConfigurationStatus | null>(null);
   const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
   const [projectNavOpen, setProjectNavOpen] = useState(false);
+  const [projectNavCollapsed, setProjectNavCollapsed] = useState(false);
   const [artifactWorkspaceOpen, setArtifactWorkspaceOpen] = useState(false);
 
   useEffect(() => {
@@ -153,16 +154,23 @@ export function App({ api: suppliedApi }: AppProps) {
     setError(null);
   }
 
-  const shellClassName = task ? "app-shell with-conversation" : "app-shell";
+  const shellClassName = [
+    "app-shell",
+    task ? "with-conversation" : "",
+    projectNavCollapsed ? "project-collapsed" : "",
+  ].filter(Boolean).join(" ");
 
   return (
     <div className={shellClassName}>
       <button
         type="button"
-        className="project-drawer-toggle"
+        className={projectNavCollapsed ? "project-drawer-toggle force-visible" : "project-drawer-toggle"}
         aria-label="打开项目上下文"
         aria-expanded={projectNavOpen}
-        onClick={() => setProjectNavOpen(true)}
+        onClick={() => {
+          setProjectNavCollapsed(false);
+          setProjectNavOpen(true);
+        }}
       >
         <span aria-hidden="true">TRACE</span>
         项目上下文
@@ -181,33 +189,39 @@ export function App({ api: suppliedApi }: AppProps) {
         </button>
       )}
 
-      <ProjectNav
-        projects={projects}
-        selectedProjectId={selectedProjectId}
-        artifacts={artifacts}
-        tasks={tasks}
-        selectedTaskId={selectedTaskId}
-        onSelectProject={(id) => {
-          setSelectedProjectId(id);
-          setProjectNavOpen(false);
-        }}
-        onSelectTask={(id) => {
-          setSelectedTaskId(id);
-          setProjectNavOpen(false);
-        }}
-        onStartNewTask={() => {
-          setSelectedTaskId(null);
-          setTask(null);
-          setEvents([]);
-          setProjectNavOpen(false);
-        }}
-        onCreateProject={createProject}
-        onUpload={uploadDataset}
-        modelConfiguration={modelConfiguration}
-        onOpenModelSettings={() => setModelSettingsOpen(true)}
-        drawerOpen={projectNavOpen}
-        onClose={() => setProjectNavOpen(false)}
-      />
+      {!projectNavCollapsed && (
+        <ProjectNav
+          projects={projects}
+          selectedProjectId={selectedProjectId}
+          artifacts={artifacts}
+          tasks={tasks}
+          selectedTaskId={selectedTaskId}
+          onSelectProject={(id) => {
+            setSelectedProjectId(id);
+            setProjectNavOpen(false);
+          }}
+          onSelectTask={(id) => {
+            setSelectedTaskId(id);
+            setProjectNavOpen(false);
+          }}
+          onStartNewTask={() => {
+            setSelectedTaskId(null);
+            setTask(null);
+            setEvents([]);
+            setProjectNavOpen(false);
+          }}
+          onCreateProject={createProject}
+          onUpload={uploadDataset}
+          modelConfiguration={modelConfiguration}
+          onOpenModelSettings={() => setModelSettingsOpen(true)}
+          drawerOpen={projectNavOpen}
+          onClose={() => setProjectNavOpen(false)}
+          onCollapse={() => {
+            setProjectNavOpen(false);
+            setProjectNavCollapsed(true);
+          }}
+        />
+      )}
 
       {error && <div className="error-banner" role="alert">{error}</div>}
 
