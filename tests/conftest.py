@@ -8,11 +8,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from data_analysis_agent.api import create_app
+from data_analysis_agent.data_sources import DataSourceRepository
 from data_analysis_agent.db import migrate
 from data_analysis_agent.datasets import DatasetService
 from data_analysis_agent.execution import DuckDBExecutor, PythonExecutor
 from data_analysis_agent.domain import ArtifactType
 from data_analysis_agent.permissions import ApprovalRepository, PermissionPolicy
+from data_analysis_agent.postgres import SqlSafetyGateway
 from data_analysis_agent.providers import ModelResponse, ScriptedProvider
 from data_analysis_agent.reporting import ReportService
 from data_analysis_agent.repositories import (
@@ -21,8 +23,68 @@ from data_analysis_agent.repositories import (
     TaskRepository,
 )
 from data_analysis_agent.settings import Settings
+from data_analysis_agent.sql_safety import SqlAstValidator
 from data_analysis_agent.tools import ToolContext, build_tool_registry
 from data_analysis_agent.workspace import WorkspaceService
+
+
+class RecordingProtector:
+    def protect(self, value: str) -> bytes:
+        return b"protected:" + value.encode()
+
+    def unprotect(self, value: bytes) -> str:
+        return value.removeprefix(b"protected:").decode()
+
+
+class FakePostgresDriver:
+    def __init__(self) -> None:
+        self.catalog = {
+            "orders": ("region", "amount", "customer_email"),
+        }
+        self.plan = {
+            "Plan": {
+                "Total Cost": 42.0,
+                "Plan Rows": 12,
+                "Node Type": "Index Scan",
+            }
+        }
+        self.columns = ("region", "amount")
+        self.rows = (("East", 10),)
+        self.inspect_error: BaseException | None = None
+        self.explain_error: BaseException | None = None
+        self.query_error: BaseException | None = None
+        self.on_explain = None
+        self.on_query = None
+        self.explained_sql: list[tuple[str, int]] = []
+        self.queried_sql: list[tuple[str, int, int]] = []
+
+    def inspect_schema(self, dsn: str):
+        if self.inspect_error is not None:
+            raise self.inspect_error
+        return self.catalog
+
+    def explain(self, dsn: str, sql: str, *, statement_timeout_ms: int):
+        if self.explain_error is not None:
+            raise self.explain_error
+        self.explained_sql.append((sql, statement_timeout_ms))
+        if self.on_explain is not None:
+            self.on_explain()
+        return self.plan
+
+    def query(
+        self,
+        dsn: str,
+        sql: str,
+        *,
+        statement_timeout_ms: int,
+        row_limit: int,
+    ):
+        if self.query_error is not None:
+            raise self.query_error
+        self.queried_sql.append((sql, statement_timeout_ms, row_limit))
+        if self.on_query is not None:
+            self.on_query()
+        return self.columns, self.rows
 
 
 @pytest.fixture
@@ -65,6 +127,45 @@ def project(project_repository: ProjectRepository, workspace: WorkspaceService):
 @pytest.fixture
 def artifact_repository(db_connection, workspace: WorkspaceService) -> ArtifactRepository:
     return ArtifactRepository(db_connection, workspace)
+
+
+@pytest.fixture
+def source_repository(db_connection) -> DataSourceRepository:
+    return DataSourceRepository(db_connection, RecordingProtector())
+
+
+@pytest.fixture
+def approval_repository(db_connection) -> ApprovalRepository:
+    return ApprovalRepository(db_connection)
+
+
+@pytest.fixture
+def fake_driver() -> FakePostgresDriver:
+    return FakePostgresDriver()
+
+
+@pytest.fixture
+def sql_gateway(
+    db_connection,
+    settings,
+    source_repository,
+    approval_repository,
+    artifact_repository,
+    workspace,
+    task_repository,
+    fake_driver,
+) -> SqlSafetyGateway:
+    return SqlSafetyGateway(
+        connection=db_connection,
+        settings=settings,
+        sources=source_repository,
+        validator=SqlAstValidator(),
+        approvals=approval_repository,
+        artifacts=artifact_repository,
+        workspace=workspace,
+        tasks=task_repository,
+        driver=fake_driver,
+    )
 
 
 @pytest.fixture

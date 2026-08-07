@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import time
+from dataclasses import asdict, replace
+from hashlib import sha256
+from typing import Callable
 
 from data_analysis_agent.domain import Task, TaskStatus
 from data_analysis_agent.providers import (
@@ -9,9 +13,16 @@ from data_analysis_agent.providers import (
     ModelRequest,
     ProviderError,
 )
-from data_analysis_agent.repositories import TaskRepository
+from data_analysis_agent.model_config import SecretProtector
+from data_analysis_agent.repositories import (
+    ProtectedMessageError,
+    ProtectedToolMessageRepository,
+    TaskRepository,
+)
+from data_analysis_agent.recovery import RecoveryPolicy, RecoveryState
 from data_analysis_agent.settings import Settings
 from data_analysis_agent.tools import ToolContext, ToolRegistry, ToolResult
+from data_analysis_agent.tracing import TraceContext, TraceRecorder, TraceRepository
 
 
 SYSTEM_PROMPT = """You are a careful data analyst operating inside a persistent
@@ -19,6 +30,9 @@ analysis project. Use tools to inspect evidence, maintain a concise plan, and
 create reproducible artifacts. Never claim a business finding without a
 supporting artifact. Ask one focused question when a metric definition or
 required dataset is missing."""
+
+_PROTECTED_TOOL_NAMES = frozenset({"query_database", "await_teammates"})
+_TRANSIENT_PROVIDER_ERRORS = frozenset({"timeout", "network", "rate_limit", "upstream"})
 
 
 class AgentRunner:
@@ -29,13 +43,23 @@ class AgentRunner:
         provider: ModelProvider,
         tools: ToolRegistry,
         tasks: TaskRepository,
+        secret_protector: SecretProtector | None = None,
+        traces: TraceRepository | None = None,
+        retry_sleep: Callable[[float], None] | None = None,
     ) -> None:
         self._settings = settings
         self._provider = provider
         self._tools = tools
         self._tasks = tasks
+        self._protected_messages = (
+            ProtectedToolMessageRepository(tasks._connection, secret_protector)
+            if secret_protector is not None else None
+        )
+        self._traces = traces
+        self._trace_recorder = TraceRecorder(traces) if traces is not None else None
+        self._retry_sleep = retry_sleep or time.sleep
 
-    def run(self, task_id: str) -> Task:
+    def run(self, task_id: str, trace_context: TraceContext | None = None) -> Task:
         task = self._tasks.get(task_id)
         if task.status in {
             TaskStatus.COMPLETED,
@@ -44,16 +68,49 @@ class AgentRunner:
         }:
             return task
 
-        context = ToolContext(project_id=task.project_id, task_id=task.id)
+        owns_trace = self._traces is not None and trace_context is None
+        if owns_trace:
+            run = self._traces.start_run(task_id)
+            trace_context = TraceContext(run.id, task_id)
+        def trace(
+            event_type: str, status: str, payload: dict[str, object], **kwargs: object
+        ):
+            if trace_context is not None and self._trace_recorder is not None:
+                try:
+                    return self._trace_recorder.event(
+                        trace_context, event_type, status, payload, **kwargs
+                    )
+                except Exception:
+                    try:
+                        self._tasks.append_event(
+                            task_id,
+                            "trace.recording_failed",
+                            {"event_type": event_type},
+                        )
+                    except Exception:
+                        pass
+            return None
+        trace("agent.started", "running", {"role": "lead"})
+        context = ToolContext(
+            project_id=task.project_id,
+            task_id=task.id,
+            run_id=trace_context.run_id if trace_context else None,
+        )
         action_count = 0
+        recovery = RecoveryState(
+            RecoveryPolicy(max_attempts=self._settings.max_tool_attempts)
+        )
         last_signature = ""
         repeated_count = 0
-
         while action_count < self._settings.max_tool_actions:
             try:
-                response = self._provider.complete(self._build_request(task_id))
-            except ProviderError as exc:
-                return self._fail_task(task_id, "provider_error", str(exc))
+                request = self._build_request(task_id)
+                response = self._complete_model(request, trace)
+                trace("model.completed", "completed", {"tool_call_count": len(response.tool_calls), "has_text": bool(response.text.strip())})
+            except (ProviderError, ProtectedMessageError) as exc:
+                result = self._fail_task(task_id, "provider_error", str(exc)); trace("agent.completed", "failed", {"category": "provider_error"})
+                if owns_trace: self._traces.finish_run(trace_context.run_id, "failed", "provider_error")
+                return result
 
             if response.text.strip():
                 message = self._tasks.add_message(
@@ -68,33 +125,37 @@ class AgentRunner:
                 )
 
             if not response.tool_calls:
-                return self._complete_task(task_id)
+                result = self._complete_task(task_id); trace("agent.completed", "completed", {})
+                if owns_trace: self._traces.finish_run(trace_context.run_id, "completed")
+                return result
 
-            tool_call_message = self._tasks.add_message(
-                task_id,
-                "assistant_tool_call",
-                json.dumps(
-                    {
-                        "tool_calls": [
-                            {
-                                "id": call.id,
-                                "name": call.name,
-                                "arguments": call.arguments,
-                            }
-                            for call in response.tool_calls
-                        ]
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
+            raw_tool_calls = {
+                "tool_calls": [
+                    {"id": call.id, "name": call.name, "arguments": call.arguments}
+                    for call in response.tool_calls
+                ]
+            }
+            safe_tool_calls = json.dumps(
+                {"tool_calls": [_safe_tool_call(call) for call in response.tool_calls]},
+                ensure_ascii=False, separators=(",", ":"),
             )
+            if any(call.name in _PROTECTED_TOOL_NAMES for call in response.tool_calls):
+                if self._protected_messages is None:
+                    return self._fail_task(task_id, "message_protection_error", "Protected tool message storage is unavailable")
+                try:
+                    encrypted = self._protected_messages.protect(json.dumps(raw_tool_calls, ensure_ascii=False, separators=(",", ":")))
+                    tool_call_message = self._tasks.add_protected_tool_message(task_id, "assistant_tool_call", safe_tool_calls, encrypted)
+                except ProtectedMessageError:
+                    return self._fail_task(task_id, "message_protection_error", "Protected tool message storage is unavailable")
+            else:
+                tool_call_message = self._tasks.add_message(task_id, "assistant_tool_call", safe_tool_calls)
             self._tasks.append_event(
                 task_id,
                 "message.created",
                 {"message_id": tool_call_message.id, "role": tool_call_message.role},
             )
 
-            for call in response.tool_calls:
+            for call_index, call in enumerate(response.tool_calls):
                 action_count += 1
                 signature = json.dumps(
                     {"name": call.name, "arguments": call.arguments},
@@ -114,18 +175,109 @@ class AgentRunner:
                         "The same tool call failed to make progress",
                     )
 
-                result = self._tools.execute(call, context)
-                self._record_tool_result(task_id, result)
+                tool_event = trace("tool.started", "running", {"tool": call.name})
+                call_context = replace(
+                    context,
+                    parent_event_id=tool_event.id if tool_event is not None else None,
+                )
+                result = self._tools.execute(call, call_context)
+                if not result.success:
+                    recovery_decision = recovery.record(
+                        signature,
+                        result.error_category,
+                        retryable=result.retryable,
+                    )
+                    if result.retryable:
+                        diagnostics = dict(result.diagnostics or {})
+                        diagnostics["recovery"] = asdict(recovery_decision)
+                        result = replace(
+                            result,
+                            retryable=recovery_decision.retry_allowed,
+                            diagnostics=diagnostics,
+                        )
+                        trace(
+                            "tool.retry" if recovery_decision.retry_allowed else "tool.fallback",
+                            "retrying" if recovery_decision.retry_allowed else "completed",
+                            {
+                                "tool": call.name,
+                                "category": result.error_category,
+                                "attempt": recovery_decision.attempt,
+                                "remaining": recovery_decision.remaining,
+                            },
+                            error_category=result.error_category,
+                        )
+                artifact_ids = _result_artifact_ids(result)
+                trace(
+                    "tool.completed",
+                    "completed" if result.success else "failed",
+                    {
+                        "tool": call.name,
+                        "success": result.success,
+                        "error_category": result.error_category,
+                    },
+                    error_category=result.error_category,
+                    artifact_ids=artifact_ids,
+                )
+                protected_result: bytes | None = None
+                if call.name in _PROTECTED_TOOL_NAMES and result.success:
+                    assert self._protected_messages is not None
+                    try:
+                        protected_result = self._protected_messages.protect(_tool_result_json(result))
+                    except ProtectedMessageError:
+                        return self._fail_task(task_id, "message_protection_error", "Protected tool message storage is unavailable")
+                try:
+                    message = self._record_tool_result(task_id, result, call.name, protected_result)
+                except ProtectedMessageError:
+                    return self._fail_task(task_id, "message_protection_error", "Protected tool message storage is unavailable")
                 if result.pauses_task:
-                    return self._tasks.get(task_id)
+                    for cancelled in response.tool_calls[call_index + 1:]:
+                        self._record_tool_result(
+                            task_id,
+                            ToolResult(call_id=cancelled.id, success=False, output={}, error_category="cancelled_due_to_pause", message="Cancelled because an earlier tool call paused the task", retryable=False),
+                            cancelled.name,
+                        )
+                    current = self._tasks.get(task_id); trace("agent.completed", "completed", {"paused": True})
+                    if owns_trace: self._traces.finish_run(trace_context.run_id, "completed")
+                    return current
                 if action_count >= self._settings.max_tool_actions:
                     break
 
-        return self._fail_task(
+        result = self._fail_task(
             task_id,
             "tool_action_limit",
             "Tool action limit reached",
         )
+        trace("agent.completed", "failed", {"category": "tool_action_limit"})
+        if owns_trace:
+            self._traces.finish_run(trace_context.run_id, "failed", "tool_action_limit")
+        return result
+
+    def _complete_model(
+        self,
+        request: ModelRequest,
+        trace: Callable[..., None],
+    ):
+        for retry_number in range(self._settings.model_max_retries + 1):
+            try:
+                return self._provider.complete(request)
+            except ProviderError as exc:
+                retryable = exc.category in _TRANSIENT_PROVIDER_ERRORS
+                if not retryable or retry_number >= self._settings.model_max_retries:
+                    raise
+                delay = min(4.0, 0.25 * (2**retry_number))
+                trace(
+                    "model.retry",
+                    "retrying",
+                    {
+                        "category": exc.category,
+                        "attempt": retry_number + 1,
+                        "remaining": self._settings.model_max_retries - retry_number,
+                        "delay_seconds": delay,
+                    },
+                )
+                self._retry_sleep(delay)
+
+        raise RuntimeError("unreachable")
 
     def resume(self, task_id: str, user_message: str) -> Task:
         task = self._tasks.get(task_id)
@@ -177,7 +329,7 @@ class AgentRunner:
     def _build_request(self, task_id: str) -> ModelRequest:
         task = self._tasks.get(task_id)
         messages = tuple(
-            ModelMessage(role=message.role, content=message.content)
+            ModelMessage(role=message.role, content=self._provider_content(message.id, message.content))
             for message in self._tasks.list_messages(task_id)
         )
         return ModelRequest(
@@ -187,27 +339,24 @@ class AgentRunner:
             tools=self._tools.schemas(),
         )
 
-    def _record_tool_result(self, task_id: str, result: ToolResult) -> None:
-        content = json.dumps(
-            {
-                "call_id": result.call_id,
-                "success": result.success,
-                "output": result.output,
-                "error_category": result.error_category,
-                "message": result.message,
-                "retryable": result.retryable,
-                "diagnostics": result.diagnostics,
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
+    def _provider_content(self, message_id: str, safe_content: str) -> str:
+        if self._protected_messages is None:
+            return safe_content
+        return self._protected_messages.get(message_id) or safe_content
+
+    def _record_tool_result(self, task_id: str, result: ToolResult, tool_name: str, protected_content: bytes | None = None):
+        content = _safe_tool_result_json(result, tool_name)
+        message = (
+            self._tasks.add_protected_tool_message(task_id, "tool", content, protected_content)
+            if protected_content is not None
+            else self._tasks.add_message(task_id, "tool", content)
         )
-        message = self._tasks.add_message(task_id, "tool", content)
         self._tasks.append_event(
             task_id,
             "message.created",
             {"message_id": message.id, "role": message.role},
         )
-
+        return message
     def _complete_task(self, task_id: str) -> Task:
         task = self._tasks.get(task_id)
         if task.status is TaskStatus.UNDERSTANDING:
@@ -235,3 +384,56 @@ class AgentRunner:
             {"error_category": category, "message": message},
         )
         return task
+
+
+def _safe_tool_call(call) -> dict[str, object]:
+    if call.name != "query_database":
+        return {"id": call.id, "name": call.name, "arguments": call.arguments}
+    sql = str(call.arguments.get("sql", ""))
+    source = str(call.arguments.get("data_source_id", ""))
+    return {"id": call.id, "name": call.name, "arguments": {
+        "sql_hash": sha256(sql.encode("utf-8")).hexdigest(),
+        "data_source_id_hash": sha256(source.encode("utf-8")).hexdigest(),
+    }}
+
+
+def _tool_result_payload(result: ToolResult) -> dict[str, object]:
+    return {"call_id": result.call_id, "success": result.success, "output": result.output,
+            "error_category": result.error_category, "message": result.message,
+            "retryable": result.retryable, "diagnostics": result.diagnostics}
+
+
+def _tool_result_json(result: ToolResult) -> str:
+    return json.dumps(_tool_result_payload(result), ensure_ascii=False, separators=(",", ":"))
+
+
+def _result_artifact_ids(result: ToolResult) -> tuple[str, ...]:
+    if not result.success or not isinstance(result.output, dict):
+        return ()
+    values: list[str] = []
+    artifact_id = result.output.get("artifact_id")
+    if isinstance(artifact_id, str) and artifact_id:
+        values.append(artifact_id)
+    artifact_ids = result.output.get("artifact_ids")
+    if isinstance(artifact_ids, list):
+        values.extend(value for value in artifact_ids if isinstance(value, str) and value)
+    return tuple(dict.fromkeys(values))
+
+
+def _safe_tool_result_json(result: ToolResult, tool_name: str) -> str:
+    payload = _tool_result_payload(result)
+    output = result.output if isinstance(result.output, dict) else {}
+    if tool_name == "await_teammates":
+        agents = output.get("agents") if isinstance(output.get("agents"), list) else []
+        payload["output"] = {"agents": [
+            {key: item.get(key) for key in ("agent_id", "role", "status", "result_summary", "error_category")}
+            for item in agents if isinstance(item, dict)
+        ]}
+        payload["diagnostics"] = None
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    if tool_name != "query_database":
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    payload["output"] = {key: output.get(key) for key in
+                         ("status", "query_hash", "row_count", "risk", "artifact_id") if key in output}
+    payload["diagnostics"] = None
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))

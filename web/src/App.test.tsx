@@ -138,6 +138,18 @@ function fakeApiWithCompletedTask(
         },
       ],
     }),
+    listDataSources: async () => [],
+    createDataSource: async () => { throw new Error("Not used in this test"); },
+    getDataSourceSchema: async () => ({ tables: {} }),
+    getDataSourcePolicies: async () => ({ data_source_id: "source-1", version: 1, rules: [] }),
+    replaceDataSourcePolicies: async () => ({ data_source_id: "source-1", version: 1, rules: [] }),
+    listAgents: async () => [],
+    listRuns: async () => [],
+    getTrace: async () => [],
+    acceptRun: async () => { throw new Error("Not used in this test"); },
+    getSkillCandidateForRun: async () => { throw new Error("Not used in this test"); },
+    createSkillCandidate: async () => { throw new Error("Not used in this test"); },
+    decideSkillCandidate: async () => { throw new Error("Not used in this test"); },
     sendMessage: async () => {
       throw new Error("Not used in this test");
     },
@@ -241,7 +253,48 @@ describe("analysis workbench", () => {
     expect(await within(projectContext).findByText("operations.csv")).toBeVisible();
     expect(within(projectContext).getByText("Business Knowledge Base")).toBeVisible();
     expect(within(projectContext).getByText("已加载")).toBeVisible();
-    expect(within(projectContext).getAllByText("尚未接入").length).toBeGreaterThanOrEqual(2);
+    expect(within(projectContext).getByRole("button", { name: "配置 PostgreSQL 数据源" })).toBeVisible();
+    expect(within(projectContext).getAllByText("下一阶段").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("opens PostgreSQL governance from the project context", async () => {
+    render(<App api={fakeApiWithCompletedTask()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "配置 PostgreSQL 数据源" }));
+
+    expect(screen.getByRole("dialog", { name: "数据库治理" })).toBeVisible();
+    expect(screen.getByLabelText("PostgreSQL DSN")).toHaveAttribute("type", "password");
+  });
+
+  it("shows durable agents and correlated trace in the evidence workspace", async () => {
+    const api = fakeApiWithCompletedTask();
+    api.listAgents = async () => [{
+      id: "agent-sql", task_id: "task-1", role: "sql", objective: "执行受控 SQL",
+      status: "completed", result_summary: "artifact-1", error_category: null,
+      created_at: "", started_at: "", completed_at: "",
+    }];
+    api.listRuns = async () => [{
+      id: "run-1", task_id: "task-1", status: "completed", accepted: false,
+      started_at: "", completed_at: "", error_category: null,
+    }];
+    api.getTrace = async () => [{
+      id: "trace-1", run_id: "run-1", task_id: "task-1", agent_id: "agent-sql",
+      parent_event_id: null, sequence: 1, event_type: "sql.validated", status: "completed",
+      payload: { sql_hash: "safe-hash" }, duration_ms: 2, attempt: 1,
+      error_category: null, artifact_ids: [],
+    }];
+    render(<App api={api} />);
+
+    const workspace = await screen.findByRole("complementary", { name: "最终产物" });
+    fireEvent.click(within(workspace).getByRole("tab", { name: /Agent/ }));
+    expect(await within(workspace).findByText("执行受控 SQL")).toBeVisible();
+
+    fireEvent.click(within(workspace).getByRole("tab", { name: /Trace/ }));
+    fireEvent.change(within(workspace).getByRole("combobox", { name: "选择运行" }), {
+      target: { value: "run-1" },
+    });
+    expect(await within(workspace).findByText("SQL 校验")).toBeVisible();
+    expect(within(workspace).getByRole("button", { name: "接受运行并沉淀 Skill" })).toBeVisible();
   });
 
   it("sorts final artifacts into accessible tabs and keeps the real link", async () => {

@@ -24,4 +24,26 @@ describe("HttpApiClient", () => {
       "Configure a model before starting analysis",
     );
   });
+
+  it("lists teammate runs for a task", async () => {
+    const runs = [{
+      id: "agent-1",
+      task_id: "task-1",
+      role: "sql",
+      objective: "Aggregate profit",
+      status: "working",
+      result_summary: null,
+      error_category: null,
+      created_at: "2026-08-06T00:00:00+00:00",
+      started_at: "2026-08-06T00:00:00+00:00",
+      completed_at: null,
+    }];
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(runs), {
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(new HttpApiClient().listAgents("task-1")).resolves.toEqual(runs);
+    expect(fetchMock).toHaveBeenCalledWith("/api/tasks/task-1/agents", undefined);
+  });
 });

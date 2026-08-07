@@ -6,7 +6,11 @@ import sqlite3
 from pathlib import Path
 from uuid import uuid4
 
-from data_analysis_agent.db import utc_now
+from data_analysis_agent.db import (
+    sqlite_connection_guarded,
+    sqlite_connection_lock,
+    utc_now,
+)
 from data_analysis_agent.domain import (
     Artifact,
     ArtifactType,
@@ -22,6 +26,7 @@ from data_analysis_agent.domain import (
     TaskStatus,
 )
 from data_analysis_agent.workspace import WorkspaceService
+from data_analysis_agent.model_config import SecretProtector
 
 
 class RepositoryError(RuntimeError):
@@ -42,6 +47,35 @@ class InvalidArtifactError(RepositoryError):
 
 class InvalidTaskTransition(RepositoryError):
     """Raised when a task state change violates the lifecycle."""
+
+
+class ProtectedMessageError(RepositoryError):
+    """Protected agent message content cannot be stored or recovered safely."""
+
+
+class ProtectedToolMessageRepository:
+    def __init__(self, connection: sqlite3.Connection, protector: SecretProtector) -> None:
+        self._connection = connection
+        self._lock = sqlite_connection_lock(connection)
+        self._protector = protector
+
+    def protect(self, content: str) -> bytes:
+        try:
+            return self._protector.protect(content)
+        except BaseException:
+            raise ProtectedMessageError("Protected tool message storage is unavailable") from None
+
+    @sqlite_connection_guarded
+    def get(self, message_id: str) -> str | None:
+        row = self._connection.execute(
+            "SELECT protected_content FROM protected_tool_message_payloads WHERE message_id = ?", (message_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return self._protector.unprotect(bytes(row["protected_content"]))
+        except BaseException:
+            raise ProtectedMessageError("Protected tool message recovery is unavailable") from None
 
 
 TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
@@ -81,7 +115,9 @@ class ProjectRepository:
     def __init__(self, connection: sqlite3.Connection) -> None:
         connection.row_factory = sqlite3.Row
         self._connection = connection
+        self._lock = sqlite_connection_lock(connection)
 
+    @sqlite_connection_guarded
     def create(self, name: str) -> Project:
         normalized_name = name.strip()
         if not normalized_name:
@@ -102,6 +138,7 @@ class ProjectRepository:
             updated_at=now,
         )
 
+    @sqlite_connection_guarded
     def get(self, project_id: str) -> Project:
         row = self._connection.execute(
             "SELECT id, name, status, created_at, updated_at "
@@ -118,6 +155,7 @@ class ProjectRepository:
             updated_at=row["updated_at"],
         )
 
+    @sqlite_connection_guarded
     def list(self) -> tuple[Project, ...]:
         rows = self._connection.execute(
             "SELECT id, name, status, created_at, updated_at "
@@ -139,7 +177,9 @@ class TaskRepository:
     def __init__(self, connection: sqlite3.Connection) -> None:
         connection.row_factory = sqlite3.Row
         self._connection = connection
+        self._lock = sqlite_connection_lock(connection)
 
+    @sqlite_connection_guarded
     def create(self, project_id: str, objective: str) -> Task:
         normalized_objective = objective.strip()
         if not normalized_objective:
@@ -168,6 +208,7 @@ class TaskRepository:
             updated_at=now,
         )
 
+    @sqlite_connection_guarded
     def get(self, task_id: str) -> Task:
         row = self._connection.execute(
             "SELECT id, project_id, objective, status, created_at, updated_at "
@@ -178,7 +219,26 @@ class TaskRepository:
             raise RecordNotFoundError(f"Task not found: {task_id}")
         return _task_from_row(row)
 
+    @sqlite_connection_guarded
     def transition(self, task_id: str, target: TaskStatus) -> Task:
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            task = self.transition_in_transaction(task_id, target)
+            self._connection.commit()
+            return task
+        except Exception:
+            self._connection.rollback()
+            raise
+
+    @sqlite_connection_guarded
+    def transition_in_transaction(
+        self,
+        task_id: str,
+        target: TaskStatus,
+    ) -> Task:
+        """Transition a task without ending the caller-owned transaction."""
+        if not self._connection.in_transaction:
+            raise RuntimeError("task transition requires an active transaction")
         current = self.get(task_id)
         if target not in TASK_TRANSITIONS[current.status]:
             raise InvalidTaskTransition(f"{current.status} -> {target}")
@@ -187,7 +247,6 @@ class TaskRepository:
             "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
             (target, updated_at, task_id),
         )
-        self._connection.commit()
         return Task(
             id=current.id,
             project_id=current.project_id,
@@ -197,6 +256,7 @@ class TaskRepository:
             updated_at=updated_at,
         )
 
+    @sqlite_connection_guarded
     def reopen_completed(self, task_id: str) -> Task:
         """Start a persisted follow-up cycle without weakening terminal transitions."""
         current = self.get(task_id)
@@ -219,6 +279,7 @@ class TaskRepository:
             updated_at=updated_at,
         )
 
+    @sqlite_connection_guarded
     def add_message(self, task_id: str, role: str, content: str) -> Message:
         if role not in {"user", "assistant", "assistant_tool_call", "system", "tool"}:
             raise ValueError(f"Unsupported message role: {role}")
@@ -247,6 +308,38 @@ class TaskRepository:
         self._connection.commit()
         return message
 
+    @sqlite_connection_guarded
+    def add_protected_tool_message(
+        self,
+        task_id: str,
+        role: str,
+        safe_content: str,
+        protected_content: bytes,
+    ) -> Message:
+        if role not in {"assistant_tool_call", "tool"}:
+            raise ValueError("Only tool protocol messages may have protected payloads")
+        normalized = safe_content.strip()
+        if not normalized:
+            raise ValueError("Message content must not be empty")
+        message = Message(str(uuid4()), task_id, role, normalized, utc_now())
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            self.get(task_id)
+            self._connection.execute(
+                "INSERT INTO messages(id, task_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
+                (message.id, message.task_id, message.role, message.content, message.created_at),
+            )
+            self._connection.execute(
+                "INSERT INTO protected_tool_message_payloads(message_id, protected_content, created_at) VALUES (?, ?, ?)",
+                (message.id, sqlite3.Binary(protected_content), message.created_at),
+            )
+            self._connection.commit()
+            return message
+        except Exception:
+            self._connection.rollback()
+            raise ProtectedMessageError("Protected tool message storage is unavailable") from None
+
+    @sqlite_connection_guarded
     def list_messages(self, task_id: str) -> tuple[Message, ...]:
         rows = self._connection.execute(
             "SELECT id, task_id, role, content, created_at FROM messages "
@@ -264,6 +357,7 @@ class TaskRepository:
             for row in rows
         )
 
+    @sqlite_connection_guarded
     def revise_plan(
         self,
         task_id: str,
@@ -329,6 +423,7 @@ class TaskRepository:
             created_at=created_at,
         )
 
+    @sqlite_connection_guarded
     def get_plan_revision(self, revision_id: str) -> PlanRevision:
         revision_row = self._connection.execute(
             "SELECT id, task_id, revision, reason, created_at "
@@ -351,6 +446,7 @@ class TaskRepository:
             created_at=revision_row["created_at"],
         )
 
+    @sqlite_connection_guarded
     def latest_plan(self, task_id: str) -> PlanRevision | None:
         row = self._connection.execute(
             "SELECT id FROM plan_revisions WHERE task_id = ? "
@@ -359,39 +455,53 @@ class TaskRepository:
         ).fetchone()
         return self.get_plan_revision(row["id"]) if row is not None else None
 
+    @sqlite_connection_guarded
     def append_event(
         self,
         task_id: str,
         event_type: str,
         payload: dict[str, object],
     ) -> TaskEvent:
-        self.get(task_id)
-        event_id = str(uuid4())
-        created_at = utc_now()
         try:
             self._connection.execute("BEGIN IMMEDIATE")
-            latest = self._connection.execute(
-                "SELECT COALESCE(MAX(sequence), 0) FROM task_events WHERE task_id = ?",
-                (task_id,),
-            ).fetchone()[0]
-            sequence = int(latest) + 1
-            self._connection.execute(
-                "INSERT INTO task_events("
-                "id, task_id, sequence, event_type, payload_json, created_at"
-                ") VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    event_id,
-                    task_id,
-                    sequence,
-                    event_type,
-                    json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-                    created_at,
-                ),
-            )
+            event = self.append_event_in_transaction(task_id, event_type, payload)
             self._connection.commit()
+            return event
         except Exception:
             self._connection.rollback()
             raise
+
+    @sqlite_connection_guarded
+    def append_event_in_transaction(
+        self,
+        task_id: str,
+        event_type: str,
+        payload: dict[str, object],
+    ) -> TaskEvent:
+        """Append an event without ending the caller-owned transaction."""
+        if not self._connection.in_transaction:
+            raise RuntimeError("task event append requires an active transaction")
+        self.get(task_id)
+        event_id = str(uuid4())
+        created_at = utc_now()
+        latest = self._connection.execute(
+            "SELECT COALESCE(MAX(sequence), 0) FROM task_events WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()[0]
+        sequence = int(latest) + 1
+        self._connection.execute(
+            "INSERT INTO task_events("
+            "id, task_id, sequence, event_type, payload_json, created_at"
+            ") VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                event_id,
+                task_id,
+                sequence,
+                event_type,
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                created_at,
+            ),
+        )
         return TaskEvent(
             id=event_id,
             task_id=task_id,
@@ -401,6 +511,7 @@ class TaskRepository:
             created_at=created_at,
         )
 
+    @sqlite_connection_guarded
     def events_after(self, task_id: str, sequence: int) -> tuple[TaskEvent, ...]:
         rows = self._connection.execute(
             "SELECT id, task_id, sequence, event_type, payload_json, created_at "
@@ -409,6 +520,7 @@ class TaskRepository:
         ).fetchall()
         return tuple(_task_event_from_row(row) for row in rows)
 
+    @sqlite_connection_guarded
     def list_for_project(self, project_id: str) -> tuple[Task, ...]:
         rows = self._connection.execute(
             "SELECT id, project_id, objective, status, created_at, updated_at "
@@ -417,6 +529,7 @@ class TaskRepository:
         ).fetchall()
         return tuple(_task_from_row(row) for row in rows)
 
+    @sqlite_connection_guarded
     def start_tool_execution(
         self,
         task_id: str,
@@ -441,6 +554,7 @@ class TaskRepository:
         self._connection.commit()
         return execution_id
 
+    @sqlite_connection_guarded
     def finish_tool_execution(
         self,
         execution_id: str,
@@ -466,8 +580,10 @@ class ArtifactRepository:
     ) -> None:
         connection.row_factory = sqlite3.Row
         self._connection = connection
+        self._lock = sqlite_connection_lock(connection)
         self._workspace = workspace
 
+    @sqlite_connection_guarded
     def register(
         self,
         project_id: str,
@@ -479,6 +595,39 @@ class ArtifactRepository:
         producer_execution_id: str | None,
         input_artifact_ids: tuple[str, ...],
     ) -> Artifact:
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            artifact = self.register_in_transaction(
+                project_id=project_id,
+                task_id=task_id,
+                artifact_type=artifact_type,
+                path=path,
+                title=title,
+                description=description,
+                producer_execution_id=producer_execution_id,
+                input_artifact_ids=input_artifact_ids,
+            )
+            self._connection.commit()
+            return artifact
+        except Exception:
+            self._connection.rollback()
+            raise
+
+    @sqlite_connection_guarded
+    def register_in_transaction(
+        self,
+        project_id: str,
+        task_id: str | None,
+        artifact_type: ArtifactType,
+        path: Path,
+        title: str,
+        description: str,
+        producer_execution_id: str | None,
+        input_artifact_ids: tuple[str, ...],
+    ) -> Artifact:
+        """Register an artifact without ending the caller-owned transaction."""
+        if not self._connection.in_transaction:
+            raise RuntimeError("artifact registration requires an active transaction")
         resolved_path = self._workspace.resolve_inside(project_id, path)
         if not resolved_path.is_file():
             raise InvalidArtifactError(f"Artifact file does not exist: {path}")
@@ -532,9 +681,7 @@ class ArtifactRepository:
                 "VALUES (?, ?)",
                 ((artifact_id, input_id) for input_id in unique_inputs),
             )
-            self._connection.commit()
         except sqlite3.IntegrityError as exc:
-            self._connection.rollback()
             raise InvalidArtifactError(str(exc)) from exc
 
         return Artifact(
@@ -551,6 +698,7 @@ class ArtifactRepository:
             created_at=created_at,
         )
 
+    @sqlite_connection_guarded
     def get(self, artifact_id: str) -> Artifact:
         row = self._connection.execute(
             "SELECT * FROM artifacts WHERE id = ?",
@@ -577,6 +725,7 @@ class ArtifactRepository:
             created_at=row["created_at"],
         )
 
+    @sqlite_connection_guarded
     def list_for_project(self, project_id: str) -> tuple[Artifact, ...]:
         rows = self._connection.execute(
             "SELECT id FROM artifacts WHERE project_id = ? ORDER BY created_at, rowid",
@@ -584,6 +733,7 @@ class ArtifactRepository:
         ).fetchall()
         return tuple(self.get(row["id"]) for row in rows)
 
+    @sqlite_connection_guarded
     def list_for_task(self, task_id: str) -> tuple[Artifact, ...]:
         rows = self._connection.execute(
             "SELECT id FROM artifacts WHERE task_id = ? ORDER BY created_at, rowid",
@@ -591,6 +741,7 @@ class ArtifactRepository:
         ).fetchall()
         return tuple(self.get(row["id"]) for row in rows)
 
+    @sqlite_connection_guarded
     def set_producer(
         self,
         artifact_ids: tuple[str, ...],
@@ -608,6 +759,7 @@ class ArtifactRepository:
         if cursor.rowcount != len(set(artifact_ids)):
             raise InvalidArtifactError("Could not assign producing execution")
 
+    @sqlite_connection_guarded
     def record_evidence(
         self,
         report_artifact_id: str,
@@ -628,6 +780,7 @@ class ArtifactRepository:
         )
         self._connection.commit()
 
+    @sqlite_connection_guarded
     def evidence_for(self, report_artifact_id: str) -> tuple[str, ...]:
         rows = self._connection.execute(
             "SELECT evidence_artifact_id FROM evidence_links "

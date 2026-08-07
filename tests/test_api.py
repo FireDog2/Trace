@@ -1,12 +1,308 @@
 from __future__ import annotations
 
+import sqlite3
+from threading import Event
+
+import pytest
 from fastapi.testclient import TestClient
 
+import data_analysis_agent.api as api_module
 from data_analysis_agent.api import create_app
 from data_analysis_agent.domain import TaskStatus
 from data_analysis_agent.model_config import SecretStorageUnavailable
 from data_analysis_agent.permissions import ToolAction
 from data_analysis_agent.providers import ModelResponse, ScriptedProvider
+from data_analysis_agent.team import AgentRole, AgentRunStatus
+from data_analysis_agent.tools import ToolCall, ToolContext
+from data_analysis_agent.tracing import TraceContext
+
+
+def test_build_services_closes_open_connection_when_construction_fails(settings, monkeypatch) -> None:
+    class Connection:
+        closed = False
+        def close(self):
+            self.closed = True
+
+    connection = Connection()
+    monkeypatch.setattr(api_module, "connect_database", lambda _: connection)
+    monkeypatch.setattr(api_module, "_build_services", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("builder failed")))
+
+    with pytest.raises(RuntimeError, match="builder failed"):
+        api_module.build_services(settings)
+    assert connection.closed is True
+
+
+def test_trace_routes_replay_without_execution_and_accept_completed_run(settings) -> None:
+    skill = """---
+name: safe-sql-diagnostic
+description: Safe workflow.
+---
+## When to use
+For analysis.
+## Inputs
+A question.
+## Workflow
+Analyze safely.
+## Safety gates
+Keep approvals.
+## Failure recovery
+Return a safe summary.
+"""
+    app = create_app(settings, ScriptedProvider([ModelResponse(skill, ())]))
+    services = app.state.services
+    project = services.projects.create("Trace route")
+    task = services.tasks.create(project.id, "Replay safely")
+    run = services.traces.start_run(task.id)
+    services.trace_recorder.event(TraceContext(run.id, task.id), "tool.completed", "completed", {"dsn": "postgresql://secret", "row_count": 3})
+    services.traces.finish_run(run.id, "completed")
+    with TestClient(app) as client:
+        replay = client.get(f"/api/runs/{run.id}/trace")
+        accepted = client.post(f"/api/runs/{run.id}/accept")
+        accepted_again = client.post(f"/api/runs/{run.id}/accept")
+        runs = client.get(f"/api/tasks/{task.id}/runs")
+        curator_runs = services.team_repository.list_runs(task.id)
+        assert len(curator_runs) == 1
+        services.team_manager.await_runs((curator_runs[0].id,), 2)  # type: ignore[union-attr]
+        curator = services.team_repository.list_runs(task.id)[0]
+        candidate = services.skill_candidates.get_for_run(run.id)
+    assert replay.status_code == 200 and replay.json()[0]["sequence"] == 1
+    assert "secret" not in replay.text
+    assert accepted.status_code == 200 and accepted.json()["accepted"] is True
+    assert accepted_again.status_code == 200
+    assert runs.json()[0]["id"] == run.id
+    assert curator.role is AgentRole.CURATOR
+    assert curator.status is AgentRunStatus.COMPLETED
+    assert candidate.enabled is False
+
+
+def test_skill_candidate_can_be_loaded_by_source_run(settings) -> None:
+    app = create_app(settings, ScriptedProvider(()))
+    services = app.state.services
+    project = services.projects.create("Skill lookup")
+    task = services.tasks.create(project.id, "Replay candidate")
+    run = services.traces.start_run(task.id)
+    services.traces.finish_run(run.id, "completed")
+    candidate = services.skill_candidates.create(
+        run.id,
+        "safe-sql-diagnostic",
+        "---\nname: safe-sql-diagnostic\n---\n",
+        "scripted",
+    )
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/runs/{run.id}/skill-candidate")
+
+    assert response.status_code == 200
+    assert response.json()["id"] == candidate.id
+
+
+@pytest.mark.parametrize("failure", ("provider", "runner_constructor", "runner_run"))
+def test_worker_runner_factory_closes_fresh_worker_on_each_failure(
+    settings, monkeypatch, failure
+) -> None:
+    main = api_module.build_services(settings, ScriptedProvider(()))
+    project = main.projects.create("Worker lifecycle")
+    # Create the task through the real main services; workers must never close this connection.
+    task = main.tasks.create(project.id, "Probe")
+    run = main.team_repository.create_run(task.id, AgentRole.SQL, "Probe")
+
+    class WorkerConnection:
+        closed = False
+        def close(self):
+            self.closed = True
+
+    worker_connection = WorkerConnection()
+    class Worker:
+        connection = worker_connection
+        team_repository = main.team_repository
+        tools = main.tools
+        def resolve_provider(self):
+            if failure == "provider":
+                raise RuntimeError("provider failed")
+            return ScriptedProvider(())
+
+    monkeypatch.setattr(api_module, "build_services", lambda *args, **kwargs: Worker())
+    if failure == "runner_constructor":
+        monkeypatch.setattr(api_module, "TeammateRunner", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("ctor failed")))
+    elif failure == "runner_run":
+        class FailingRunner:
+            def __init__(self, **kwargs):
+                pass
+            def run(self, run_id):
+                raise RuntimeError("run failed")
+        monkeypatch.setattr(api_module, "TeammateRunner", FailingRunner)
+
+    runner = main.team_manager._runner_factory(AgentRole.SQL, Event())  # type: ignore[union-attr]
+    with pytest.raises(RuntimeError):
+        runner.run(run.id)
+    assert worker_connection.closed is True
+    assert main.connection.execute("SELECT 1").fetchone()[0] == 1
+    main.team_manager.shutdown()  # type: ignore[union-attr]
+    main.connection.close()
+
+
+def test_production_worker_builder_failure_closes_its_real_fresh_connection(
+    settings, monkeypatch
+) -> None:
+    """The API's actual worker factory owns a connection even before services exist."""
+    main = api_module.build_services(settings, ScriptedProvider(()))
+    opened: list[sqlite3.Connection] = []
+    real_connect = api_module.connect_database
+
+    def recording_connect(worker_settings):
+        connection = real_connect(worker_settings)
+        opened.append(connection)
+        return connection
+
+    monkeypatch.setattr(api_module, "connect_database", recording_connect)
+    monkeypatch.setattr(
+        api_module,
+        "_build_services",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("worker assembly failed")),
+    )
+    runner = main.team_manager._runner_factory(AgentRole.SQL, Event())  # type: ignore[union-attr]
+
+    with pytest.raises(RuntimeError, match="worker assembly failed"):
+        runner.run("unused-run")
+
+    assert len(opened) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened[0].execute("SELECT 1")
+    assert main.connection.execute("SELECT 1").fetchone()[0] == 1
+    main.team_manager.shutdown()  # type: ignore[union-attr]
+    main.connection.close()
+
+
+@pytest.mark.parametrize("failure", ("get_run", "fail_run"))
+def test_production_worker_failure_handler_closes_fresh_connection_on_repository_error(
+    settings, monkeypatch, failure
+) -> None:
+    main = api_module.build_services(settings, ScriptedProvider(()))
+    opened: list[sqlite3.Connection] = []
+    real_connect = api_module.connect_database
+
+    def recording_connect(worker_settings):
+        connection = real_connect(worker_settings)
+        opened.append(connection)
+        return connection
+
+    monkeypatch.setattr(api_module, "connect_database", recording_connect)
+    if failure == "get_run":
+        monkeypatch.setattr(
+            api_module.TeamRepository,
+            "get_run",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("read failed")),
+        )
+    else:
+        class ActiveRun:
+            status = AgentRunStatus.CREATED
+
+        monkeypatch.setattr(api_module.TeamRepository, "get_run", lambda *args, **kwargs: ActiveRun())
+        monkeypatch.setattr(
+            api_module.TeamRepository,
+            "fail_run",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("write failed")),
+        )
+
+    with pytest.raises(RuntimeError):
+        main.team_manager._worker_failure_handler("unused-run")  # type: ignore[union-attr]
+
+    assert len(opened) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened[0].execute("SELECT 1")
+    assert main.connection.execute("SELECT 1").fetchone()[0] == 1
+    main.team_manager.shutdown()  # type: ignore[union-attr]
+    main.connection.close()
+
+
+@pytest.mark.parametrize("helper,arguments,method", [
+    ("_run_task", ("task-1",), "run"),
+    ("_continue_task", ("task-1", "follow up", TaskStatus.COMPLETED), "follow_up"),
+    ("_resume_approved_task", ("task-1",), "resume_approval"),
+])
+def test_background_helpers_shutdown_teammates_before_closing_connection(
+    settings, monkeypatch, helper, arguments, method
+) -> None:
+    events: list[str] = []
+
+    class Connection:
+        def close(self):
+            events.append("connection.close")
+
+    class Manager:
+        def shutdown(self):
+            events.append("manager.shutdown")
+
+    class Agent:
+        def __getattr__(self, name):
+            if name != method:
+                raise AttributeError(name)
+            return lambda *args: events.append(f"agent.{name}")
+
+    class Services:
+        connection = Connection()
+        team_manager = Manager()
+        def agent(self):
+            return Agent()
+
+    monkeypatch.setattr(api_module, "build_services", lambda *args, **kwargs: Services())
+    getattr(api_module, helper)(settings, ScriptedProvider(()), *arguments)
+
+    assert events == [f"agent.{method}", "manager.shutdown", "connection.close"]
+
+
+def test_production_lead_rejects_database_query_but_sql_worker_keeps_it(settings) -> None:
+    protector = RecordingProtector()
+    lead = api_module.build_services(settings, ScriptedProvider(()), protector)
+    try:
+        project = lead.projects.create("Role boundary")
+        task = lead.tasks.create(project.id, "No direct SQL")
+        lead_names = {schema.name for schema in lead.tools.schemas()}
+        assert "query_database" not in lead_names
+        rejected = lead.tools.execute(
+            ToolCall("lead-query", "query_database", {"data_source_id": "source", "sql": "SELECT 1"}),
+            ToolContext(project.id, task.id),
+        )
+        assert rejected.error_category == "unknown_tool"
+
+        worker = api_module.build_services(
+            settings, secret_protector=protector, with_team_manager=False,
+        )
+        try:
+            assert "query_database" in {schema.name for schema in worker.tools.schemas()}
+        finally:
+            worker.connection.close()
+    finally:
+        lead.team_manager.shutdown()  # type: ignore[union-attr]
+        lead.connection.close()
+
+
+def test_explicit_teammate_provider_factory_creates_fresh_workers_without_model_config(settings) -> None:
+    created: list[ScriptedProvider] = []
+
+    def teammate_provider_factory() -> ScriptedProvider:
+        provider = ScriptedProvider([ModelResponse('{"summary":"done"}', ())])
+        created.append(provider)
+        return provider
+
+    app = create_app(
+        settings,
+        secret_protector=RecordingProtector(),
+        teammate_provider_factory=teammate_provider_factory,
+    )
+    services = app.state.services
+    try:
+        project = services.projects.create("Factory")
+        task = services.tasks.create(project.id, "Delegate")
+        first = services.team_manager.spawn(task.id, AgentRole.KNOWLEDGE, "One")  # type: ignore[union-attr]
+        second = services.team_manager.spawn(task.id, AgentRole.REPORT, "Two")  # type: ignore[union-attr]
+        completed = services.team_manager.await_runs((first.id, second.id), 2)  # type: ignore[union-attr]
+        assert {run.status for run in completed} == {AgentRunStatus.COMPLETED}
+        assert len(created) == 2
+        assert created[0] is not created[1]
+    finally:
+        services.team_manager.shutdown()  # type: ignore[union-attr]
+        services.connection.close()
 
 
 class RecordingProtector:
@@ -80,6 +376,57 @@ def test_events_endpoint_replays_after_sequence(api_client) -> None:
     assert "id: 2" in response.text
     assert "event: plan.updated" in response.text
     assert "id: 1" not in response.text
+
+
+def test_agents_endpoint_exposes_safe_state_and_lifecycle_events(settings) -> None:
+    app = create_app(
+        settings,
+        teammate_provider_factory=lambda: ScriptedProvider(
+            [ModelResponse(text='{"summary":"Profit is revenue minus cost"}', tool_calls=())]
+        ),
+    )
+    services = app.state.services
+    try:
+        project = services.projects.create("Agent visibility")
+        task = services.tasks.create(project.id, "Delegate a safe SQL summary")
+        run = services.team_manager.spawn(task.id, AgentRole.SQL, "Aggregate profit")  # type: ignore[union-attr]
+        services.team_manager.await_runs((run.id,), 2)  # type: ignore[union-attr]
+
+        with TestClient(app) as client:
+            response = client.get(f"/api/tasks/{task.id}/agents")
+            events = client.get(f"/api/tasks/{task.id}/events").text
+
+        assert response.status_code == 200
+        assert response.json() == [
+            {
+                "id": run.id,
+                "task_id": task.id,
+                "role": "sql",
+                "objective": "Aggregate profit",
+                "status": "completed",
+                "result_summary": "Profit is revenue minus cost",
+                "error_category": None,
+                "created_at": response.json()[0]["created_at"],
+                "started_at": response.json()[0]["started_at"],
+                "completed_at": response.json()[0]["completed_at"],
+            }
+        ]
+        assert "messages" not in response.text
+        assert "credentials" not in response.text
+        assert 'event: agent.created' in events
+        assert 'event: agent.state' in events
+        assert 'event: agent.message' in events
+        assert 'event: agent.completed' in events
+        assert events.index('event: agent.created') < events.index('event: agent.completed')
+        assert run.id in events
+    finally:
+        services.team_manager.shutdown()  # type: ignore[union-attr]
+        services.connection.close()
+
+
+def test_agents_endpoint_returns_not_found_for_unknown_task(api_client) -> None:
+    response = api_client.get("/api/tasks/missing-task/agents")
+    assert response.status_code == 404
 
 
 def test_completed_task_accepts_follow_up_after_application_restart(settings) -> None:
@@ -232,7 +579,7 @@ def test_builtin_model_configuration_rejects_endpoint_override(settings) -> None
         )
 
         assert response.status_code == 422
-        assert "official Base URL" in response.json()["detail"]
+        assert response.json() == {"detail": "Invalid model configuration"}
 
 
 def test_unconfigured_task_is_rejected_before_creation(settings) -> None:
@@ -398,3 +745,141 @@ def test_unavailable_secret_storage_returns_service_unavailable(settings) -> Non
 
         assert response.status_code == 503
         assert response.json()["detail"] == "Secure storage is unavailable"
+
+
+def test_secret_storage_error_never_reflects_secret(settings) -> None:
+    secret = "postgresql://analyst:password@host/ciphertext"
+
+    class SecretProtector:
+        def protect(self, value: str) -> bytes:
+            raise SecretStorageUnavailable(secret)
+
+        def unprotect(self, value: bytes) -> str:
+            return value.decode()
+
+    with TestClient(create_app(settings, secret_protector=SecretProtector())) as client:
+        response = client.put(
+            "/api/model-config",
+            json={"provider": "openai", "model": "gpt-5.6-terra", "api_key": "key"},
+        )
+
+    assert response.status_code == 503
+    assert secret not in response.text
+    assert response.json() == {"detail": "Secure storage is unavailable"}
+
+
+def test_data_source_api_never_returns_dsn(settings) -> None:
+    with TestClient(
+        create_app(settings, secret_protector=RecordingProtector())
+    ) as client:
+        project = client.post("/api/projects", json={"name": "Review"}).json()
+
+        response = client.post(
+            f"/api/projects/{project['id']}/data-sources",
+            json={
+                "name": "Warehouse",
+                "dsn": "postgresql://analyst:secret@localhost/portfolio",
+            },
+        )
+
+        assert response.status_code == 201
+        assert "dsn" not in response.json()
+        assert "secret" not in response.text
+        assert client.get(
+            f"/api/projects/{project['id']}/data-sources"
+        ).json() == [response.json()]
+
+
+def test_data_source_policy_and_schema_apis_are_project_scoped(settings) -> None:
+    app = create_app(settings, secret_protector=RecordingProtector())
+
+    class SchemaDriver:
+        def inspect_schema(self, dsn: str):
+            assert "secret" not in dsn
+            return {"orders": ("region", "amount")}
+
+    app.state.services.sql_gateway.driver = SchemaDriver()
+    with TestClient(app) as client:
+        project = client.post("/api/projects", json={"name": "Review"}).json()
+        source = client.post(
+            f"/api/projects/{project['id']}/data-sources",
+            json={"name": "Warehouse", "dsn": "postgresql://localhost/portfolio"},
+        ).json()
+
+        policy = client.put(
+            f"/api/data-sources/{source['id']}/policies",
+            json={"rules": [{"table": "orders", "column": None, "access": "allowed"}]},
+        )
+
+        assert policy.status_code == 200
+        assert policy.json()["version"] == 2
+        current_policy = client.get(
+            f"/api/data-sources/{source['id']}/policies"
+        )
+        assert current_policy.status_code == 200
+        assert current_policy.json() == {
+            "data_source_id": source["id"],
+            "version": 2,
+            "rules": [
+                {"table": "orders", "column": None, "access": "allowed"}
+            ],
+        }
+        assert "postgresql://" not in current_policy.text
+        schema = client.get(f"/api/data-sources/{source['id']}/schema")
+        assert schema.status_code == 200
+        assert schema.json()["tables"] == {"orders": ["region", "amount"]}
+        assert "postgresql://" not in schema.text
+
+
+def test_data_source_api_validation_never_reflects_sensitive_input(settings) -> None:
+    secret = "postgresql://analyst:password@host/secret-db"
+    with TestClient(create_app(settings, secret_protector=RecordingProtector())) as client:
+        project = client.post("/api/projects", json={"name": "Review"}).json()
+        response = client.post(
+            f"/api/projects/{project['id']}/data-sources",
+            json={"name": "Warehouse", "dsn": secret * 200, "password": secret},
+        )
+
+    assert response.status_code == 422
+    assert secret not in response.text
+    assert response.json() == {"detail": "Invalid request", "error_count": 2}
+
+
+def test_api_validation_never_reflects_a_sensitive_extra_field_name(settings) -> None:
+    secret_key = "postgresql://analyst:password@host/ciphertext"
+    with TestClient(create_app(settings, secret_protector=RecordingProtector())) as client:
+        project = client.post("/api/projects", json={"name": "Review"}).json()
+        response = client.post(
+            f"/api/projects/{project['id']}/data-sources",
+            json={"name": "Warehouse", "dsn": "postgresql://localhost/review", secret_key: "x"},
+        )
+
+    assert response.status_code == 422
+    assert secret_key not in response.text
+    assert response.json() == {"detail": "Invalid request", "error_count": 1}
+
+
+def test_model_configuration_error_never_reflects_model_input(settings) -> None:
+    secret = "postgresql://analyst:password@host/ciphertext"
+    with TestClient(create_app(settings, secret_protector=RecordingProtector())) as client:
+        response = client.put(
+            "/api/model-config",
+            json={"provider": "openai", "model": secret, "api_key": "key"},
+        )
+
+    assert response.status_code == 422
+    assert secret not in response.text
+    assert response.json() == {"detail": "Invalid model configuration"}
+
+
+def test_missing_data_source_uses_fixed_404_without_identifier(settings) -> None:
+    hostile_id = "source-password-ciphertext"
+    with TestClient(create_app(settings, secret_protector=RecordingProtector())) as client:
+        for response in (
+            client.put(f"/api/data-sources/{hostile_id}/policies", json={"rules": []}),
+            client.get(f"/api/data-sources/{hostile_id}/policies"),
+            client.get(f"/api/data-sources/{hostile_id}/schema"),
+        ):
+            assert response.status_code == 404
+            assert response.json() == {"detail": "Data source not found"}
+            assert hostile_id not in response.text

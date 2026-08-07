@@ -1,23 +1,35 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Annotated, Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from data_analysis_agent.datasets import DatasetService
 from data_analysis_agent.domain import ArtifactType, PlanStepDraft, TaskStatus
-from data_analysis_agent.execution import DuckDBExecutor, PythonExecutor
+from data_analysis_agent.execution import DuckDBExecutor, PythonExecutor, QueryTimeoutError
 from data_analysis_agent.permissions import (
     ApprovalRepository,
     PermissionLevel,
     PermissionPolicy,
     ToolAction,
 )
+from data_analysis_agent.postgres import SqlSafetyGateway
 from data_analysis_agent.reporting import ReportService
-from data_analysis_agent.repositories import ArtifactRepository, TaskRepository
+from data_analysis_agent.repositories import (
+    ArtifactRepository,
+    RecordNotFoundError,
+    TaskRepository,
+)
 from data_analysis_agent.workspace import WorkspaceService
+from data_analysis_agent.team_types import AgentRole
+
+if TYPE_CHECKING:
+    from data_analysis_agent.team import TeamManager, TeamRepository
+    from data_analysis_agent.tracing import TraceRecorder
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +50,9 @@ class ToolSchema:
 class ToolContext:
     project_id: str
     task_id: str
+    agent_id: str | None = None
+    run_id: str | None = None
+    parent_event_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,11 +82,13 @@ class ToolHandlerError(RuntimeError):
         category: str = "tool_error",
         retryable: bool = True,
         diagnostics: dict[str, Any] | None = None,
+        pauses_task: bool = False,
     ) -> None:
         super().__init__(message)
         self.category = category
         self.retryable = retryable
         self.diagnostics = diagnostics
+        self.pauses_task = pauses_task
 
 
 class ToolInput(BaseModel):
@@ -90,6 +107,11 @@ class InspectDatasetInput(ToolInput):
 class QueryDataInput(ToolInput):
     sql: str = Field(min_length=1)
     bindings: dict[str, str]
+
+
+class QueryDatabaseInput(ToolInput):
+    data_source_id: str
+    sql: str = Field(min_length=1, max_length=50_000)
 
 
 class RunPythonInput(ToolInput):
@@ -118,6 +140,20 @@ class RequestUserInputInput(ToolInput):
     question: str = Field(min_length=1)
 
 
+class SpawnTeammateInput(ToolInput):
+    role: AgentRole
+    objective: str = Field(min_length=1, max_length=2_000)
+
+
+class AwaitTeammatesInput(ToolInput):
+    agent_ids: list[Annotated[str, Field(min_length=1, max_length=128)]] = Field(min_length=1, max_length=3)
+    timeout_seconds: int = Field(default=30, ge=1, le=120)
+
+
+class CancelTeammateInput(ToolInput):
+    agent_id: str = Field(min_length=1, max_length=128)
+
+
 Handler = Callable[[ToolInput, ToolContext], HandlerResult]
 
 
@@ -143,6 +179,12 @@ class ToolRegistry:
         self._approvals = approvals
         self._tasks = tasks
         self._artifacts = artifacts
+        self._team_coordinator: dict[str, Any] | None = None
+
+    def configure_team(self, manager: "TeamManager", repository: "TeamRepository") -> None:
+        if self._team_coordinator is None:
+            self._team_coordinator = {}
+        self._team_coordinator.update({"manager": manager, "repository": repository})
 
     def schemas(self) -> tuple[ToolSchema, ...]:
         return tuple(
@@ -152,6 +194,17 @@ class ToolRegistry:
                 input_schema=definition.input_model.model_json_schema(),
             )
             for definition in self._definitions.values()
+        )
+
+    def restrict(self, allowed_names: frozenset[str] | set[str]) -> "ToolRegistry":
+        """Return an independently scoped view sharing the same backing services."""
+        allowed = frozenset(allowed_names)
+        return ToolRegistry(
+            tuple(definition for name, definition in self._definitions.items() if name in allowed),
+            self._permission_policy,
+            self._approvals,
+            self._tasks,
+            self._artifacts,
         )
 
     def execute(self, call: ToolCall, context: ToolContext) -> ToolResult:
@@ -175,7 +228,24 @@ class ToolRegistry:
                 error_category="validation_error",
                 message="Tool arguments did not match the schema",
                 retryable=True,
-                diagnostics={"errors": exc.errors(include_url=False)},
+                diagnostics={
+                    "error_count": len(exc.errors()),
+                    "types": ["validation_error"],
+                },
+            )
+
+        try:
+            task = self._tasks.get(context.task_id)
+        except RecordNotFoundError:
+            task = None
+        if task is None or task.project_id != context.project_id:
+            return ToolResult(
+                call_id=call.id,
+                success=False,
+                output={},
+                error_category="project_scope_denied",
+                message="Task does not belong to the requested project",
+                retryable=False,
             )
 
         normalized_arguments = arguments.model_dump(mode="json")
@@ -222,7 +292,7 @@ class ToolRegistry:
         execution_id = self._tasks.start_tool_execution(
             context.task_id,
             call.name,
-            normalized_arguments,
+            _audit_arguments(call.name, normalized_arguments),
         )
         self._tasks.append_event(
             context.task_id,
@@ -249,11 +319,13 @@ class ToolRegistry:
                 pauses_task=handled.pauses_task,
             )
         except ToolHandlerError as exc:
+            category = _safe_tool_category(exc.category)
+            message = _public_tool_message(category)
             self._tasks.finish_tool_execution(
                 execution_id,
                 "failed",
-                exc.category,
-                str(exc),
+                category,
+                message,
             )
             self._tasks.append_event(
                 context.task_id,
@@ -261,24 +333,25 @@ class ToolRegistry:
                 {
                     "execution_id": execution_id,
                     "tool_name": call.name,
-                    "error_category": exc.category,
+                    "error_category": category,
                 },
             )
             return ToolResult(
                 call_id=call.id,
                 success=False,
                 output={},
-                error_category=exc.category,
-                message=str(exc),
+                error_category=category,
+                message=message,
                 retryable=exc.retryable,
-                diagnostics=exc.diagnostics,
+                diagnostics=_safe_tool_diagnostics(category),
+                pauses_task=exc.pauses_task,
             )
-        except Exception as exc:
+        except Exception:
             self._tasks.finish_tool_execution(
                 execution_id,
                 "failed",
-                "tool_error",
-                str(exc),
+                "internal_tool_error",
+                "The tool could not be completed safely",
             )
             self._tasks.append_event(
                 context.task_id,
@@ -286,15 +359,15 @@ class ToolRegistry:
                 {
                     "execution_id": execution_id,
                     "tool_name": call.name,
-                    "error_category": "tool_error",
+                    "error_category": "internal_tool_error",
                 },
             )
             return ToolResult(
                 call_id=call.id,
                 success=False,
                 output={},
-                error_category="tool_error",
-                message=str(exc),
+                error_category="internal_tool_error",
+                message="The tool could not be completed safely",
                 retryable=True,
             )
 
@@ -315,7 +388,48 @@ def build_tool_registry(
     tasks: TaskRepository,
     permission_policy: PermissionPolicy,
     approvals: ApprovalRepository,
+    sql_gateway: SqlSafetyGateway | None = None,
+    trace_recorder: "TraceRecorder | None" = None,
+    include_coordination_tools: bool = False,
+    include_database_query: bool = True,
 ) -> ToolRegistry:
+    coordinator: dict[str, Any] = {}
+
+    def trace_sql(
+        context: ToolContext,
+        event_type: str,
+        status: str,
+        payload: dict[str, Any],
+        *,
+        artifact_ids: tuple[str, ...] = (),
+        error_category: str | None = None,
+    ) -> None:
+        if trace_recorder is None or context.run_id is None:
+            return
+        from data_analysis_agent.tracing import TraceContext
+        try:
+            trace_recorder.event(
+                TraceContext(
+                    context.run_id,
+                    context.task_id,
+                    agent_id=context.agent_id,
+                    parent_event_id=context.parent_event_id,
+                ),
+                event_type,
+                status,
+                payload,
+                artifact_ids=artifact_ids,
+                error_category=error_category,
+            )
+        except Exception:
+            try:
+                tasks.append_event(
+                    context.task_id,
+                    "trace.recording_failed",
+                    {"event_type": event_type, "agent_id": context.agent_id},
+                )
+            except Exception:
+                pass
     def inspect_workspace(
         arguments: ToolInput,
         context: ToolContext,
@@ -356,11 +470,18 @@ def build_tool_registry(
     def query_data(arguments: ToolInput, context: ToolContext) -> HandlerResult:
         assert isinstance(arguments, QueryDataInput)
         _ensure_running(tasks, context.task_id)
-        result = duckdb_executor.query(
-            context.project_id,
-            arguments.sql,
-            arguments.bindings,
-        )
+        try:
+            result = duckdb_executor.query(
+                context.project_id,
+                arguments.sql,
+                arguments.bindings,
+            )
+        except QueryTimeoutError as exc:
+            raise ToolHandlerError(
+                "DuckDB query exceeded its time limit",
+                category="query_timeout",
+                retryable=True,
+            ) from exc
         artifact_ids = (result.artifact.id,) if result.artifact else ()
         return HandlerResult(
             {
@@ -370,6 +491,98 @@ def build_tool_registry(
                 "artifact_id": result.artifact.id if result.artifact else None,
             },
             artifact_ids,
+        )
+
+    def query_database(arguments: ToolInput, context: ToolContext) -> HandlerResult:
+        assert isinstance(arguments, QueryDatabaseInput)
+        if sql_gateway is None:
+            raise ToolHandlerError(
+                "PostgreSQL analysis is not configured",
+                category="database_unavailable",
+                retryable=False,
+            )
+        _ensure_running(tasks, context.task_id)
+        outcome = sql_gateway.execute(
+            context.task_id,
+            context.project_id,
+            arguments.data_source_id,
+            arguments.sql,
+        )
+        if outcome.query_hash is not None:
+            trace_sql(
+                context,
+                "sql.validated",
+                "completed",
+                {"sql_hash": outcome.query_hash},
+            )
+        if outcome.risk is not None:
+            trace_sql(
+                context,
+                "sql.explained",
+                "completed",
+                {
+                    "sql_hash": outcome.query_hash,
+                    "risk": outcome.risk.level,
+                    "total_cost": outcome.risk.total_cost,
+                    "estimated_rows": outcome.risk.estimated_rows,
+                },
+            )
+        if outcome.status == "approval_required":
+            trace_sql(
+                context,
+                "approval.required",
+                "waiting",
+                {"approval_id": outcome.approval_id, "sql_hash": outcome.query_hash},
+            )
+        elif outcome.status == "succeeded":
+            trace_sql(
+                context,
+                "sql.executed",
+                "completed",
+                {
+                    "sql_hash": outcome.query_hash,
+                    "row_count": outcome.row_count,
+                    "risk": outcome.risk.level if outcome.risk else None,
+                },
+                artifact_ids=(outcome.artifact_id,) if outcome.artifact_id else (),
+            )
+        else:
+            trace_sql(
+                context,
+                "sql.executed",
+                "failed",
+                {"sql_hash": outcome.query_hash, "status": outcome.status},
+                error_category=outcome.error_category,
+            )
+        if outcome.status == "succeeded":
+            return HandlerResult(
+                {
+                    "status": outcome.status,
+                    "preview": list(outcome.preview),
+                    "row_count": outcome.row_count,
+                    "risk": outcome.risk.level if outcome.risk else None,
+                    "query_hash": outcome.query_hash,
+                    "artifact_id": outcome.artifact_id,
+                },
+                (outcome.artifact_id,) if outcome.artifact_id else (),
+            )
+        if outcome.status == "approval_required":
+            raise ToolHandlerError(
+                outcome.message or "PostgreSQL query requires approval",
+                category="approval_required",
+                retryable=False,
+                pauses_task=True,
+            )
+        if outcome.status == "denied":
+            raise ToolHandlerError(
+                outcome.message or "PostgreSQL query was denied",
+                category=outcome.error_category or "database_denied",
+                retryable=False,
+            )
+        raise ToolHandlerError(
+            outcome.message or "PostgreSQL query could not be completed",
+            category=outcome.error_category or "database_error",
+            retryable=outcome.retryable,
         )
 
     def run_python(arguments: ToolInput, context: ToolContext) -> HandlerResult:
@@ -468,6 +681,59 @@ def build_tool_registry(
             pauses_task=True,
         )
 
+    def _owned_run(agent_id: str, context: ToolContext):
+        repository = coordinator["repository"]
+        try:
+            run = repository.get_run(agent_id)
+        except KeyError:
+            raise ToolHandlerError("Teammate was not found", category="permission_denied", retryable=False) from None
+        if run.task_id != context.task_id:
+            raise ToolHandlerError("Teammate does not belong to this task", category="permission_denied", retryable=False)
+        return run
+
+    def spawn_teammate(arguments: ToolInput, context: ToolContext) -> HandlerResult:
+        from data_analysis_agent.team import AgentRole, TeamCapacityError
+        from data_analysis_agent.tracing import TraceContext
+        assert isinstance(arguments, SpawnTeammateInput)
+        try:
+            trace_context = (
+                TraceContext(
+                    context.run_id, context.task_id, agent_id=context.agent_id,
+                    parent_event_id=context.parent_event_id,
+                )
+                if context.run_id else None
+            )
+            if trace_context is None:
+                run = coordinator["manager"].spawn(
+                    context.task_id, arguments.role, arguments.objective
+                )
+            else:
+                run = coordinator["manager"].spawn(
+                    context.task_id, arguments.role, arguments.objective,
+                    trace_context=trace_context,
+                )
+        except (ValueError, TeamCapacityError):
+            raise ToolHandlerError("Teammate capacity is unavailable", category="permission_denied", retryable=False) from None
+        return HandlerResult({"agent_id": run.id, "role": run.role.value, "status": run.status.value})
+
+    def list_teammates(arguments: ToolInput, context: ToolContext) -> HandlerResult:
+        del arguments
+        runs = coordinator["manager"].list(context.task_id)
+        return HandlerResult({"agents": [_safe_run(run) for run in runs]})
+
+    def await_teammates(arguments: ToolInput, context: ToolContext) -> HandlerResult:
+        assert isinstance(arguments, AwaitTeammatesInput)
+        for agent_id in arguments.agent_ids:
+            _owned_run(agent_id, context)
+        runs = coordinator["manager"].await_runs(tuple(arguments.agent_ids), arguments.timeout_seconds)
+        return HandlerResult({"agents": [_rich_run(run) for run in runs]})
+
+    def cancel_teammate(arguments: ToolInput, context: ToolContext) -> HandlerResult:
+        assert isinstance(arguments, CancelTeammateInput)
+        _owned_run(arguments.agent_id, context)
+        run = coordinator["manager"].cancel(arguments.agent_id)
+        return HandlerResult({"agent_id": run.id, "status": run.status.value})
+
     definitions = (
         ToolDefinition(
             "inspect_workspace",
@@ -518,7 +784,149 @@ def build_tool_registry(
             request_user_input,
         ),
     )
-    return ToolRegistry(definitions, permission_policy, approvals, tasks, artifacts)
+    if include_database_query:
+        definitions = definitions[:3] + (
+            ToolDefinition(
+                "query_database",
+                "Run a governed, read-only PostgreSQL query against a configured data source.",
+                QueryDatabaseInput,
+                query_database,
+            ),
+        ) + definitions[3:]
+    if include_coordination_tools:
+        definitions += (
+            ToolDefinition("spawn_teammate", "Start one role-scoped teammate.", SpawnTeammateInput, spawn_teammate),
+            ToolDefinition("list_teammates", "List teammates for this task.", ToolInput, list_teammates),
+            ToolDefinition("await_teammates", "Wait briefly for selected teammates.", AwaitTeammatesInput, await_teammates),
+            ToolDefinition("cancel_teammate", "Request cancellation of one teammate.", CancelTeammateInput, cancel_teammate),
+        )
+    registry = ToolRegistry(definitions, permission_policy, approvals, tasks, artifacts)
+    registry._team_coordinator = coordinator
+    return registry
+
+
+def _safe_run(run: Any) -> dict[str, Any]:
+    return {
+        "agent_id": run.id,
+        "role": run.role.value,
+        "status": run.status.value,
+        "result_summary": _result_summary(run.result_json),
+        "error_category": run.error_category,
+    }
+
+
+def _rich_run(run: Any) -> dict[str, Any]:
+    value = _safe_run(run)
+    value["result"] = json.loads(run.result_json) if run.result_json else None
+    value["error"] = run.error_message
+    return value
+
+
+def _result_summary(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    summary = parsed.get("summary") if isinstance(parsed, dict) else None
+    return summary if isinstance(summary, str) else "Teammate completed a structured handoff"
+
+
+_TOOL_PUBLIC_MESSAGES = {
+    "approval_required": "Approval is required",
+    "credential_error": "Data source credentials are unavailable",
+    "policy_denied": "Database query was denied",
+    "resource_not_found": "Database query was denied",
+    "project_scope_denied": "Database query was denied",
+    "unsupported_database": "Database query was denied",
+    "unsafe_statement": "Database query was denied",
+    "read_only_required": "Database query was denied",
+    "parse_error": "Database query was denied",
+    "query_timeout": "Database query could not be completed",
+    "connection_error": "Database query could not be completed",
+}
+
+_TOOL_CATEGORIES = frozenset(
+    {
+        "approval_required",
+        "approval_rejected",
+        "credential_error",
+        "policy_denied",
+        "resource_not_found",
+        "project_scope_denied",
+        "unsupported_database",
+        "unsafe_statement",
+        "read_only_required",
+        "parse_error",
+        "exactly_one_statement",
+        "unresolved_table",
+        "unresolved_column",
+        "ambiguous_column",
+        "unresolved_star",
+        "qualified_table_not_allowed",
+        "unsafe_function",
+        "unsafe_cast",
+        "extreme_query_risk",
+        "query_budget_exhausted",
+        "query_timeout",
+        "connection_error",
+        "explain_error",
+        "query_error",
+        "result_limit",
+        "result_serialization_error",
+        "artifact_write_error",
+        "artifact_registration_error",
+        "policy_changed",
+        "permission_denied",
+        "validation_error",
+        "internal_tool_error",
+        "failed",
+        "timed_out",
+    }
+)
+
+_DATABASE_REASON_CODES = frozenset(
+    {
+        "credential_error",
+        "policy_denied",
+        "resource_not_found",
+        "project_scope_denied",
+        "unsupported_database",
+        "unsafe_statement",
+        "read_only_required",
+        "parse_error",
+        "query_timeout",
+        "connection_error",
+    }
+)
+
+
+def _public_tool_message(category: str) -> str:
+    return _TOOL_PUBLIC_MESSAGES.get(category, "Tool failed")
+
+
+def _safe_tool_category(category: str) -> str:
+    return category if category in _TOOL_CATEGORIES else "internal_tool_error"
+
+
+def _safe_tool_diagnostics(category: str) -> dict[str, str] | None:
+    if category in _DATABASE_REASON_CODES:
+        return {"reason_code": category}
+    return None
+
+
+def _audit_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[str, object]:
+    if tool_name != "query_database":
+        return arguments
+    return {
+        "data_source_id_hash": _sha256(str(arguments["data_source_id"])),
+        "sql_hash": _sha256(str(arguments["sql"])),
+    }
+
+
+def _sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _ensure_running(tasks: TaskRepository, task_id: str) -> None:

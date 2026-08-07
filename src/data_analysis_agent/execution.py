@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from threading import Event, Timer
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -54,6 +55,10 @@ class InvalidBindingError(ExecutionError):
     """Raised when a SQL table binding is invalid."""
 
 
+class QueryTimeoutError(ExecutionError):
+    """Raised when a bounded local query exceeds its deadline."""
+
+
 class UnsafePythonError(ExecutionError):
     """Raised when generated Python requests a prohibited capability."""
 
@@ -83,9 +88,13 @@ class DuckDBExecutor:
         self,
         workspace: WorkspaceService,
         artifacts: ArtifactRepository,
+        timeout_seconds: float = 30,
     ) -> None:
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
         self._workspace = workspace
         self._artifacts = artifacts
+        self._timeout_seconds = timeout_seconds
 
     def query(
         self,
@@ -111,9 +120,27 @@ class DuckDBExecutor:
                 _register_dataset(connection, table_name, artifact.path)
                 input_artifact_ids.append(artifact.id)
 
-            cursor = connection.execute(sql)
-            columns = tuple(item[0] for item in (cursor.description or ()))
-            rows = cursor.fetchall()
+            deadline_expired = Event()
+
+            def interrupt_query() -> None:
+                deadline_expired.set()
+                connection.interrupt()
+
+            watchdog = Timer(self._timeout_seconds, interrupt_query)
+            watchdog.daemon = True
+            watchdog.start()
+            try:
+                cursor = connection.execute(sql)
+                columns = tuple(item[0] for item in (cursor.description or ()))
+                rows = cursor.fetchall()
+            except Exception as exc:
+                if deadline_expired.is_set():
+                    raise QueryTimeoutError(
+                        f"DuckDB query exceeded the {self._timeout_seconds}-second time limit"
+                    ) from exc
+                raise
+            finally:
+                watchdog.cancel()
             preview = tuple(
                 {
                     column: _json_scalar(value)

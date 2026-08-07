@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
 
-from data_analysis_agent.db import utc_now
+from data_analysis_agent.db import sqlite_connection_lock, utc_now
 
 
 AUTOMATIC_TOOLS = frozenset(
@@ -17,11 +16,16 @@ AUTOMATIC_TOOLS = frozenset(
         "inspect_workspace",
         "inspect_dataset",
         "query_data",
+        "query_database",
         "run_python",
         "save_artifact",
         "write_report",
         "update_plan",
         "request_user_input",
+        "spawn_teammate",
+        "list_teammates",
+        "await_teammates",
+        "cancel_teammate",
     }
 )
 
@@ -33,9 +37,6 @@ APPROVAL_TOOLS = frozenset(
         "overwrite_artifact",
     }
 )
-
-READ_ONLY_SQL_PREFIXES = frozenset({"select", "with", "describe", "summarize", "explain"})
-
 
 class PermissionLevel(StrEnum):
     ALLOW = "allow"
@@ -66,6 +67,13 @@ class Approval:
     decided_at: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class ApprovalResolution:
+    status: str
+    approval: Approval
+    created: bool = False
+
+
 class PermissionError(RuntimeError):
     """Base error for permission and approval operations."""
 
@@ -84,13 +92,6 @@ class PermissionPolicy:
             return PermissionDecision(
                 PermissionLevel.DENY,
                 "Source datasets are immutable",
-            )
-        if action.tool_name == "query_data" and not _is_read_only_sql(
-            str(action.arguments.get("sql", "SELECT 1"))
-        ):
-            return PermissionDecision(
-                PermissionLevel.DENY,
-                "Only read-only SQL is allowed",
             )
         if _contains_absolute_path(action.arguments):
             return PermissionDecision(
@@ -122,6 +123,7 @@ class ApprovalRepository:
     def __init__(self, connection: sqlite3.Connection) -> None:
         connection.row_factory = sqlite3.Row
         self._connection = connection
+        self._lock = sqlite_connection_lock(connection)
 
     def request(
         self,
@@ -129,76 +131,128 @@ class ApprovalRepository:
         action: ToolAction,
         reason: str,
     ) -> Approval:
-        approval = Approval(
-            id=str(uuid4()),
-            task_id=task_id,
-            action=action,
-            reason=reason.strip(),
-            status="pending",
-            created_at=utc_now(),
-            decided_at=None,
-        )
-        self._connection.execute(
-            "INSERT INTO approvals("
-            "id, task_id, action_json, reason, status, created_at, decided_at"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                approval.id,
-                approval.task_id,
-                _action_json(action),
-                approval.reason,
-                approval.status,
-                approval.created_at,
-                approval.decided_at,
-            ),
-        )
-        self._connection.commit()
-        return approval
+        with self._lock:
+            approval = _pending_approval(task_id, action, reason)
+            _insert_approval(self._connection, approval)
+            self._connection.commit()
+            return approval
 
     def get(self, approval_id: str) -> Approval:
-        row = self._connection.execute(
-            "SELECT * FROM approvals WHERE id = ?",
-            (approval_id,),
-        ).fetchone()
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM approvals WHERE id = ?",
+                (approval_id,),
+            ).fetchone()
         if row is None:
             raise ApprovalNotFound(approval_id)
         return _approval_from_row(row)
 
+    def list_for_task(self, task_id: str) -> tuple[Approval, ...]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM approvals WHERE task_id = ? ORDER BY created_at, rowid",
+                (task_id,),
+            ).fetchall()
+        return tuple(_approval_from_row(row) for row in rows)
+
+    def resolve_once(
+        self,
+        task_id: str,
+        action: ToolAction,
+        reason: str,
+    ) -> ApprovalResolution:
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                resolution = self.resolve_once_in_transaction(task_id, action, reason)
+                self._connection.commit()
+                return resolution
+            except Exception:
+                self._connection.rollback()
+                raise
+
+    def resolve_once_in_transaction(
+        self,
+        task_id: str,
+        action: ToolAction,
+        reason: str,
+    ) -> ApprovalResolution:
+        """Resolve an approval without committing the caller-owned transaction."""
+        with self._lock:
+            if not self._connection.in_transaction:
+                raise RuntimeError("approval resolution requires an active transaction")
+            rows = self._connection.execute(
+                "SELECT * FROM approvals "
+                "WHERE task_id = ? AND action_json = ? "
+                "ORDER BY created_at, rowid",
+                (task_id, _action_json(action)),
+            ).fetchall()
+            approved = next(
+                (row for row in rows if row["status"] == "approved"), None
+            )
+            if approved is not None:
+                cursor = self._connection.execute(
+                    "UPDATE approvals SET status = 'consumed' "
+                    "WHERE id = ? AND status = 'approved'",
+                    (approved["id"],),
+                )
+                if cursor.rowcount == 1:
+                    return ApprovalResolution(
+                        "authorized",
+                        replace(_approval_from_row(approved), status="consumed"),
+                    )
+            pending = next(
+                (row for row in rows if row["status"] == "pending"), None
+            )
+            if pending is not None:
+                return ApprovalResolution("pending", _approval_from_row(pending))
+            rejected = next(
+                (row for row in reversed(rows) if row["status"] == "rejected"),
+                None,
+            )
+            if rejected is not None:
+                return ApprovalResolution("rejected", _approval_from_row(rejected))
+            approval = _pending_approval(task_id, action, reason)
+            _insert_approval(self._connection, approval)
+            return ApprovalResolution("pending", approval, created=True)
+
     def decide(self, approval_id: str, approved: bool) -> Approval:
-        decided_at = utc_now()
-        status = "approved" if approved else "rejected"
-        cursor = self._connection.execute(
-            "UPDATE approvals SET status = ?, decided_at = ? "
-            "WHERE id = ? AND status = 'pending'",
-            (status, decided_at, approval_id),
-        )
-        self._connection.commit()
-        if cursor.rowcount == 0:
-            existing = self._connection.execute(
-                "SELECT status FROM approvals WHERE id = ?",
-                (approval_id,),
-            ).fetchone()
-            if existing is None:
-                raise ApprovalNotFound(approval_id)
-            raise ApprovalAlreadyDecided(approval_id)
-        return self.get(approval_id)
+        with self._lock:
+            decided_at = utc_now()
+            status = "approved" if approved else "rejected"
+            cursor = self._connection.execute(
+                "UPDATE approvals SET status = ?, decided_at = ? "
+                "WHERE id = ? AND status = 'pending'",
+                (status, decided_at, approval_id),
+            )
+            self._connection.commit()
+            if cursor.rowcount == 0:
+                existing = self._connection.execute(
+                    "SELECT status FROM approvals WHERE id = ?",
+                    (approval_id,),
+                ).fetchone()
+                if existing is None:
+                    raise ApprovalNotFound(approval_id)
+                raise ApprovalAlreadyDecided(approval_id)
+            return self.get(approval_id)
 
     def consume_approved(self, task_id: str, action: ToolAction) -> bool:
-        row = self._connection.execute(
-            "SELECT id FROM approvals "
-            "WHERE task_id = ? AND action_json = ? AND status = 'approved' "
-            "ORDER BY created_at, rowid LIMIT 1",
-            (task_id, _action_json(action)),
-        ).fetchone()
-        if row is None:
-            return False
-        cursor = self._connection.execute(
-            "UPDATE approvals SET status = 'consumed' "
-            "WHERE id = ? AND status = 'approved'",
-            (row["id"],),
-        )
-        self._connection.commit()
-        return cursor.rowcount == 1
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT id FROM approvals "
+                "WHERE task_id = ? AND action_json = ? AND status = 'approved' "
+                "ORDER BY created_at, rowid LIMIT 1",
+                (task_id, _action_json(action)),
+            ).fetchone()
+            if row is None:
+                return False
+            cursor = self._connection.execute(
+                "UPDATE approvals SET status = 'consumed' "
+                "WHERE id = ? AND status = 'approved'",
+                (row["id"],),
+            )
+            self._connection.commit()
+            return cursor.rowcount == 1
 
 
 def _declares_source_mutation(arguments: dict[str, Any]) -> bool:
@@ -221,6 +275,42 @@ def _action_json(action: ToolAction) -> str:
     )
 
 
+def _pending_approval(
+    task_id: str,
+    action: ToolAction,
+    reason: str,
+) -> Approval:
+    return Approval(
+        id=str(uuid4()),
+        task_id=task_id,
+        action=action,
+        reason=reason.strip(),
+        status="pending",
+        created_at=utc_now(),
+        decided_at=None,
+    )
+
+
+def _insert_approval(
+    connection: sqlite3.Connection,
+    approval: Approval,
+) -> None:
+    connection.execute(
+        "INSERT INTO approvals("
+        "id, task_id, action_json, reason, status, created_at, decided_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            approval.id,
+            approval.task_id,
+            _action_json(approval.action),
+            approval.reason,
+            approval.status,
+            approval.created_at,
+            approval.decided_at,
+        ),
+    )
+
+
 def _contains_absolute_path(arguments: dict[str, Any]) -> bool:
     for key, value in arguments.items():
         if "path" not in key.lower() or not isinstance(value, str):
@@ -228,15 +318,6 @@ def _contains_absolute_path(arguments: dict[str, Any]) -> bool:
         if Path(value).is_absolute():
             return True
     return False
-
-
-def _is_read_only_sql(sql: str) -> bool:
-    without_comments = re.sub(r"/\*.*?\*/|--[^\r\n]*", " ", sql, flags=re.DOTALL)
-    statements = [part.strip() for part in without_comments.split(";") if part.strip()]
-    if len(statements) != 1:
-        return False
-    first_word = statements[0].split(maxsplit=1)[0].lower()
-    return first_word in READ_ONLY_SQL_PREFIXES
 
 
 def _approval_from_row(row: sqlite3.Row) -> Approval:

@@ -54,6 +54,40 @@ export interface TaskDetail extends Task {
   artifacts: Artifact[];
 }
 
+export interface AgentRun {
+  id: string;
+  task_id: string;
+  role: "knowledge" | "sql" | "report" | "curator";
+  objective: string;
+  status: "created" | "working" | "waiting" | "completed" | "failed" | "cancelled";
+  result_summary: string | null;
+  error_category: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export type AccessLevel = "allowed" | "approval_required" | "denied";
+export interface DataSource { id: string; project_id: string; name: string; dialect: "postgres"; policy_version: number; created_at: string; updated_at: string; }
+export interface PolicyRule { table: string; column: string | null; access: AccessLevel; }
+export interface PolicySnapshot { data_source_id: string; version: number; rules: PolicyRule[]; }
+export interface DatabaseSchema { tables: Record<string, string[]>; }
+
+export interface AnalysisRun {
+  id: string; task_id: string; status: "running" | "completed" | "failed" | "cancelled";
+  accepted: boolean; started_at: string; completed_at: string | null; error_category: string | null;
+}
+export interface TraceEvent {
+  id: string; run_id: string; task_id: string; agent_id: string | null; parent_event_id: string | null;
+  sequence: number; event_type: string; status: string; payload: Record<string, unknown>;
+  duration_ms: number | null; attempt: number; error_category: string | null; artifact_ids: string[];
+}
+export interface SkillCandidate {
+  id: string; source_run_id: string; name: string; version: number; markdown: string;
+  status: "candidate" | "approved" | "rejected"; enabled: boolean; generated_by_model: string;
+  reviewed_at: string | null; created_at: string;
+}
+
 export interface ApprovalDecision {
   id: string;
   status: string;
@@ -72,7 +106,11 @@ export type TaskEventType =
   | "artifact.created"
   | "approval.requested"
   | "approval.decided"
-  | "message.created";
+  | "message.created"
+  | "agent.created"
+  | "agent.state"
+  | "agent.message"
+  | "agent.completed";
 
 export interface TaskEvent {
   sequence: number;
