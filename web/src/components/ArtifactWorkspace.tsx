@@ -17,7 +17,7 @@ interface ArtifactWorkspaceProps {
 }
 
 const TAB_LABELS: Record<WorkspaceTab, string> = {
-  report: "报告", chart: "图表", data: "数据", code: "代码", team: "Agent", trace: "Trace",
+  report: "报告", chart: "图表", data: "数据", code: "代码", team: "Agent", trace: "Trace·Skill",
 };
 const EMPTY_LABELS: Record<ArtifactTab, string> = {
   report: "暂无报告产物", chart: "暂无图表产物", data: "暂无数据产物", code: "暂无代码产物",
@@ -67,6 +67,7 @@ export function ArtifactWorkspace({ task, agents, runs, traceEvents, selectedRun
               <button type="button" className="primary-action" disabled={selectedRun.status !== "completed" || curating}
                 onClick={() => void onAcceptRun(selectedRun.id)}>{curating ? "Curator 处理中" : "接受运行并沉淀 Skill"}</button>}
             {selectedRun.accepted && !candidate && <button type="button" onClick={() => void onSelectRun(selectedRun.id)}>刷新 Candidate</button>}
+            <a className="replay-export" href={`/api/runs/${selectedRun.id}/replay`} target="_blank" rel="noreferrer">完整回放 JSON</a>
           </div>}
           {traceEvents.length ? <TraceTimeline events={traceEvents} /> : <p className="empty-note">选择运行后加载脱敏 Trace。</p>}
           {candidate && <SkillCandidatePanel candidate={candidate} onDecision={onDecideSkill} />}

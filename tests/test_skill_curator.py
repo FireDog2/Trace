@@ -18,12 +18,16 @@ _SAFE = "---\nname: safe-sql-diagnostic\ndescription: Safe read-only SQL analysi
 
 def test_curator_only_accepts_completed_evidenced_runs(db_connection, task) -> None:
     traces = TraceRepository(db_connection); run = traces.start_run(task.id)
-    curator = WorkflowCurator(traces, SkillCandidateRepository(db_connection), ScriptedProvider([ModelResponse(_SAFE, ())]))
+    provider = ScriptedProvider([ModelResponse(_SAFE, ())])
+    curator = WorkflowCurator(traces, SkillCandidateRepository(db_connection), provider)
     with pytest.raises(SkillEligibilityError): curator.create_candidate(run.id, "scripted")
-    traces.append(run.id, task.id, "tool.completed", "completed", {"tool": "query_database"})
+    traces.append(run.id, task.id, "tool.completed", "completed", {"tool": "query_database"}, attempt=2)
     traces.finish_run(run.id, "completed"); traces.accept_run(run.id)
     candidate = curator.create_candidate(run.id, "scripted")
     assert candidate.status == "candidate" and candidate.enabled is False
+    evidence = provider.requests[0].messages[0].content
+    assert '"tool":"query_database"' in evidence
+    assert '"attempt":2' in evidence
 
 @pytest.mark.parametrize("unsafe", ["TODO", "Use password secret", "Automatically bypass approval"])
 def test_static_validator_rejects_unsafe_text(unsafe: str) -> None:

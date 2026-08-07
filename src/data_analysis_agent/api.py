@@ -67,6 +67,7 @@ from data_analysis_agent.tracing import (
     TraceEvent,
     TraceRecorder,
     TraceRepository,
+    redact_payload,
 )
 from data_analysis_agent.skills import (
     CuratorAgent,
@@ -903,6 +904,53 @@ def create_app(
     @app.get("/api/runs/{run_id}/trace", response_model=list[TraceEventResponse])
     def get_trace(run_id: str) -> list[TraceEventResponse]:
         return [_trace_event_response(event) for event in services.traces.events_for_run(run_id)]
+
+    @app.get("/api/runs/{run_id}/replay")
+    def get_replay_bundle(run_id: str) -> dict[str, object]:
+        """Return a safe, self-contained replay manifest without re-executing the run."""
+        run = services.traces.get_run(run_id)
+        task = services.tasks.get(run.task_id)
+        events = services.traces.events_for_run(run_id)
+        agents = tuple(
+            agent for agent in services.team_repository.list_runs(task.id)
+            if agent.trace_run_id == run_id
+        )
+        approvals = services.approvals.list_for_task(task.id)
+        artifacts = services.artifacts.list_for_task(task.id)
+        try:
+            candidate: object = _skill_candidate_response(
+                services.skill_candidates.get_for_run(run_id)
+            )
+        except ValueError:
+            candidate = None
+        sequences = [event.sequence for event in events]
+        return {
+            "schema_version": 1,
+            "run": _analysis_run_response(run),
+            "task": _task_response(task),
+            "trace": [_trace_event_response(event) for event in events],
+            "agents": [_agent_run_response(agent) for agent in agents],
+            "approvals": [{
+                "id": approval.id,
+                "tool_name": approval.action.tool_name,
+                "arguments": redact_payload(approval.action.arguments),
+                "reason": approval.reason,
+                "status": approval.status,
+                "created_at": approval.created_at,
+                "decided_at": approval.decided_at,
+            } for approval in approvals],
+            "artifacts": [_artifact_response(artifact) for artifact in artifacts],
+            "skill_candidate": candidate,
+            "integrity": {
+                "event_count": len(events),
+                "first_sequence": sequences[0] if sequences else None,
+                "last_sequence": sequences[-1] if sequences else None,
+                "sequence_contiguous": sequences == list(range(1, len(sequences) + 1)),
+                "agent_count": len(agents),
+                "approval_count": len(approvals),
+                "artifact_count": len(artifacts),
+            },
+        }
 
     @app.post("/api/runs/{run_id}/accept", response_model=AnalysisRunResponse)
     def accept_trace_run(run_id: str) -> AnalysisRunResponse:

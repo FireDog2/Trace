@@ -322,6 +322,9 @@ describe("analysis workbench", () => {
     });
     expect(await within(workspace).findByText("SQL 校验")).toBeVisible();
     expect(within(workspace).getByRole("button", { name: "接受运行并沉淀 Skill" })).toBeVisible();
+    expect(within(workspace).getByRole("link", { name: "完整回放 JSON" })).toHaveAttribute(
+      "href", "/api/runs/run-1/replay",
+    );
   });
 
   it("sorts final artifacts into accessible tabs and keeps the real link", async () => {

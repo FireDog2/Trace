@@ -728,6 +728,7 @@ h1, h2, h3, p { margin: 0; }
 .trace-timeline li { position: relative; display: grid; grid-template-columns: 36px 1fr; gap: 12px; margin-left: calc(var(--trace-depth) * 14px); padding: 0 0 14px; }.trace-sequence { z-index: 1; padding-top: 3px; background: #fbfcff; color: var(--primary); font: 9px var(--mono); }
 .trace-timeline strong { display: block; font-size: 11px; }.trace-timeline code, .trace-timeline div > span { margin-right: 8px; color: var(--muted); font: 8px var(--mono); }.trace-timeline details { margin-top: 7px; }.trace-timeline summary { color: var(--primary); font: 9px var(--mono); cursor: pointer; }
 .trace-timeline pre, .skill-candidate pre { max-height: 210px; overflow: auto; padding: 10px; border-radius: 7px; background: #eef3fb; font: 9px/1.55 var(--mono); white-space: pre-wrap; }
+.replay-export { margin-left: auto; color: var(--primary); font: 9px var(--mono); text-decoration: none; }.replay-export:hover { text-decoration: underline; }
 .skill-candidate { margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--border); }.skill-candidate h3 { margin: 5px 0; font-size: 14px; }.skill-candidate p { margin: 6px 0; color: var(--muted); font-size: 10px; }.skill-candidate button:not(.primary-action) { margin-left: 8px; padding: 8px 11px; border: 1px solid var(--border-strong); border-radius: 7px; background: #fff; font-size: 10px; }
 
 /* Business knowledge contracts */

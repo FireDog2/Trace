@@ -54,6 +54,11 @@ Return a safe summary.
     task = services.tasks.create(project.id, "Replay safely")
     run = services.traces.start_run(task.id)
     services.trace_recorder.event(TraceContext(run.id, task.id), "tool.completed", "completed", {"dsn": "postgresql://secret", "row_count": 3})
+    services.approvals.request(
+        task.id,
+        ToolAction("query_database", {"dsn": "postgresql://analyst:secret@db"}),
+        "EXPLAIN cost requires review",
+    )
     services.traces.finish_run(run.id, "completed")
     with TestClient(app) as client:
         replay = client.get(f"/api/runs/{run.id}/trace")
@@ -65,6 +70,7 @@ Return a safe summary.
         services.team_manager.await_runs((curator_runs[0].id,), 2)  # type: ignore[union-attr]
         curator = services.team_repository.list_runs(task.id)[0]
         candidate = services.skill_candidates.get_for_run(run.id)
+        bundle = client.get(f"/api/runs/{run.id}/replay")
     assert replay.status_code == 200 and replay.json()[0]["sequence"] == 1
     assert "secret" not in replay.text
     assert accepted.status_code == 200 and accepted.json()["accepted"] is True
@@ -73,6 +79,11 @@ Return a safe summary.
     assert curator.role is AgentRole.CURATOR
     assert curator.status is AgentRunStatus.COMPLETED
     assert candidate.enabled is False
+    assert bundle.status_code == 200
+    assert bundle.json()["integrity"]["sequence_contiguous"] is True
+    assert bundle.json()["skill_candidate"]["id"] == candidate.id
+    assert bundle.json()["approvals"][0]["arguments"]["dsn"] == "[REDACTED]"
+    assert "secret" not in bundle.text
 
 
 def test_skill_candidate_can_be_loaded_by_source_run(settings) -> None:
