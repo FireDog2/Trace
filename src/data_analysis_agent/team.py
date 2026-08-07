@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import sqlite3
 import json
+import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from hashlib import sha256
@@ -19,6 +20,7 @@ from data_analysis_agent.db import (
 )
 from data_analysis_agent.model_config import SecretProtector
 from data_analysis_agent.providers import ModelMessage, ModelProvider, ModelRequest, ProviderError
+from data_analysis_agent.recovery import RecoveryPolicy, RecoveryState
 from data_analysis_agent.repositories import ProtectedMessageError
 from data_analysis_agent.settings import Settings
 from data_analysis_agent.tools import ToolCall, ToolContext, ToolRegistry, ToolResult
@@ -125,13 +127,14 @@ ROLE_TOOLS: dict[AgentRole, frozenset[str]] = {
 }
 
 ROLE_PROMPTS: dict[AgentRole, str] = {
-    AgentRole.KNOWLEDGE: "Resolve metric definitions and return a JSON handoff. Do not execute SQL.",
-    AgentRole.SQL: "Produce evidence with governed query tools and return artifact identifiers.",
-    AgentRole.REPORT: "Use registered artifacts only and cite every important claim.",
+    AgentRole.KNOWLEDGE: "Resolve metric definitions and return a JSON handoff. Do not execute SQL. When recovery.action is fallback, do not repeat the identical tool call; return a bounded fallback handoff or choose a safer alternative.",
+    AgentRole.SQL: "Produce evidence with governed query tools and return artifact identifiers. When recovery.action is fallback, do not repeat the identical tool call; return a bounded fallback handoff or choose a safer alternative.",
+    AgentRole.REPORT: "Use registered artifacts only and cite every important claim. When recovery.action is fallback, do not repeat the identical tool call; return a bounded fallback handoff or choose a safer alternative.",
     AgentRole.CURATOR: "Create a reusable workflow candidate from redacted execution evidence only.",
 }
 
 _MAX_HANDOFF_BYTES = 64_000
+_TRANSIENT_PROVIDER_ERRORS = frozenset({"timeout", "network", "rate_limit", "upstream"})
 
 
 TaskEventPublisher = Callable[[str, str, dict[str, object]], object]
@@ -592,6 +595,7 @@ class TeammateRunner:
         repository: TeamRepository, cancel_event: Event | None = None,
         secret_protector: SecretProtector | None = None,
         traces: TraceRepository | None = None,
+        retry_sleep: Callable[[float], None] | None = None,
     ) -> None:
         self._settings = settings
         self._provider = provider
@@ -603,6 +607,7 @@ class TeammateRunner:
             if secret_protector is not None else None
         )
         self._trace_recorder = TraceRecorder(traces) if traces is not None else None
+        self._retry_sleep = retry_sleep or time.sleep
 
     def run(self, agent_run_id: str) -> AgentRun:
         run = self._repository.get_run(agent_run_id)
@@ -624,6 +629,9 @@ class TeammateRunner:
             run = self._repository.transition_run(run.id, AgentRunStatus.WORKING)
         self._trace(run, "teammate.started", "running", {"role": run.role.value})
         tools = self._tools.restrict(ROLE_TOOLS[run.role])
+        recovery = RecoveryState(
+            RecoveryPolicy(max_attempts=self._settings.max_tool_attempts)
+        )
         while True:
             terminal = self._terminal_before_action(run)
             if terminal is not None:
@@ -641,7 +649,7 @@ class TeammateRunner:
             if terminal is not None:
                 return terminal
             try:
-                response = self._provider.complete(self._request(run, tools))
+                response = self._complete_model(run, tools)
                 self._trace(
                     run,
                     "teammate.model.completed",
@@ -664,9 +672,33 @@ class TeammateRunner:
                     return completed
                 except ValueError:
                     return self._repository.fail_run(run.id, "invalid_handoff")
-            failure = self._record_and_execute_calls(run, tools, response.tool_calls)
+            failure = self._record_and_execute_calls(
+                run, tools, response.tool_calls, recovery
+            )
             if failure is not None:
                 return failure
+
+    def _complete_model(self, run: AgentRun, tools: ToolRegistry):
+        for retry_number in range(self._settings.model_max_retries + 1):
+            try:
+                return self._provider.complete(self._request(run, tools))
+            except ProviderError as exc:
+                retryable = exc.category in _TRANSIENT_PROVIDER_ERRORS
+                if not retryable or retry_number >= self._settings.model_max_retries:
+                    raise
+                delay = min(4.0, 0.25 * (2**retry_number))
+                self._trace(
+                    run,
+                    "model.retry",
+                    "retrying",
+                    {
+                        "category": exc.category,
+                        "attempt": retry_number + 1,
+                        "remaining": self._settings.model_max_retries - retry_number,
+                        "delay_seconds": delay,
+                    },
+                )
+                self._retry_sleep(delay)
 
     def _trace(
         self, run: AgentRun, event_type: str, status: str,
@@ -734,7 +766,11 @@ class TeammateRunner:
         return self._protected_messages.get(message_id) or safe_content
 
     def _record_and_execute_calls(
-        self, run: AgentRun, tools: ToolRegistry, calls: tuple[ToolCall, ...]
+        self,
+        run: AgentRun,
+        tools: ToolRegistry,
+        calls: tuple[ToolCall, ...],
+        recovery: RecoveryState,
     ) -> AgentRun | None:
         try:
             self._record_tool_calls(run, calls)
@@ -747,22 +783,93 @@ class TeammateRunner:
             run_id=run.trace_run_id or run.id,
         )
         for index, call in enumerate(calls):
+            signature = json.dumps(
+                {"name": call.name, "arguments": call.arguments},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
             boundary = self._boundary_category(run)
             if boundary is not None:
                 category = "cancelled_due_to_cancel" if boundary == "cancelled" else "cancelled_due_to_timeout"
                 if not self._try_record_cancelled(run.id, calls[index:], category):
                     return self._repository.fail_run(run.id, "message_persistence_error")
                 return self._finish_boundary(run.id, boundary)
-            try:
-                result = tools.execute(call, context)
-            except Exception:
+            if recovery.exhausted(signature):
+                result = ToolResult(
+                    call.id,
+                    False,
+                    {},
+                    "tool_retry_exhausted",
+                    "The identical tool call has exhausted its retry budget",
+                    retryable=False,
+                    diagnostics={
+                        "recovery": {
+                            "attempt": recovery.attempts_for(signature),
+                            "remaining": 0,
+                            "retry_allowed": False,
+                            "action": "fallback",
+                            "fallback_category": "tool_retry_exhausted",
+                        }
+                    },
+                )
+                self._trace(
+                    run,
+                    "tool.fallback",
+                    "completed",
+                    {
+                        "tool": call.name,
+                        "category": "tool_retry_exhausted",
+                        "attempt": recovery.attempts_for(signature),
+                        "remaining": 0,
+                    },
+                    error_category="tool_retry_exhausted",
+                )
+            else:
                 try:
-                    self._record_result(run.id, call.name, ToolResult(call.id, False, {}, "tool_error", "Tool failed"))
+                    result = tools.execute(call, context)
                 except Exception:
-                    return self._repository.fail_run(run.id, "message_persistence_error")
-                if not self._try_record_cancelled(run.id, calls[index + 1:], "cancelled_due_to_tool_error"):
-                    return self._repository.fail_run(run.id, "message_persistence_error")
-                return self._repository.fail_run(run.id, "tool_error")
+                    try:
+                        self._record_result(run.id, call.name, ToolResult(call.id, False, {}, "tool_error", "Tool failed"))
+                    except Exception:
+                        return self._repository.fail_run(run.id, "message_persistence_error")
+                    if not self._try_record_cancelled(run.id, calls[index + 1:], "cancelled_due_to_tool_error"):
+                        return self._repository.fail_run(run.id, "message_persistence_error")
+                    return self._repository.fail_run(run.id, "tool_error")
+            if not result.success:
+                recovery_decision = recovery.record(
+                    signature,
+                    result.error_category,
+                    retryable=result.retryable,
+                )
+                if result.retryable:
+                    diagnostics = dict(result.diagnostics or {})
+                    diagnostics["recovery"] = asdict(recovery_decision)
+                    result = replace(
+                        result,
+                        retryable=recovery_decision.retry_allowed,
+                        diagnostics=diagnostics,
+                    )
+                    self._trace(
+                        run,
+                        (
+                            "tool.retry"
+                            if recovery_decision.retry_allowed
+                            else "tool.fallback"
+                        ),
+                        (
+                            "retrying"
+                            if recovery_decision.retry_allowed
+                            else "completed"
+                        ),
+                        {
+                            "tool": call.name,
+                            "category": result.error_category,
+                            "attempt": recovery_decision.attempt,
+                            "remaining": recovery_decision.remaining,
+                        },
+                        error_category=result.error_category,
+                    )
             boundary = self._boundary_category(run)
             if boundary is not None:
                 category = "cancelled_due_to_cancel" if boundary == "cancelled" else "cancelled_due_to_timeout"
@@ -1002,7 +1109,10 @@ def _safe_tool_result_json(result: ToolResult, tool_name: str) -> str:
     if tool_name != "query_database":
         return _tool_result_json(result)
     output = result.output if isinstance(result.output, dict) else {}
+    diagnostics = result.diagnostics if isinstance(result.diagnostics, dict) else {}
+    recovery = diagnostics.get("recovery")
+    safe_diagnostics = {"recovery": recovery} if isinstance(recovery, dict) else None
     return json.dumps({"call_id": result.call_id, "success": result.success,
                        "output": {key: output.get(key) for key in ("status", "query_hash", "row_count", "risk", "artifact_id") if key in output},
                        "error_category": result.error_category, "message": result.message,
-                       "retryable": result.retryable, "diagnostics": None}, ensure_ascii=False, separators=(",", ":"))
+                       "retryable": result.retryable, "diagnostics": safe_diagnostics}, ensure_ascii=False, separators=(",", ":"))

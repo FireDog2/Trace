@@ -85,7 +85,7 @@ def test_provider_error_has_safe_category(settings, db_connection, task, tool_re
     class BrokenProvider:
         def complete(self, request):
             del request
-            raise ProviderError("network", "api key is secret")
+            raise ProviderError("authentication", "api key is secret")
 
     repository = TeamRepository(db_connection)
     run = repository.create_run(task.id, AgentRole.KNOWLEDGE, "Find definition")
@@ -93,6 +93,109 @@ def test_provider_error_has_safe_category(settings, db_connection, task, tool_re
 
     assert failed.error_category == "provider_error"
     assert "secret" not in (failed.error_message or "")
+
+
+def test_teammate_retries_transient_provider_errors_with_bounded_backoff(
+    settings, db_connection, task, tool_registry
+) -> None:
+    class RecoveringProvider:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, request):
+            del request
+            self.calls += 1
+            if self.calls < 3:
+                raise ProviderError("network", "temporary")
+            return ModelResponse('{"recovered":true}', ())
+
+    repository = TeamRepository(db_connection)
+    run = repository.create_run(task.id, AgentRole.KNOWLEDGE, "Recover provider")
+    provider = RecoveringProvider()
+    delays: list[float] = []
+
+    completed = TeammateRunner(
+        settings=replace(settings, model_max_retries=2),
+        provider=provider,
+        tools=tool_registry,
+        repository=repository,
+        retry_sleep=delays.append,
+    ).run(run.id)
+
+    assert completed.status is AgentRunStatus.COMPLETED
+    assert provider.calls == 3
+    assert delays == [0.25, 0.5]
+
+
+def test_sql_teammate_reports_retry_budget_then_fallback_to_model(
+    settings, db_connection, task
+) -> None:
+    class TimeoutRegistry:
+        def __init__(self):
+            self.calls = 0
+
+        def restrict(self, allowed):
+            assert "query_database" in allowed
+            return self
+
+        def schemas(self):
+            return ()
+
+        def execute(self, call, context):
+            del context
+            self.calls += 1
+            return ToolResult(
+                call.id,
+                False,
+                {},
+                "query_timeout",
+                "Database query could not be completed",
+                retryable=True,
+            )
+
+    repository = TeamRepository(db_connection)
+    run = repository.create_run(task.id, AgentRole.SQL, "Query with recovery")
+    call = lambda call_id: ToolCall(
+        call_id,
+        "query_database",
+        {"data_source_id": "source", "sql": "SELECT 1"},
+    )
+    provider = ScriptedProvider(
+        [
+            ModelResponse("", (call("first"),)),
+            ModelResponse("", (call("second"),)),
+            ModelResponse("", (call("blocked"),)),
+            ModelResponse('{"status":"fallback"}', ()),
+        ]
+    )
+    registry = TimeoutRegistry()
+
+    completed = TeammateRunner(
+        settings=replace(settings, max_tool_attempts=2),
+        provider=provider,
+        tools=registry,
+        repository=repository,
+        secret_protector=Protector(),
+    ).run(run.id)
+
+    assert completed.status is AgentRunStatus.COMPLETED
+    assert registry.calls == 2
+    first_result = json.loads(provider.requests[1].messages[-1].content)
+    second_result = json.loads(provider.requests[2].messages[-1].content)
+    blocked_result = json.loads(provider.requests[3].messages[-1].content)
+    assert first_result["retryable"] is True
+    assert first_result["diagnostics"]["recovery"] == {
+        "attempt": 1,
+        "remaining": 1,
+        "retry_allowed": True,
+        "action": "regenerate",
+        "fallback_category": None,
+    }
+    assert second_result["retryable"] is False
+    assert second_result["diagnostics"]["recovery"]["action"] == "fallback"
+    assert second_result["diagnostics"]["recovery"]["fallback_category"] == "tool_retry_exhausted"
+    assert blocked_result["error_category"] == "tool_retry_exhausted"
+    assert blocked_result["diagnostics"]["recovery"]["action"] == "fallback"
 
 
 def test_sql_teammate_sql_and_preview_are_encrypted_then_replayed(settings, db_connection, task, tool_registry) -> None:
