@@ -1,13 +1,24 @@
 import { FormEvent, useState } from "react";
 
-import type { Message, TaskEvent } from "../types";
+import type { TaskDetail, TaskEvent } from "../types";
 
 interface ConversationProps {
-  messages: Message[];
+  task: TaskDetail;
   events: TaskEvent[];
   onSend(content: string): Promise<void>;
   onApproval(approvalId: string, approved: boolean): Promise<void>;
 }
+
+const STATUS_LABELS: Record<string, string> = {
+  understanding: "理解问题",
+  planning: "制定计划",
+  running: "执行分析",
+  synthesizing: "综合结论",
+  needs_input: "等待输入",
+  failed: "执行失败",
+  cancelled: "已取消",
+  completed: "分析完成",
+};
 
 interface ApprovalView {
   id: string;
@@ -17,7 +28,7 @@ interface ApprovalView {
 }
 
 export function Conversation({
-  messages,
+  task,
   events,
   onSend,
   onApproval,
@@ -26,6 +37,12 @@ export function Conversation({
   const [sending, setSending] = useState(false);
   const [deciding, setDeciding] = useState<string | null>(null);
   const approvals = approvalViews(events);
+  const executionRows = task.plan?.steps.map((step) => ({
+    id: step.id,
+    position: step.position,
+    title: step.title,
+    status: step.status,
+  })) ?? [];
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -51,21 +68,33 @@ export function Conversation({
 
   return (
     <main className="conversation-panel" aria-label="分析对话">
-      <header>
-        <div className="conversation-heading-row">
-          <div>
-            <div className="section-label">对话入口</div>
-            <h2>分析协作</h2>
-          </div>
+      <header className="conversation-header">
+        <div>
+          <span>分析对话</span>
+          <h1>{task.objective}</h1>
         </div>
-        <p>调整目标、补充口径，或继续追问。</p>
+        <span className={`task-state ${task.status}`}>{STATUS_LABELS[task.status] ?? task.status}</span>
       </header>
 
-      <div className="message-list" aria-live="polite">
-        {messages.length === 0 && (
-          <p className="empty-note">对话负责表达意图，正式工作会沉淀到左侧任务中。</p>
-        )}
-        {messages.map((message) => {
+      <div className="conversation-scroll">
+        <section className="agent-trace" aria-labelledby="agent-trace-heading">
+          <h2 id="agent-trace-heading">Agent 执行轨迹</h2>
+          <ol>
+            {executionRows.map((row) => (
+              <li key={row.id} data-status={row.status}>
+                <span>{row.position}</span>
+                <strong>{row.title}</strong>
+                <small>{STATUS_LABELS[row.status] ?? row.status}</small>
+              </li>
+            ))}
+          </ol>
+        </section>
+
+        <div className="message-list" aria-live="polite">
+          {task.messages.length === 0 && (
+            <p className="empty-note">对话负责表达意图，正式工作会沉淀到左侧任务中。</p>
+          )}
+          {task.messages.map((message) => {
           const roleLabel = message.role === "user" ? "你" : message.role === "assistant" ? "Agent" : "执行";
           if (message.role === "tool") {
             return (
@@ -81,42 +110,43 @@ export function Conversation({
               <p>{message.content}</p>
             </article>
           );
-        })}
-      </div>
+          })}
+        </div>
 
-      {approvals.length > 0 && (
-        <section className="approval-stack" aria-label="待审批操作">
-          {approvals.map((approval) => (
-            <article className={`approval-card ${approval.status}`} key={approval.id}>
-              <span className="approval-kicker">PERMISSION · {approval.toolName}</span>
-              <strong>{approval.status === "pending" ? "需要你的批准" : "审批已处理"}</strong>
-              <p>{approval.reason}</p>
-              {approval.status === "pending" ? (
-                <div className="approval-actions">
-                  <button
-                    type="button"
-                    disabled={deciding === approval.id}
-                    aria-label="拒绝操作"
-                    onClick={() => void decide(approval.id, false)}
-                  >
-                    拒绝
-                  </button>
-                  <button
-                    type="button"
-                    disabled={deciding === approval.id}
-                    aria-label="批准操作"
-                    onClick={() => void decide(approval.id, true)}
-                  >
-                    批准一次
-                  </button>
-                </div>
-              ) : (
-                <small>{approval.status === "approved" ? "已批准，任务将继续" : "已拒绝"}</small>
-              )}
-            </article>
-          ))}
-        </section>
-      )}
+        {approvals.length > 0 && (
+          <section className="approval-stack" aria-label="待审批操作">
+            {approvals.map((approval) => (
+              <article className={`approval-card ${approval.status}`} key={approval.id}>
+                <span className="approval-kicker">PERMISSION · {approval.toolName}</span>
+                <strong>{approval.status === "pending" ? "需要你的批准" : "审批已处理"}</strong>
+                <p>{approval.reason}</p>
+                {approval.status === "pending" ? (
+                  <div className="approval-actions">
+                    <button
+                      type="button"
+                      disabled={deciding === approval.id}
+                      aria-label="拒绝操作"
+                      onClick={() => void decide(approval.id, false)}
+                    >
+                      拒绝
+                    </button>
+                    <button
+                      type="button"
+                      disabled={deciding === approval.id}
+                      aria-label="批准操作"
+                      onClick={() => void decide(approval.id, true)}
+                    >
+                      批准一次
+                    </button>
+                  </div>
+                ) : (
+                  <small>{approval.status === "approved" ? "已批准，任务将继续" : "已拒绝"}</small>
+                )}
+              </article>
+            ))}
+          </section>
+        )}
+      </div>
 
       <form className="message-composer" onSubmit={submit}>
         <label htmlFor="agent-message">给分析 Agent 留言</label>

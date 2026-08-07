@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
@@ -208,15 +208,14 @@ describe("analysis workbench", () => {
     expect(toggle).toHaveAttribute("aria-expanded", "false");
   });
 
-  it("renders the active task as conversation and durable artifact regions", async () => {
+  it("keeps the question, execution trace, and composer in the center conversation", async () => {
     render(<App api={fakeApiWithCompletedTask()} />);
 
-    expect(await screen.findByRole("main", { name: "分析对话" })).toBeVisible();
-    expect(screen.getByRole("complementary", { name: "最终产物" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "最终产物" })).toBeVisible();
-    expect(screen.getByRole("textbox", { name: "给分析 Agent 留言" })).toBeVisible();
-    expect(screen.queryByRole("textbox", { name: "分析目标" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "华东利润诊断" })).not.toBeInTheDocument();
+    const conversation = await screen.findByRole("main", { name: "分析对话" });
+    expect(within(conversation).getByRole("heading", { name: "华东利润诊断" })).toBeVisible();
+    expect(within(conversation).getByRole("heading", { name: "Agent 执行轨迹" })).toBeVisible();
+    expect(within(conversation).getByText("检查数据")).toBeVisible();
+    expect(within(conversation).getByRole("textbox", { name: "给分析 Agent 留言" })).toBeVisible();
   });
 
   it("shows only the objective input before a task exists", async () => {

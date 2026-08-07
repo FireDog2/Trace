@@ -217,7 +217,7 @@ export function App({ api: suppliedApi }: AppProps) {
 
       {task && (
         <Conversation
-          messages={task.messages}
+          task={task}
           events={events}
           onSend={sendMessage}
           onApproval={decideApproval}
