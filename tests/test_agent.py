@@ -5,6 +5,7 @@ from dataclasses import replace
 from data_analysis_agent.agent import AgentRunner, SYSTEM_PROMPT
 from data_analysis_agent.domain import TaskStatus
 from data_analysis_agent.providers import ModelResponse, ProviderError, ScriptedProvider
+from data_analysis_agent.tracing import TraceRepository
 from data_analysis_agent.tools import ToolCall
 from data_analysis_agent.tools import ToolResult
 
@@ -326,3 +327,49 @@ def test_agent_does_not_retry_non_transient_provider_error(
     assert failed.status is TaskStatus.FAILED
     assert provider.calls == 1
     assert delays == []
+
+
+def test_agent_reactively_compacts_and_retries_context_rejection(
+    settings, task_repository, tool_registry, task
+) -> None:
+    for index in range(6):
+        task_repository.add_message(
+            task.id,
+            "user" if index % 2 == 0 else "assistant",
+            f"historical turn {index}",
+        )
+
+    class Provider:
+        def __init__(self) -> None:
+            self.requests = []
+
+        def complete(self, request):
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                raise ProviderError(
+                    "context_length_exceeded", "The model context exceeded the provider limit"
+                )
+            return response_with_text("Recovered after compact")
+
+    provider = Provider()
+    traces = TraceRepository(task_repository._connection)
+    completed = AgentRunner(
+        settings=replace(settings, context_recent_messages=2),
+        provider=provider,
+        tools=tool_registry,
+        tasks=task_repository,
+        traces=traces,
+    ).run(task.id)
+
+    assert completed.status is TaskStatus.COMPLETED
+    assert len(provider.requests) == 2
+    assert provider.requests[1].messages[0].role == "system"
+    assert "Session checkpoint" in provider.requests[1].messages[0].content
+    checkpoints = task_repository._connection.execute(
+        "SELECT reason FROM context_checkpoints WHERE owner_type='task' AND owner_id=?",
+        (task.id,),
+    ).fetchall()
+    assert [row[0] for row in checkpoints] == ["reactive"]
+    events = traces.events_for_run(traces.list_runs(task.id)[0].id)
+    assert "context.rejected" in [event.event_type for event in events]
+    assert "context.compacted" in [event.event_type for event in events]

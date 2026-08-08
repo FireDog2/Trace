@@ -374,6 +374,31 @@ CREATE INDEX IF NOT EXISTS idx_business_knowledge_project_updated
 ON business_knowledge_entries(project_id, updated_at);
 """
 
+MIGRATION_15_SQL = """
+CREATE TABLE IF NOT EXISTS context_checkpoints (
+    id TEXT PRIMARY KEY,
+    owner_type TEXT NOT NULL CHECK(owner_type IN ('task','agent')),
+    owner_id TEXT NOT NULL,
+    through_message_id TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    source_message_count INTEGER NOT NULL CHECK(source_message_count >= 1),
+    before_tokens INTEGER NOT NULL CHECK(before_tokens >= 0),
+    after_tokens INTEGER NOT NULL CHECK(after_tokens >= 0),
+    reason TEXT NOT NULL CHECK(reason IN ('auto','reactive')),
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_context_checkpoints_owner_created
+ON context_checkpoints(owner_type, owner_id, created_at);
+CREATE TRIGGER IF NOT EXISTS delete_task_context_checkpoints
+AFTER DELETE ON tasks BEGIN
+    DELETE FROM context_checkpoints WHERE owner_type='task' AND owner_id=OLD.id;
+END;
+CREATE TRIGGER IF NOT EXISTS delete_agent_context_checkpoints
+AFTER DELETE ON agent_runs BEGIN
+    DELETE FROM context_checkpoints WHERE owner_type='agent' AND owner_id=OLD.id;
+END;
+"""
+
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
@@ -520,6 +545,12 @@ def migrate(connection: sqlite3.Connection) -> None:
         connection.execute(
             "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
             (14, utc_now()),
+        )
+    if 15 not in applied:
+        connection.executescript(MIGRATION_15_SQL)
+        connection.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+            (15, utc_now()),
         )
     connection.execute("PRAGMA foreign_keys = ON")
     connection.commit()

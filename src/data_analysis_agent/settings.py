@@ -17,6 +17,10 @@ class Settings:
     max_active_teammates: int = 3
     model_timeout_seconds: int = 60
     model_max_retries: int = 2
+    context_max_tokens: int = 32_000
+    context_target_tokens: int = 24_000
+    context_recent_messages: int = 12
+    context_max_tool_result_chars: int = 24_000
     postgres_statement_timeout_ms: int = 8_000
     postgres_lock_timeout_ms: int = 1_000
     postgres_max_rows: int = 1_000
@@ -40,6 +44,12 @@ class Settings:
             raise ValueError("max_active_teammates must be between 1 and 3")
         if not 0 <= self.model_max_retries <= 5:
             raise ValueError("model_max_retries must be between 0 and 5")
+        if not 1_024 <= self.context_target_tokens <= self.context_max_tokens:
+            raise ValueError("context_target_tokens must be between 1024 and context_max_tokens")
+        if not 2 <= self.context_recent_messages <= 100:
+            raise ValueError("context_recent_messages must be between 2 and 100")
+        if not 1_000 <= self.context_max_tool_result_chars <= 1_000_000:
+            raise ValueError("context_max_tool_result_chars must be between 1000 and 1000000")
 
     @classmethod
     def local(cls, data_dir: Path | None = None) -> "Settings":

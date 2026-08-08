@@ -19,7 +19,13 @@ from data_analysis_agent.db import (
     utc_now,
 )
 from data_analysis_agent.model_config import SecretProtector
-from data_analysis_agent.providers import ModelMessage, ModelProvider, ModelRequest, ProviderError
+from data_analysis_agent.providers import ModelProvider, ModelRequest, ProviderError
+from data_analysis_agent.context import (
+    ContextCheckpointRepository,
+    ContextManager,
+    ContextMessage,
+)
+from data_analysis_agent.prompts import PromptContext, assemble_prompt
 from data_analysis_agent.recovery import RecoveryPolicy, RecoveryState
 from data_analysis_agent.repositories import ProtectedMessageError
 from data_analysis_agent.settings import Settings
@@ -127,10 +133,7 @@ ROLE_TOOLS: dict[AgentRole, frozenset[str]] = {
 }
 
 ROLE_PROMPTS: dict[AgentRole, str] = {
-    AgentRole.KNOWLEDGE: "Resolve metric definitions and return a JSON handoff. Do not execute SQL. When recovery.action is fallback, do not repeat the identical tool call; return a bounded fallback handoff or choose a safer alternative.",
-    AgentRole.SQL: "Produce evidence with governed query tools and return artifact identifiers. When recovery.action is fallback, do not repeat the identical tool call; return a bounded fallback handoff or choose a safer alternative.",
-    AgentRole.REPORT: "Use registered artifacts only and cite every important claim. When recovery.action is fallback, do not repeat the identical tool call; return a bounded fallback handoff or choose a safer alternative.",
-    AgentRole.CURATOR: "Create a reusable workflow candidate from redacted execution evidence only.",
+    role: assemble_prompt(PromptContext(role=role.value)).text for role in AgentRole
 }
 
 _MAX_HANDOFF_BYTES = 64_000
@@ -608,6 +611,13 @@ class TeammateRunner:
         )
         self._trace_recorder = TraceRecorder(traces) if traces is not None else None
         self._retry_sleep = retry_sleep or time.sleep
+        self._context = ContextManager(
+            ContextCheckpointRepository(repository._connection),
+            max_tokens=settings.context_max_tokens,
+            target_tokens=settings.context_target_tokens,
+            recent_messages=settings.context_recent_messages,
+            max_tool_result_chars=settings.context_max_tool_result_chars,
+        )
 
     def run(self, agent_run_id: str) -> AgentRun:
         run = self._repository.get_run(agent_run_id)
@@ -679,10 +689,24 @@ class TeammateRunner:
                 return failure
 
     def _complete_model(self, run: AgentRun, tools: ToolRegistry):
-        for retry_number in range(self._settings.model_max_retries + 1):
+        request = self._request(run, tools)
+        retry_number = 0
+        reactive_compacted = False
+        while True:
             try:
-                return self._provider.complete(self._request(run, tools))
+                return self._provider.complete(request)
             except ProviderError as exc:
+                if exc.category == "context_length_exceeded" and not reactive_compacted:
+                    self._trace(
+                        run,
+                        "context.rejected",
+                        "retrying",
+                        {"owner_type": "agent", "reason": "provider_context_length"},
+                        error_category=exc.category,
+                    )
+                    request = self._request(run, tools, force_context_compact=True)
+                    reactive_compacted = True
+                    continue
                 retryable = exc.category in _TRANSIENT_PROVIDER_ERRORS
                 if not retryable or retry_number >= self._settings.model_max_retries:
                     raise
@@ -699,6 +723,7 @@ class TeammateRunner:
                     },
                 )
                 self._retry_sleep(delay)
+                retry_number += 1
 
     def _trace(
         self, run: AgentRun, event_type: str, status: str,
@@ -753,12 +778,71 @@ class TeammateRunner:
     def _cancelled(self, run_id: str) -> bool:
         return self._cancel_event.is_set() or self._repository.cancel_requested(run_id)
 
-    def _request(self, run: AgentRun, tools: ToolRegistry) -> ModelRequest:
+    def _request(
+        self,
+        run: AgentRun,
+        tools: ToolRegistry,
+        *,
+        force_context_compact: bool = False,
+    ) -> ModelRequest:
+        schemas = tools.schemas()
+        assembly = assemble_prompt(
+            PromptContext(
+                role=run.role.value,
+                project_id=self._repository.project_id_for_run(run.id),
+                task_id=run.task_id,
+                task_status=run.status.value,
+                enabled_tools=tuple(schema.name for schema in schemas),
+            )
+        )
         messages = tuple(
-            ModelMessage(message.role, self._provider_content(message.id, message.content))
+            ContextMessage(
+                message.id,
+                message.role,
+                self._provider_content(message.id, message.content),
+                message.content,
+            )
             for message in self._repository.list_messages(run.id)
         )
-        return ModelRequest(ROLE_PROMPTS[run.role], run.objective, messages, tools.schemas())
+        projection = self._context.project(
+            owner_type="agent",
+            owner_id=run.id,
+            system=assembly.text,
+            objective=run.objective,
+            messages=messages,
+            tools=schemas,
+            force=force_context_compact,
+        )
+        self._trace(
+            run,
+            "prompt.assembled",
+            "completed",
+            {
+                "role": run.role.value,
+                "section_ids": assembly.section_ids,
+                "section_versions": {
+                    section.id: section.version for section in assembly.sections
+                },
+                "prompt_hash": assembly.content_hash,
+                "prompt_tokens": assembly.estimated_tokens,
+                "context_tokens": projection.projected_tokens,
+            },
+        )
+        if projection.reason is not None:
+            self._trace(
+                run,
+                "context.compacted",
+                "completed",
+                {
+                    "owner_type": "agent",
+                    "reason": projection.reason,
+                    "checkpoint_id": projection.checkpoint_id,
+                    "before_tokens": projection.original_tokens,
+                    "after_tokens": projection.projected_tokens,
+                    "source_message_count": projection.source_message_count,
+                },
+            )
+        return ModelRequest(assembly.text, run.objective, projection.messages, schemas)
 
     def _provider_content(self, message_id: str, safe_content: str) -> str:
         if self._protected_messages is None:

@@ -12,6 +12,7 @@ from data_analysis_agent.domain import TaskStatus
 from data_analysis_agent.model_config import SecretStorageUnavailable
 from data_analysis_agent.permissions import ToolAction
 from data_analysis_agent.providers import ModelResponse, ScriptedProvider
+from data_analysis_agent.reporting import ReportService
 from data_analysis_agent.team import AgentRole, AgentRunStatus
 from data_analysis_agent.tools import ToolCall, ToolContext
 from data_analysis_agent.tracing import TraceContext
@@ -59,6 +60,16 @@ Return a safe summary.
         ToolAction("query_database", {"dsn": "postgresql://analyst:secret@db"}),
         "EXPLAIN cost requires review",
     )
+    checkpoint = services.context_checkpoints.create(
+        owner_type="task",
+        owner_id=task.id,
+        through_message_id="message-1",
+        summary="secret transcript detail",
+        source_message_count=3,
+        before_tokens=40_000,
+        after_tokens=12_000,
+        reason="auto",
+    )
     services.traces.finish_run(run.id, "completed")
     with TestClient(app) as client:
         replay = client.get(f"/api/runs/{run.id}/trace")
@@ -81,6 +92,10 @@ Return a safe summary.
     assert candidate.enabled is False
     assert bundle.status_code == 200
     assert bundle.json()["integrity"]["sequence_contiguous"] is True
+    assert bundle.json()["schema_version"] == 2
+    assert bundle.json()["integrity"]["context_checkpoint_count"] == 1
+    assert bundle.json()["context_checkpoints"][0]["id"] == checkpoint.id
+    assert "summary" not in bundle.json()["context_checkpoints"][0]
     assert bundle.json()["skill_candidate"]["id"] == candidate.id
     assert bundle.json()["approvals"][0]["arguments"]["dsn"] == "[REDACTED]"
     assert "secret" not in bundle.text
@@ -105,6 +120,32 @@ def test_skill_candidate_can_be_loaded_by_source_run(settings) -> None:
 
     assert response.status_code == 200
     assert response.json()["id"] == candidate.id
+
+
+def test_markdown_report_can_be_exported_as_source_or_pdf(settings) -> None:
+    app = create_app(settings, ScriptedProvider(()))
+    services = app.state.services
+    project = services.projects.create("PDF export")
+    services.workspace.create_project(project.id)
+    task = services.tasks.create(project.id, "华东利润诊断")
+    report = ReportService(
+        services.workspace, services.artifacts, services.tasks
+    ).publish(
+        task.id,
+        "# 分析报告\n\n**利润下降** 12%。\n\n## 原因\n\n- 物流成本上升\n- 收入稳定",
+    )
+
+    with TestClient(app) as client:
+        markdown = client.get(f"/api/artifacts/{report.id}/export?format=markdown")
+        pdf = client.get(f"/api/artifacts/{report.id}/export?format=pdf")
+
+    assert markdown.status_code == 200
+    assert markdown.content.startswith("# 分析报告".encode())
+    assert pdf.status_code == 200
+    assert pdf.headers["content-type"] == "application/pdf"
+    assert pdf.headers["content-disposition"].endswith('.pdf"')
+    assert pdf.content.startswith(b"%PDF-")
+    assert len(pdf.content) > 10_000
 
 
 @pytest.mark.parametrize("failure", ("provider", "runner_constructor", "runner_run"))

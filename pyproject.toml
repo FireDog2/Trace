@@ -18,6 +18,7 @@ dependencies = [
     "pydantic>=2.9,<3",
     "psycopg[binary]>=3.2,<4",
     "python-multipart>=0.0.12,<1",
+    "reportlab>=4.2,<5",
     "sqlglot>=27,<28",
     "uvicorn>=0.32,<1",
 ]

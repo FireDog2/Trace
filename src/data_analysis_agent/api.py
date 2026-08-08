@@ -7,8 +7,9 @@ import tempfile
 import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
+from hashlib import sha256
 from pathlib import Path
-from typing import Annotated, Callable, Iterator
+from typing import Annotated, Callable, Iterator, Literal
 
 from fastapi import (
     BackgroundTasks,
@@ -25,16 +26,18 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from data_analysis_agent.agent import AgentRunner
+from data_analysis_agent.context import ContextCheckpointRepository
 from data_analysis_agent.datasets import DatasetError, DatasetService
 from data_analysis_agent.data_sources import AccessLevel, CredentialError, DataSource, DataSourceRepository, PolicySnapshot
 from data_analysis_agent.db import connect_database
-from data_analysis_agent.domain import Artifact, Project, Task, TaskStatus
+from data_analysis_agent.domain import Artifact, ArtifactType, Project, Task, TaskStatus
 from data_analysis_agent.execution import DuckDBExecutor, PythonExecutor
 from data_analysis_agent.knowledge import (
     BusinessKnowledgeEntry,
     BusinessKnowledgeRepository,
 )
 from data_analysis_agent.permissions import ApprovalRepository, PermissionPolicy
+from data_analysis_agent.pdf_export import render_markdown_pdf
 from data_analysis_agent.postgres import SqlSafetyGateway
 from data_analysis_agent.sql_safety import SqlAstValidator
 from data_analysis_agent.model_config import (
@@ -285,6 +288,7 @@ class AppServices:
     traces: TraceRepository
     trace_recorder: TraceRecorder
     skill_candidates: SkillCandidateRepository
+    context_checkpoints: ContextCheckpointRepository
 
     def agent(self) -> AgentRunner:
         return AgentRunner(
@@ -354,6 +358,7 @@ def _build_services(
     knowledge = BusinessKnowledgeRepository(connection)
     reports = ReportService(workspace, artifacts, tasks)
     traces = TraceRepository(connection)
+    context_checkpoints = ContextCheckpointRepository(connection)
     sql_gateway = SqlSafetyGateway(
         connection=connection,
         settings=settings,
@@ -415,6 +420,7 @@ def _build_services(
         traces=traces,
         trace_recorder=TraceRecorder(traces),
         skill_candidates=skill_candidates,
+        context_checkpoints=context_checkpoints,
     )
     if not with_team_manager:
         return services
@@ -824,6 +830,36 @@ def create_app(
             filename=artifact.path.name,
         )
 
+    @app.get("/api/artifacts/{artifact_id}/export")
+    def export_report_artifact(
+        artifact_id: str,
+        format: Literal["markdown", "pdf"] = Query("markdown"),
+    ):
+        artifact = services.artifacts.get(artifact_id)
+        if artifact.artifact_type is not ArtifactType.MARKDOWN_REPORT:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Only Markdown reports can be exported as documents",
+            )
+        if format == "markdown":
+            return FileResponse(
+                artifact.path,
+                media_type="text/markdown; charset=utf-8",
+                filename=artifact.path.name,
+            )
+        markdown = artifact.path.read_text(encoding="utf-8")
+        pdf = render_markdown_pdf(
+            markdown,
+            title=artifact.title.removeprefix("Report: "),
+            subtitle=artifact.description,
+        )
+        filename = f"{artifact.path.stem}.pdf"
+        return StreamingResponse(
+            iter((pdf,)),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
     @app.get(
         "/api/projects/{project_id}/tasks",
         response_model=list[TaskResponse],
@@ -917,6 +953,14 @@ def create_app(
         )
         approvals = services.approvals.list_for_task(task.id)
         artifacts = services.artifacts.list_for_task(task.id)
+        checkpoints = [
+            *services.context_checkpoints.list_for_owner("task", task.id),
+            *(
+                checkpoint
+                for agent in agents
+                for checkpoint in services.context_checkpoints.list_for_owner("agent", agent.id)
+            ),
+        ]
         try:
             candidate: object = _skill_candidate_response(
                 services.skill_candidates.get_for_run(run_id)
@@ -925,7 +969,7 @@ def create_app(
             candidate = None
         sequences = [event.sequence for event in events]
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "run": _analysis_run_response(run),
             "task": _task_response(task),
             "trace": [_trace_event_response(event) for event in events],
@@ -940,6 +984,18 @@ def create_app(
                 "decided_at": approval.decided_at,
             } for approval in approvals],
             "artifacts": [_artifact_response(artifact) for artifact in artifacts],
+            "context_checkpoints": [{
+                "id": checkpoint.id,
+                "owner_type": checkpoint.owner_type,
+                "owner_id": checkpoint.owner_id,
+                "through_message_id": checkpoint.through_message_id,
+                "source_message_count": checkpoint.source_message_count,
+                "before_tokens": checkpoint.before_tokens,
+                "after_tokens": checkpoint.after_tokens,
+                "reason": checkpoint.reason,
+                "summary_hash": sha256(checkpoint.summary.encode("utf-8")).hexdigest(),
+                "created_at": checkpoint.created_at,
+            } for checkpoint in checkpoints],
             "skill_candidate": candidate,
             "integrity": {
                 "event_count": len(events),
@@ -949,6 +1005,7 @@ def create_app(
                 "agent_count": len(agents),
                 "approval_count": len(approvals),
                 "artifact_count": len(artifacts),
+                "context_checkpoint_count": len(checkpoints),
             },
         }
 

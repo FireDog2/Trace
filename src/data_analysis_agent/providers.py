@@ -120,6 +120,11 @@ class OpenAICompatibleProvider:
         if response.status_code >= 500:
             raise ProviderError("upstream", "The model service returned a server error")
         if response.status_code >= 400:
+            if _is_context_length_error(response):
+                raise ProviderError(
+                    "context_length_exceeded",
+                    "The model context exceeded the provider limit",
+                )
             raise ProviderError(
                 "request_rejected",
                 f"The model service rejected the request ({response.status_code})",
@@ -218,3 +223,27 @@ def _normalize_tool_call(raw_call: dict[str, Any]) -> ToolCall:
         name=str(function["name"]),
         arguments=arguments,
     )
+
+
+def _is_context_length_error(response: httpx.Response) -> bool:
+    if response.status_code not in {400, 413, 422}:
+        return False
+    try:
+        body = response.json()
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    error = body.get("error", body) if isinstance(body, dict) else {}
+    if not isinstance(error, dict):
+        return False
+    code = str(error.get("code", "")).lower()
+    kind = str(error.get("type", "")).lower()
+    message = str(error.get("message", "")).lower()
+    markers = (
+        "context_length_exceeded",
+        "context window",
+        "maximum context length",
+        "prompt is too long",
+        "too many tokens",
+        "input token limit",
+    )
+    return any(marker in value for value in (code, kind, message) for marker in markers)

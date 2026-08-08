@@ -129,3 +129,23 @@ def test_provider_from_credentials_builds_openai_compatible_provider() -> None:
     )
 
     assert isinstance(provider, OpenAICompatibleProvider)
+
+
+def test_openai_adapter_classifies_context_length_without_reflecting_provider_body() -> None:
+    provider = OpenAICompatibleProvider(
+        base_url="https://model.invalid/v1",
+        api_key="secret",
+        model="test-model",
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(
+                400,
+                json={"error": {"code": "context_length_exceeded", "message": "secret prompt is too long"}},
+            )
+        ),
+    )
+
+    with pytest.raises(ProviderError) as error:
+        provider.complete(sample_model_request())
+
+    assert error.value.category == "context_length_exceeded"
+    assert "secret" not in str(error.value)

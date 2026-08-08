@@ -626,8 +626,27 @@ h1, h2, h3, p { margin: 0; }
 }
 .report-conclusion::before { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 3px; background: linear-gradient(var(--cyan), var(--primary)); }
 .report-conclusion > span { color: var(--primary); font: 8px var(--mono); letter-spacing: 0.1em; }
-.report-conclusion h3 { margin-top: 6px; color: var(--ink); font-size: 14px; }
-.report-conclusion p { margin-top: 10px; color: #536078; font-size: 11px; line-height: 1.78; white-space: pre-wrap; }
+.report-conclusion > h3 { margin-top: 6px; color: var(--ink); font-size: 14px; }
+.report-conclusion .markdown-content { margin-top: 10px; color: #536078; font-size: 11px; line-height: 1.78; }
+.markdown-content > :first-child { margin-top: 0; }
+.markdown-content > :last-child { margin-bottom: 0; }
+.markdown-content p { margin: 8px 0; }
+.markdown-content h3, .markdown-content h4, .markdown-content h5, .markdown-content h6 { margin: 14px 0 6px; color: var(--ink); line-height: 1.35; }
+.markdown-content h3 { font-size: 13px; }.markdown-content h4 { font-size: 12px; }.markdown-content h5, .markdown-content h6 { font-size: 11px; }
+.markdown-content strong { color: var(--ink); font-weight: 720; }
+.markdown-content em { color: var(--muted-strong); }
+.markdown-content ul, .markdown-content ol { margin: 8px 0; padding-left: 20px; }
+.markdown-content li { margin: 3px 0; padding-left: 2px; }
+.markdown-content blockquote { margin: 10px 0; padding: 8px 11px; border-left: 2px solid var(--primary); border-radius: 0 7px 7px 0; background: rgba(255, 255, 255, 0.72); color: var(--muted-strong); }
+.markdown-content code { padding: 1px 4px; border: 1px solid #dce3ef; border-radius: 4px; background: #edf1f8; color: #35435d; font: 0.9em var(--mono); }
+.markdown-content pre { max-width: 100%; margin: 10px 0; padding: 11px 12px; overflow-x: auto; border: 1px solid #d8e0ee; border-radius: 8px; background: #17233c; color: #edf3ff; font: 9px/1.6 var(--mono); white-space: pre; }
+.markdown-content pre code { padding: 0; border: 0; background: transparent; color: inherit; }
+.markdown-content hr { height: 1px; margin: 13px 0; border: 0; background: var(--border); }
+.markdown-content a { color: var(--primary); font-weight: 650; text-decoration: underline; text-decoration-color: #aebff3; text-underline-offset: 2px; }
+.markdown-table-scroll { max-width: 100%; margin: 10px 0; overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: white; }
+.markdown-content table { width: 100%; border-collapse: collapse; font-size: 9px; }
+.markdown-content th, .markdown-content td { padding: 7px 8px; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+.markdown-content th { background: #eef2fa; color: var(--ink); font-weight: 700; }.markdown-content tr:last-child td { border-bottom: 0; }.markdown-content th:last-child, .markdown-content td:last-child { border-right: 0; }
 .artifact-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 13px; margin-top: 14px; }
 .artifact-grid.report:empty { margin-top: 0; }
 .artifact-card { overflow: hidden; border: 1px solid var(--border); border-radius: 11px; background: white; box-shadow: 0 8px 24px rgba(31, 52, 86, 0.05); }
@@ -638,6 +657,12 @@ h1, h2, h3, p { margin: 0; }
 .artifact-card p { margin-top: 7px; color: var(--muted); font-size: 9px; line-height: 1.55; }
 .artifact-card a { display: inline-flex; align-items: center; gap: 4px; margin-top: 13px; color: var(--primary); font-size: 9px; font-weight: 650; text-decoration: none; }
 .artifact-card a:hover { color: var(--primary-strong); text-decoration: underline; }
+.artifact-card-actions { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.report-export-control { display: inline-flex; align-items: stretch; margin-top: 11px; overflow: hidden; border: 1px solid #cbd7f6; border-radius: 7px; background: #f4f7ff; box-shadow: 0 3px 10px rgba(61, 99, 221, 0.06); }
+.report-export-control label { display: flex; }
+.report-export-control select { min-width: 82px; padding: 5px 23px 5px 8px; border: 0; border-right: 1px solid #cbd7f6; border-radius: 0; background-color: transparent; color: #354b83; font: 8px var(--mono); cursor: pointer; }
+.artifact-card .report-export-link { margin: 0; padding: 5px 8px; color: white; background: var(--primary); font: 650 8px var(--mono); text-decoration: none; }
+.artifact-card .report-export-link:hover { background: var(--primary-strong); color: white; text-decoration: none; }
 .artifact-empty {
   display: grid;
   place-items: center;

@@ -341,6 +341,42 @@ describe("analysis workbench", () => {
     expect(within(artifacts).getByText("暂无数据产物")).toBeVisible();
   });
 
+  it("renders the analysis summary as Markdown and exports reports as PDF or Markdown", async () => {
+    const api = fakeApiWithCompletedTask();
+    const getTask = api.getTask.bind(api);
+    api.getTask = async (taskId) => {
+      const detail = await getTask(taskId);
+      return {
+        ...detail,
+        messages: [{
+          id: "summary-markdown", role: "assistant",
+          content: "## 关键发现\n\n**利润下滑** 12%。\n\n- 物流成本上升",
+          created_at: "2026-08-05T00:05:00Z",
+        }],
+        artifacts: [...detail.artifacts, {
+          id: "report-1", project_id: "project-1", task_id: "task-1",
+          artifact_type: "markdown_report", title: "华东利润诊断报告",
+          description: "证据关联分析报告", content_type: "text/markdown",
+          created_at: "2026-08-05T00:05:00Z",
+          content_url: "/api/artifacts/report-1/content",
+        }],
+      };
+    };
+    render(<App api={api} />);
+
+    const workspace = await screen.findByRole("complementary", { name: "最终产物" });
+    expect(await within(workspace).findByRole("heading", { name: "关键发现" })).toBeVisible();
+    expect(within(workspace).getByText("利润下滑").tagName).toBe("STRONG");
+    expect(within(workspace).queryByText("**利润下滑**")).not.toBeInTheDocument();
+
+    const format = within(workspace).getByRole("combobox", { name: "华东利润诊断报告 导出格式" });
+    const exportLink = within(workspace).getByRole("link", { name: /导出/ });
+    expect(format).toHaveValue("pdf");
+    expect(exportLink).toHaveAttribute("href", "/api/artifacts/report-1/export?format=pdf");
+    fireEvent.change(format, { target: { value: "markdown" } });
+    expect(exportLink).toHaveAttribute("href", "/api/artifacts/report-1/export?format=markdown");
+  });
+
   it("opens and closes the final artifact drawer", async () => {
     render(<App api={fakeApiWithCompletedTask()} />);
 

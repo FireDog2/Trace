@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 
 import type { AgentRun, AnalysisRun, Artifact, SkillCandidate, TaskDetail, TraceEvent } from "../types";
 import { AgentTeamPanel } from "./AgentTeamPanel";
+import { Markdown } from "./Markdown";
 import { SkillCandidatePanel } from "./SkillCandidatePanel";
 import { TraceTimeline } from "./TraceTimeline";
 
@@ -76,7 +77,8 @@ export function ArtifactWorkspace({ task, agents, runs, traceEvents, selectedRun
       {(activeTab === "report" || activeTab === "chart" || activeTab === "data" || activeTab === "code") && <>
         {activeTab === "report" && <section className="report-conclusion" aria-labelledby="report-conclusion-heading">
           <span>核心结论</span><h3 id="report-conclusion-heading">分析摘要</h3>
-          <p>{latestConclusion ?? "Agent 完成分析后，结论会沉淀在这里。"}</p></section>}
+          <Markdown content={latestConclusion ?? "Agent 完成分析后，结论会沉淀在这里。"} />
+        </section>}
         {grouped[activeTab].length > 0 ? <div className={`artifact-grid ${activeTab}`}>
           {grouped[activeTab].map((artifact) => <ArtifactCard artifact={artifact} tab={activeTab} key={artifact.id} />)}
         </div> : <div className="artifact-empty"><span aria-hidden="true">{activeTab === "chart" ? "⌁" : activeTab === "data" ? "▦" : activeTab === "code" ? "</>" : "≋"}</span>
@@ -87,14 +89,26 @@ export function ArtifactWorkspace({ task, agents, runs, traceEvents, selectedRun
 }
 
 function ArtifactCard({ artifact, tab }: { artifact: Artifact; tab: ArtifactTab }) {
+  const [exportFormat, setExportFormat] = useState<"markdown" | "pdf">("pdf");
   const canPreviewImage = tab === "chart" && artifact.content_type?.startsWith("image/");
   const canPreviewHtml = tab === "chart" && artifact.content_type === "text/html";
+  const canExportReport = artifact.artifact_type === "markdown_report";
   return <article className="artifact-card">
     {canPreviewImage && <img src={artifact.content_url} alt={artifact.title} />}
     {canPreviewHtml && <iframe src={artifact.content_url} title={`${artifact.title} 预览`} loading="lazy"
       sandbox="allow-scripts" referrerPolicy="no-referrer" />}
     <div className="artifact-card-body"><span>{artifact.artifact_type.replaceAll("_", " ")}</span><h3>{artifact.title}</h3>
-      <p>{artifact.description || "已登记分析产物"}</p><a href={artifact.content_url} target="_blank" rel="noreferrer" aria-label={`打开 ${artifact.title}`}>
-        打开产物 <span aria-hidden="true">→</span></a></div>
+      <p>{artifact.description || "已登记分析产物"}</p>
+      <div className="artifact-card-actions"><a href={artifact.content_url} target="_blank" rel="noreferrer" aria-label={`打开 ${artifact.title}`}>
+        打开产物 <span aria-hidden="true">→</span></a>
+        {canExportReport && <div className="report-export-control">
+          <label><span className="sr-only">{artifact.title} 导出格式</span><select value={exportFormat}
+            aria-label={`${artifact.title} 导出格式`} onChange={(event) => setExportFormat(event.target.value as "markdown" | "pdf")}>
+            <option value="pdf">PDF</option><option value="markdown">Markdown</option>
+          </select></label>
+          <a className="report-export-link" href={`/api/artifacts/${artifact.id}/export?format=${exportFormat}`} download>
+            导出 <span aria-hidden="true">↓</span></a>
+        </div>}
+      </div></div>
   </article>;
 }
