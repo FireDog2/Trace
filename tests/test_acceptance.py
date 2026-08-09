@@ -9,6 +9,16 @@ from data_analysis_agent.providers import ModelRequest, ModelResponse
 from data_analysis_agent.tools import ToolCall
 
 
+class TestProtector:
+    """Deterministic secret protection for cross-platform acceptance tests."""
+
+    def protect(self, value: str) -> bytes:
+        return b"test-protected:" + value.encode("utf-8")
+
+    def unprotect(self, value: bytes) -> str:
+        return value.removeprefix(b"test-protected:").decode("utf-8")
+
+
 class OperatingDiagnosisProvider:
     """Deterministic Report Agent that reacts to persisted tool results."""
 
@@ -185,6 +195,7 @@ def test_operating_diagnosis_creates_traceable_report(settings, operations_csv: 
     services = build_services(
         settings,
         provider,
+        secret_protector=TestProtector(),
         teammate_provider_factory=OperatingDiagnosisProvider,
     )
     project = services.projects.create("Operating review")
