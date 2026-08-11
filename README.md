@@ -1,7 +1,5 @@
 # Governed Data Analysis Agent
 
-**简体中文** | [English](README.en.md)
-
 一个本地优先、证据优先的受控数据分析 Agent 工作台。
 
 > **Vibe Coding 让“做出一个能演示的 Agent”变得很快；Harness 决定它能否持续、稳定、可控地运行。**

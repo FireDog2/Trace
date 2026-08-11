@@ -38,7 +38,11 @@ def test_project_can_be_renamed_and_global_workspace_stays_hidden(settings) -> N
 
 
 def test_global_data_sources_and_knowledge_are_not_bound_to_a_user_project(settings) -> None:
-    app = create_app(settings, ScriptedProvider(()))
+    app = create_app(
+        settings,
+        ScriptedProvider(()),
+        secret_protector=RecordingProtector(),
+    )
     services = app.state.services
     first = services.projects.create("First project")
     second = services.projects.create("Second project")
@@ -229,7 +233,11 @@ def test_business_knowledge_document_import_creates_classified_entries(settings)
 
 
 def test_policy_update_rejects_a_stale_editor_version(settings) -> None:
-    app = create_app(settings, ScriptedProvider(()))
+    app = create_app(
+        settings,
+        ScriptedProvider(()),
+        secret_protector=RecordingProtector(),
+    )
     services = app.state.services
     project = services.projects.create("Policy editing")
     source = services.data_sources.create(project.id, "Warehouse", "postgresql://readonly@localhost/warehouse")
