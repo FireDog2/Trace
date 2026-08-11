@@ -11,6 +11,7 @@ from data_analysis_agent.db import (
     sqlite_connection_lock,
     utc_now,
 )
+from data_analysis_agent.scope import GLOBAL_PROJECT_ID
 from data_analysis_agent.domain import (
     Artifact,
     ArtifactType,
@@ -156,10 +157,27 @@ class ProjectRepository:
         )
 
     @sqlite_connection_guarded
+    def update_name(self, project_id: str, name: str) -> Project:
+        if project_id == GLOBAL_PROJECT_ID:
+            raise RecordNotFoundError(f"Project not found: {project_id}")
+        normalized_name = name.strip()
+        if not normalized_name:
+            raise ValueError("Project name must not be empty")
+        cursor = self._connection.execute(
+            "UPDATE projects SET name = ?, updated_at = ? WHERE id = ?",
+            (normalized_name, utc_now(), project_id),
+        )
+        self._connection.commit()
+        if cursor.rowcount == 0:
+            raise RecordNotFoundError(f"Project not found: {project_id}")
+        return self.get(project_id)
+
+    @sqlite_connection_guarded
     def list(self) -> tuple[Project, ...]:
         rows = self._connection.execute(
             "SELECT id, name, status, created_at, updated_at "
-            "FROM projects ORDER BY created_at, rowid"
+            "FROM projects WHERE id != ? ORDER BY created_at, rowid",
+            (GLOBAL_PROJECT_ID,),
         ).fetchall()
         return tuple(
             Project(

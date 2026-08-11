@@ -97,6 +97,14 @@ class BusinessKnowledgeRepository:
         return tuple(_entry(row) for row in rows)
 
     @sqlite_connection_guarded
+    def list_all(self) -> tuple[BusinessKnowledgeEntry, ...]:
+        rows = self._connection.execute(
+            "SELECT * FROM business_knowledge_entries "
+            "ORDER BY kind,name COLLATE NOCASE,updated_at"
+        ).fetchall()
+        return tuple(_entry(row) for row in rows)
+
+    @sqlite_connection_guarded
     def update(
         self,
         entry_id: str,
@@ -151,6 +159,39 @@ class BusinessKnowledgeRepository:
         terms = tuple(dict.fromkeys(re.findall(r"[\w\u4e00-\u9fff]+", normalized)))
         ranked: list[tuple[int, str, BusinessKnowledgeEntry]] = []
         for entry in self.list_for_project(project_id):
+            name = entry.name.casefold()
+            synonyms = tuple(value.casefold() for value in entry.synonyms)
+            fields = " ".join(
+                value
+                for value in (
+                    name,
+                    entry.definition.casefold(),
+                    (entry.formula or "").casefold(),
+                    " ".join(value.casefold() for value in entry.dimensions),
+                    " ".join(synonyms),
+                    (entry.source or "").casefold(),
+                )
+                if value
+            )
+            score = 100 if normalized == name else 90 if normalized in synonyms else 0
+            score += 40 if normalized in name else 0
+            score += sum(8 for term in terms if term in fields)
+            if score:
+                ranked.append((score, entry.name.casefold(), entry))
+        ranked.sort(key=lambda item: (-item[0], item[1]))
+        return tuple(item[2] for item in ranked[:limit])
+
+    def search_global(
+        self, query: str, *, limit: int = 8
+    ) -> tuple[BusinessKnowledgeEntry, ...]:
+        normalized = query.strip().casefold()
+        if not normalized:
+            raise ValueError("Knowledge search query must not be empty")
+        if not 1 <= limit <= 20:
+            raise ValueError("Knowledge search limit must be between 1 and 20")
+        terms = tuple(dict.fromkeys(re.findall(r"[\w\u4e00-\u9fff]+", normalized)))
+        ranked: list[tuple[int, str, BusinessKnowledgeEntry]] = []
+        for entry in self.list_all():
             name = entry.name.casefold()
             synonyms = tuple(value.casefold() for value in entry.synonyms)
             fields = " ".join(

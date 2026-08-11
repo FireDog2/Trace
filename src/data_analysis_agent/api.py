@@ -28,13 +28,24 @@ from pydantic import BaseModel, ConfigDict, Field
 from data_analysis_agent.agent import AgentRunner
 from data_analysis_agent.context import ContextCheckpointRepository
 from data_analysis_agent.datasets import DatasetError, DatasetService
-from data_analysis_agent.data_sources import AccessLevel, CredentialError, DataSource, DataSourceRepository, PolicySnapshot
+from data_analysis_agent.data_sources import (
+    AccessLevel,
+    CredentialError,
+    DataSource,
+    DataSourceRepository,
+    PolicySnapshot,
+    PolicyVersionConflict,
+)
 from data_analysis_agent.db import connect_database
 from data_analysis_agent.domain import Artifact, ArtifactType, Project, Task, TaskStatus
 from data_analysis_agent.execution import DuckDBExecutor, PythonExecutor
 from data_analysis_agent.knowledge import (
     BusinessKnowledgeEntry,
     BusinessKnowledgeRepository,
+)
+from data_analysis_agent.knowledge_import import (
+    KnowledgeDocumentError,
+    extract_knowledge_candidates,
 )
 from data_analysis_agent.permissions import ApprovalRepository, PermissionPolicy
 from data_analysis_agent.pdf_export import render_markdown_pdf
@@ -62,6 +73,7 @@ from data_analysis_agent.repositories import (
     TaskRepository,
 )
 from data_analysis_agent.settings import Settings
+from data_analysis_agent.scope import GLOBAL_PROJECT_ID
 from data_analysis_agent.tools import ToolRegistry, build_tool_registry
 from data_analysis_agent.team import AgentRole, TeamManager, TeamRepository, TeammateRunner
 from data_analysis_agent.tracing import (
@@ -89,6 +101,10 @@ class CreateProjectRequest(ApiModel):
     name: str = Field(min_length=1, max_length=120)
 
 
+class UpdateProjectRequest(ApiModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
 class ProjectResponse(ApiModel):
     id: str
     name: str
@@ -100,6 +116,11 @@ class ProjectResponse(ApiModel):
 class CreateDataSourceRequest(ApiModel):
     name: str = Field(min_length=1, max_length=120)
     dsn: str = Field(min_length=1, max_length=4_000)
+
+
+class UpdateDataSourceRequest(ApiModel):
+    name: str = Field(min_length=1, max_length=120)
+    dsn: str | None = Field(default=None, min_length=1, max_length=4_000)
 
 
 class SaveBusinessKnowledgeRequest(ApiModel):
@@ -127,6 +148,13 @@ class BusinessKnowledgeResponse(ApiModel):
     updated_at: str
 
 
+class BusinessKnowledgeImportResponse(ApiModel):
+    file_name: str
+    created: list[BusinessKnowledgeResponse]
+    skipped_names: list[str]
+    category_counts: dict[str, int]
+
+
 class DataSourceResponse(ApiModel):
     id: str
     project_id: str
@@ -145,6 +173,7 @@ class PolicyRuleRequest(ApiModel):
 
 class ReplacePoliciesRequest(ApiModel):
     rules: list[PolicyRuleRequest]
+    expected_version: int | None = Field(default=None, ge=1)
 
 
 class PolicyResponse(ApiModel):
@@ -591,6 +620,24 @@ def create_app(
         WorkspaceService(settings).create_project(project.id)
         return _project_response(project)
 
+    @app.put("/api/projects/{project_id}", response_model=ProjectResponse)
+    def update_project(
+        project_id: str,
+        request: UpdateProjectRequest,
+    ) -> ProjectResponse:
+        try:
+            return _project_response(services.projects.update_name(project_id, request.name))
+        except RecordNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Project not found",
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Project name must not be empty",
+            ) from exc
+
     @app.get(
         "/api/projects/{project_id}/knowledge",
         response_model=list[BusinessKnowledgeResponse],
@@ -631,6 +678,100 @@ def create_app(
                 detail="Business knowledge entry could not be created",
             ) from exc
         return _business_knowledge_response(entry)
+
+    @app.post(
+        "/api/projects/{project_id}/knowledge/import",
+        response_model=BusinessKnowledgeImportResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def import_business_knowledge(
+        project_id: str,
+        file: Annotated[UploadFile, File()],
+    ) -> BusinessKnowledgeImportResponse:
+        services.projects.get(project_id)
+        file_name = Path(file.filename or "knowledge-document").name[:255]
+        try:
+            content = file.file.read(10 * 1024 * 1024 + 1)
+            if len(content) > 10 * 1024 * 1024:
+                raise HTTPException(
+                    status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                    detail="Knowledge document must not exceed 10 MB",
+                )
+            candidates = extract_knowledge_candidates(file_name, content)
+        except KnowledgeDocumentError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=str(exc),
+            ) from exc
+        finally:
+            file.file.close()
+
+        known_names = {
+            entry.name.casefold()
+            for entry in services.knowledge.list_for_project(project_id)
+        }
+        created: list[BusinessKnowledgeEntry] = []
+        skipped_names: list[str] = []
+        for candidate in candidates:
+            if candidate.name.casefold() in known_names:
+                skipped_names.append(candidate.name)
+                continue
+            try:
+                entry = services.knowledge.create(
+                    project_id,
+                    kind=candidate.kind,
+                    name=candidate.name,
+                    definition=candidate.definition,
+                    formula=candidate.formula,
+                    dimensions=candidate.dimensions,
+                    synonyms=candidate.synonyms,
+                    source=f"文档导入 · {file_name}",
+                )
+            except RepositoryError:
+                skipped_names.append(candidate.name)
+                continue
+            known_names.add(entry.name.casefold())
+            created.append(entry)
+        category_counts = {
+            kind: sum(entry.kind == kind for entry in created)
+            for kind in ("metric", "term", "rule")
+        }
+        return BusinessKnowledgeImportResponse(
+            file_name=file_name,
+            created=[_business_knowledge_response(entry) for entry in created],
+            skipped_names=skipped_names,
+            category_counts=category_counts,
+        )
+
+    @app.get(
+        "/api/knowledge",
+        response_model=list[BusinessKnowledgeResponse],
+    )
+    def list_global_business_knowledge() -> list[BusinessKnowledgeResponse]:
+        return [
+            _business_knowledge_response(entry)
+            for entry in services.knowledge.list_all()
+        ]
+
+    @app.post(
+        "/api/knowledge",
+        response_model=BusinessKnowledgeResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_global_business_knowledge(
+        request: SaveBusinessKnowledgeRequest,
+    ) -> BusinessKnowledgeResponse:
+        return create_business_knowledge(GLOBAL_PROJECT_ID, request)
+
+    @app.post(
+        "/api/knowledge/import",
+        response_model=BusinessKnowledgeImportResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def import_global_business_knowledge(
+        file: Annotated[UploadFile, File()],
+    ) -> BusinessKnowledgeImportResponse:
+        return import_business_knowledge(GLOBAL_PROJECT_ID, file)
 
     @app.put(
         "/api/knowledge/{entry_id}",
@@ -709,7 +850,86 @@ def create_app(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Data source must use a valid PostgreSQL DSN",
             ) from exc
+        except RepositoryError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Data source name already exists",
+            ) from exc
         return _data_source_response(source)
+
+    @app.get(
+        "/api/data-sources",
+        response_model=list[DataSourceResponse],
+    )
+    def list_global_data_sources() -> list[DataSourceResponse]:
+        return [
+            _data_source_response(source)
+            for source in services.data_sources.list_all()
+        ]
+
+    @app.post(
+        "/api/data-sources",
+        response_model=DataSourceResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_global_data_source(
+        request: CreateDataSourceRequest,
+    ) -> DataSourceResponse:
+        return create_data_source(GLOBAL_PROJECT_ID, request)
+
+    @app.put(
+        "/api/data-sources/{source_id}",
+        response_model=DataSourceResponse,
+    )
+    def update_data_source(
+        source_id: str,
+        request: UpdateDataSourceRequest,
+    ) -> DataSourceResponse:
+        try:
+            source = services.data_sources.update(
+                source_id,
+                name=request.name,
+                dsn=request.dsn,
+            )
+        except RecordNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Data source not found",
+            ) from exc
+        except CredentialError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Secure storage is unavailable",
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Data source must use a valid PostgreSQL DSN",
+            ) from exc
+        except RepositoryError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Data source name already exists",
+            ) from exc
+        return _data_source_response(source)
+
+    @app.delete(
+        "/api/data-sources/{source_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+    )
+    def delete_data_source(source_id: str) -> None:
+        try:
+            services.data_sources.delete(source_id)
+        except RecordNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Data source not found",
+            ) from exc
+        except RepositoryError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Data source is currently in use",
+            ) from exc
 
     @app.put(
         "/api/data-sources/{source_id}/policies",
@@ -726,7 +946,16 @@ def create_app(
                 detail="Duplicate data-access policy",
             )
         try:
-            snapshot = services.data_sources.replace_policies(source_id, rules)
+            snapshot = services.data_sources.replace_policies(
+                source_id,
+                rules,
+                expected_version=request.expected_version,
+            )
+        except PolicyVersionConflict as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Data-access policy has changed; reload before saving",
+            ) from exc
         except RecordNotFoundError as exc:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -1054,7 +1283,11 @@ def create_app(
         background_tasks: BackgroundTasks,
     ) -> TaskResponse:
         task = services.tasks.get(task_id)
-        if task.status in {TaskStatus.NEEDS_INPUT, TaskStatus.COMPLETED}:
+        if task.status in {
+            TaskStatus.NEEDS_INPUT,
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+        }:
             resolved_provider = _configured_provider_or_409(services)
             background_tasks.add_task(
                 _continue_task,
@@ -1068,7 +1301,13 @@ def create_app(
                 teammate_provider_factory,
             )
         else:
-            services.tasks.add_message(task_id, "user", request.content)
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Task is already {task.status.value}; wait for it to finish "
+                    "before sending another message"
+                ),
+            )
         return _task_response(task)
 
     @app.post("/api/approvals/{approval_id}/decision")
@@ -1209,6 +1448,8 @@ def _continue_task(
     try:
         if previous_status is TaskStatus.COMPLETED:
             services.agent().follow_up(task_id, content)
+        elif previous_status is TaskStatus.FAILED:
+            services.agent().retry(task_id, content)
         else:
             services.agent().resume(task_id, content)
     finally:

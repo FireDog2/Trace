@@ -7,6 +7,7 @@ from threading import Lock, RLock
 from typing import Any, Callable, TypeVar
 
 from data_analysis_agent.settings import Settings
+from data_analysis_agent.scope import GLOBAL_PROJECT_ID, GLOBAL_PROJECT_NAME
 
 
 _CONNECTION_LOCKS_GUARD = Lock()
@@ -399,7 +400,6 @@ AFTER DELETE ON agent_runs BEGIN
 END;
 """
 
-
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -551,6 +551,27 @@ def migrate(connection: sqlite3.Connection) -> None:
         connection.execute(
             "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
             (15, utc_now()),
+        )
+    if 16 not in applied:
+        now = utc_now()
+        connection.execute(
+            "INSERT OR IGNORE INTO projects(id, name, status, created_at, updated_at) "
+            "VALUES (?, ?, 'active', ?, ?)",
+            (GLOBAL_PROJECT_ID, GLOBAL_PROJECT_NAME, now, now),
+        )
+        connection.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+            (16, now),
+        )
+    if 17 not in applied:
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(data_sources)")
+        }
+        if "deleted_at" not in columns:
+            connection.execute("ALTER TABLE data_sources ADD COLUMN deleted_at TEXT")
+        connection.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+            (17, utc_now()),
         )
     connection.execute("PRAGMA foreign_keys = ON")
     connection.commit()

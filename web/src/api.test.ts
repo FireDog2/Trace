@@ -54,4 +54,30 @@ describe("HttpApiClient", () => {
     await expect(new HttpApiClient().deleteBusinessKnowledge("entry-1")).resolves.toBeUndefined();
     expect(fetchMock).toHaveBeenCalledWith("/api/knowledge/entry-1", { method: "DELETE" });
   });
+
+  it("deletes a data source through the shared endpoint", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(new HttpApiClient().deleteDataSource("source-1")).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith("/api/data-sources/source-1", { method: "DELETE" });
+  });
+
+  it("uploads a business document for automatic knowledge import", async () => {
+    const result = {
+      file_name: "口径.md", created: [], skipped_names: [],
+      category_counts: { metric: 0, term: 0, rule: 0 },
+    };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(result), {
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const file = new File(["# 利润"], "口径.md", { type: "text/markdown" });
+
+    await expect(new HttpApiClient().importBusinessKnowledge(file)).resolves.toEqual(result);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/knowledge/import",
+      expect.objectContaining({ method: "POST", body: expect.any(FormData) }),
+    );
+  });
 });

@@ -1403,6 +1403,7 @@ class SemanticPostgresConnection:
         self.explain_target: str | None = None
         self.query_target: str | None = None
         self.query_limit: int | None = None
+        self.schema_query: str | None = None
         self.description = (
             SimpleNamespace(name="region"),
             SimpleNamespace(name="amount"),
@@ -1437,6 +1438,7 @@ class SemanticPostgresConnection:
             self.query_target = sql
             self.query_limit = parameters[0]
         elif "pg_catalog.pg_attribute" in sql:
+            self.schema_query = sql
             self.rows = (
                 ("orders", "region"),
                 ("orders", "amount"),
@@ -1514,3 +1516,6 @@ def test_psycopg_driver_catalog_contains_unqualified_names_only() -> None:
         "customers": ("id",),
     }
     assert all("." not in table for table in catalog)
+    assert connect.connections[0].schema_query is not None
+    assert "n.nspname NOT IN ('pg_catalog', 'information_schema')" in connect.connections[0].schema_query
+    assert "pg_catalog.has_table_privilege(c.oid, 'SELECT')" in connect.connections[0].schema_query

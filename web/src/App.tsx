@@ -39,6 +39,8 @@ export function App({ api: suppliedApi }: AppProps) {
   const [candidate, setCandidate] = useState<SkillCandidate | null>(null);
   const [curating, setCurating] = useState(false);
   const [objective, setObjective] = useState("");
+  const [initialUploading, setInitialUploading] = useState(false);
+  const [initialUploadName, setInitialUploadName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [modelConfiguration, setModelConfiguration] = useState<ModelConfigurationStatus | null>(null);
   const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
@@ -47,6 +49,7 @@ export function App({ api: suppliedApi }: AppProps) {
   const [projectNavOpen, setProjectNavOpen] = useState(false);
   const [projectNavCollapsed, setProjectNavCollapsed] = useState(false);
   const [artifactWorkspaceOpen, setArtifactWorkspaceOpen] = useState(false);
+  const [artifactWorkspaceCollapsed, setArtifactWorkspaceCollapsed] = useState(false);
 
   useEffect(() => {
     void api.listProjects().then((items) => {
@@ -97,12 +100,45 @@ export function App({ api: suppliedApi }: AppProps) {
     } catch (cause) { setError((cause as Error).message); }
   }
 
+  async function renameProject(projectId: string, name: string) {
+    try {
+      const updated = await api.updateProject(projectId, name);
+      setProjects((current) => current.map((project) => project.id === updated.id ? updated : project));
+      setError(null);
+    } catch (cause) { setError((cause as Error).message); }
+  }
+
   async function uploadDataset(file: File) {
     if (!selectedProjectId) return;
     try {
       const artifact = await api.uploadDataset(selectedProjectId, file);
       setArtifacts((current) => [...current, artifact]); setError(null);
-    } catch (cause) { setError((cause as Error).message); }
+    } catch (cause) { setError((cause as Error).message); throw cause; }
+  }
+
+  async function uploadChatFile(file: File) {
+    const extension = file.name.split(".").pop()?.toLowerCase();
+    if (extension === "csv" || extension === "xlsx") {
+      await uploadDataset(file);
+      return;
+    }
+    try {
+      await api.importBusinessKnowledge(file);
+      setError(null);
+    } catch (cause) {
+      setError((cause as Error).message);
+      throw cause;
+    }
+  }
+
+  async function uploadInitialDataset(file: File) {
+    setInitialUploading(true);
+    try {
+      await uploadDataset(file);
+      setInitialUploadName(file.name);
+    } finally {
+      setInitialUploading(false);
+    }
   }
 
   async function createTask(event: FormEvent) {
@@ -144,55 +180,76 @@ export function App({ api: suppliedApi }: AppProps) {
   }
 
   const shellClassName = ["app-shell", task ? "with-conversation" : "",
-    projectNavCollapsed ? "project-collapsed" : ""].filter(Boolean).join(" ");
+    projectNavCollapsed ? "project-collapsed" : "",
+    artifactWorkspaceCollapsed ? "artifact-collapsed" : ""].filter(Boolean).join(" ");
 
   return <div className={shellClassName}>
     <button type="button" className={projectNavCollapsed ? "project-drawer-toggle force-visible" : "project-drawer-toggle"}
-      aria-label="打开项目上下文" aria-expanded={projectNavOpen}
+      aria-label="打开任务台" aria-expanded={projectNavOpen}
       onClick={() => { setProjectNavCollapsed(false); setProjectNavOpen(true); }}>
-      <span aria-hidden="true">TRACE</span>项目上下文
+      <span aria-hidden="true">TRACE</span>任务台
     </button>
-    {task && <button type="button" className="artifact-drawer-toggle" aria-label="打开最终产物"
-      aria-expanded={artifactWorkspaceOpen} onClick={() => setArtifactWorkspaceOpen(true)}>
+    {task && <button type="button" className={artifactWorkspaceCollapsed ? "artifact-drawer-toggle force-visible" : "artifact-drawer-toggle"}
+      aria-label="打开证据与运行" aria-expanded={!artifactWorkspaceCollapsed && artifactWorkspaceOpen}
+      onClick={() => { setArtifactWorkspaceCollapsed(false); setArtifactWorkspaceOpen(true); }}>
       证据与运行<span aria-hidden="true">{task.artifacts.length}</span>
     </button>}
 
     {!projectNavCollapsed && <ProjectNav projects={projects} selectedProjectId={selectedProjectId}
-      artifacts={artifacts} tasks={tasks} selectedTaskId={selectedTaskId}
+      tasks={tasks} selectedTaskId={selectedTaskId}
       onSelectProject={(id) => { setSelectedProjectId(id); setProjectNavOpen(false); }}
       onSelectTask={(id) => { setSelectedTaskId(id); setProjectNavOpen(false); }}
-      onStartNewTask={() => { setSelectedTaskId(null); setTask(null); setEvents([]); setProjectNavOpen(false); }}
-      onCreateProject={createProject} onUpload={uploadDataset}
+      onStartNewTask={() => {
+        setSelectedTaskId(null); setTask(null); setEvents([]); setObjective("");
+        setInitialUploadName(""); setError(null); setProjectNavOpen(false);
+      }}
+      onCreateProject={createProject} onRenameProject={renameProject}
       modelConfiguration={modelConfiguration} onOpenModelSettings={() => setModelSettingsOpen(true)}
       onOpenDataSources={() => setDataSourceSettingsOpen(true)} onOpenKnowledge={() => setKnowledgeSettingsOpen(true)} drawerOpen={projectNavOpen}
       onClose={() => setProjectNavOpen(false)} onCollapse={() => { setProjectNavOpen(false); setProjectNavCollapsed(true); }} />}
 
     {error && <div className="error-banner" role="alert">{error}</div>}
     {!task && <main className="task-workbench empty-workbench">
-      <div className="empty-sequence">DATA → PLAN → EVIDENCE</div>
-      <h1>{selectedProjectId ? "提出第一个经营问题" : "创建一个分析项目"}</h1>
-      <p>{selectedProjectId ? "Agent 会检查项目数据、制定计划并留下可复现的代码与证据。" : "项目是数据、业务口径、分析任务和报告的长期容器。"}</p>
+      <div className="empty-sequence">{selectedProjectId && tasks.length ? "NEW CONVERSATION" : "DATA → PLAN → EVIDENCE"}</div>
+      <h1>{selectedProjectId ? tasks.length ? "开始新对话" : "提出第一个经营问题" : "创建一个分析项目"}</h1>
+      <p>{selectedProjectId ? tasks.length
+        ? "输入第一个问题后，这条对话会出现在左侧项目中。"
+        : "Agent 会检查项目数据、制定计划并留下可复现的代码与证据。"
+        : "项目是数据、业务口径、分析任务和报告的长期容器。"}</p>
       {selectedProjectId && <form className="objective-form" onSubmit={createTask}>
-        <label htmlFor="objective">分析目标</label><textarea id="objective" value={objective}
+        <label htmlFor="objective">分析目标</label><textarea id="objective" value={objective} autoFocus
           placeholder="例如：为什么华东区本季度利润下降？" onChange={(event) => setObjective(event.target.value)} />
-        <button type="submit" disabled={!objective.trim()}>开始分析</button>
+        <div className="objective-actions">
+          <label className={initialUploading ? "objective-upload uploading" : "objective-upload"}>
+            <span aria-hidden="true">＋</span>
+            <span>{initialUploading ? "正在上传…" : initialUploadName ? `已添加 ${initialUploadName}` : "添加 CSV / Excel"}</span>
+            <input type="file" accept=".csv,.xlsx" aria-label="在提出问题前上传分析文件"
+              disabled={initialUploading} onChange={(event) => {
+                const file = event.target.files?.[0];
+                event.target.value = "";
+                if (file) void uploadInitialDataset(file);
+              }} />
+          </label>
+          <button type="submit" disabled={!objective.trim()}>开始分析</button>
+        </div>
       </form>}
     </main>}
 
     {task && <Conversation task={task} events={events}
+      onUpload={uploadChatFile}
       onSend={async (content) => { if (selectedTaskId) { await api.sendMessage(selectedTaskId, content); setTask(await api.getTask(selectedTaskId)); } }}
       onApproval={async (id, approved) => { await api.decideApproval(id, approved); if (selectedTaskId) setTask(await api.getTask(selectedTaskId)); }} />}
-    {task && <ArtifactWorkspace task={task} agents={agents} runs={runs} traceEvents={traceEvents}
+    {task && !artifactWorkspaceCollapsed && <ArtifactWorkspace task={task} agents={agents} runs={runs} traceEvents={traceEvents}
       selectedRunId={selectedRunId} candidate={candidate} curating={curating}
       onSelectRun={selectRun} onAcceptRun={acceptAndCurate} onDecideSkill={decideSkill}
-      drawerOpen={artifactWorkspaceOpen} onClose={() => setArtifactWorkspaceOpen(false)} />}
+      drawerOpen={artifactWorkspaceOpen} onClose={() => { setArtifactWorkspaceOpen(false); setArtifactWorkspaceCollapsed(true); }} />}
     {modelConfiguration && <ModelSettings configuration={modelConfiguration} open={modelSettingsOpen}
       onClose={() => setModelSettingsOpen(false)} onSave={async (input: SaveModelConfiguration) => {
         setModelConfiguration(await api.saveModelConfiguration(input)); setModelSettingsOpen(false); setError(null);
       }} />}
-    <DataSourceSettings open={dataSourceSettingsOpen} projectId={selectedProjectId} api={api}
+    <DataSourceSettings open={dataSourceSettingsOpen} api={api}
       onClose={() => setDataSourceSettingsOpen(false)} />
-    <KnowledgeSettings open={knowledgeSettingsOpen} projectId={selectedProjectId} api={api}
+    <KnowledgeSettings open={knowledgeSettingsOpen} api={api}
       onClose={() => setKnowledgeSettingsOpen(false)} />
   </div>;
 }

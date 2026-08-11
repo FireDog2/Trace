@@ -6,7 +6,7 @@ import pytest
 
 from data_analysis_agent.data_sources import AccessLevel, CredentialError, DataSourceRepository
 from data_analysis_agent.db import migrate
-from data_analysis_agent.repositories import ProjectRepository, RepositoryError
+from data_analysis_agent.repositories import ProjectRepository, RecordNotFoundError, RepositoryError
 
 
 class RecordingProtector:
@@ -90,6 +90,71 @@ def test_data_source_hides_dsn_and_round_trips_credentials(db_connection, projec
     ).fetchone()[0]
     assert b"secret" in stored
     assert not isinstance(stored, str)
+
+
+def test_data_source_connection_can_be_renamed_without_revealing_or_replacing_dsn(
+    db_connection, project
+) -> None:
+    repository = DataSourceRepository(db_connection, RecordingProtector())
+    source = repository.create(
+        project.id,
+        "Warehouse",
+        "postgresql://analyst:secret@localhost/portfolio",
+    )
+
+    renamed = repository.update(source.id, name="Finance Warehouse")
+
+    assert renamed.name == "Finance Warehouse"
+    assert not hasattr(renamed, "dsn")
+    assert repository.credentials(source.id).dsn == "postgresql://analyst:secret@localhost/portfolio"
+
+    repository.update(
+        source.id,
+        name="Finance Warehouse",
+        dsn="postgresql://reader:new-secret@localhost/finance",
+    )
+    assert repository.credentials(source.id).dsn == "postgresql://reader:new-secret@localhost/finance"
+
+
+def test_data_source_can_be_deleted_without_losing_audit_rows_or_credentials(
+    db_connection, project
+) -> None:
+    repository = DataSourceRepository(db_connection, RecordingProtector())
+    source = repository.create(
+        project.id,
+        "Warehouse",
+        "postgresql://analyst:secret@localhost/portfolio",
+    )
+    repository.replace_policies(
+        source.id, {("orders", None): AccessLevel.ALLOWED}
+    )
+
+    repository.delete(source.id)
+
+    assert repository.list_for_project(project.id) == ()
+    assert repository.list_all() == ()
+    with pytest.raises(RecordNotFoundError):
+        repository.get_public(source.id)
+    with pytest.raises(RecordNotFoundError):
+        repository.credentials(source.id)
+    with pytest.raises(RecordNotFoundError):
+        repository.policy_snapshot(source.id)
+    stored = db_connection.execute(
+        "SELECT name, protected_dsn, deleted_at FROM data_sources WHERE id = ?",
+        (source.id,),
+    ).fetchone()
+    assert stored["name"] == f"__deleted__:{source.id}"
+    assert bytes(stored["protected_dsn"]) == b""
+    assert stored["deleted_at"] is not None
+    assert db_connection.execute(
+        "SELECT COUNT(*) FROM data_access_policies WHERE data_source_id = ?",
+        (source.id,),
+    ).fetchone()[0] == 1
+
+    replacement = repository.create(
+        project.id, "Warehouse", "postgresql://localhost/replacement"
+    )
+    assert replacement.name == "Warehouse"
 
 
 def test_replacing_policies_increments_version(db_connection, project) -> None:

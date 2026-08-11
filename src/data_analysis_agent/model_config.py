@@ -98,7 +98,12 @@ class _DataBlob(ctypes.Structure):
 
 
 class WindowsDpapiProtector:
-    _flags = 0x1  # CRYPTPROTECT_UI_FORBIDDEN
+    # The local service can be started either by the desktop app or from the
+    # user's terminal. Those launch surfaces may use different Windows
+    # identities, so bind secrets to this machine while relying on the data
+    # directory ACL to restrict who can read the encrypted blobs.
+    _protect_flags = 0x1 | 0x4  # UI_FORBIDDEN | LOCAL_MACHINE
+    _unprotect_flags = 0x1  # CRYPTPROTECT_UI_FORBIDDEN
 
     def protect(self, value: str) -> bytes:
         if sys.platform != "win32":
@@ -126,7 +131,7 @@ class WindowsDpapiProtector:
                 None,
                 None,
                 None,
-                self._flags,
+                self._unprotect_flags,
                 ctypes.byref(output_blob),
             )
         else:
@@ -136,7 +141,7 @@ class WindowsDpapiProtector:
                 None,
                 None,
                 None,
-                self._flags,
+                self._protect_flags,
                 ctypes.byref(output_blob),
             )
         if not succeeded:

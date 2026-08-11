@@ -17,18 +17,22 @@ import type {
 export interface ApiClient {
   listProjects(): Promise<Project[]>;
   createProject(name: string): Promise<Project>;
+  updateProject(projectId: string, name: string): Promise<Project>;
   uploadDataset(projectId: string, file: File): Promise<Artifact>;
   listArtifacts(projectId: string): Promise<Artifact[]>;
   listTasks(projectId: string): Promise<Task[]>;
   createTask(projectId: string, objective: string): Promise<Task>;
   getTask(taskId: string): Promise<TaskDetail>;
-  listDataSources(projectId: string): Promise<import("./types").DataSource[]>;
-  createDataSource(projectId: string, input: { name: string; dsn: string }): Promise<import("./types").DataSource>;
+  listDataSources(): Promise<import("./types").DataSource[]>;
+  createDataSource(input: { name: string; dsn: string }): Promise<import("./types").DataSource>;
+  updateDataSource(sourceId: string, input: { name: string; dsn?: string }): Promise<import("./types").DataSource>;
+  deleteDataSource(sourceId: string): Promise<void>;
   getDataSourceSchema(sourceId: string): Promise<import("./types").DatabaseSchema>;
   getDataSourcePolicies(sourceId: string): Promise<import("./types").PolicySnapshot>;
-  replaceDataSourcePolicies(sourceId: string, rules: import("./types").PolicyRule[]): Promise<import("./types").PolicySnapshot>;
-  listBusinessKnowledge(projectId: string): Promise<import("./types").BusinessKnowledgeEntry[]>;
-  createBusinessKnowledge(projectId: string, input: import("./types").SaveBusinessKnowledge): Promise<import("./types").BusinessKnowledgeEntry>;
+  replaceDataSourcePolicies(sourceId: string, rules: import("./types").PolicyRule[], expectedVersion?: number): Promise<import("./types").PolicySnapshot>;
+  listBusinessKnowledge(): Promise<import("./types").BusinessKnowledgeEntry[]>;
+  importBusinessKnowledge(file: File): Promise<import("./types").BusinessKnowledgeImportResult>;
+  createBusinessKnowledge(input: import("./types").SaveBusinessKnowledge): Promise<import("./types").BusinessKnowledgeEntry>;
   updateBusinessKnowledge(entryId: string, input: import("./types").SaveBusinessKnowledge): Promise<import("./types").BusinessKnowledgeEntry>;
   deleteBusinessKnowledge(entryId: string): Promise<void>;
   listAgents(taskId: string): Promise<AgentRun[]>;
@@ -48,6 +52,7 @@ export interface ApiClient {
 const EVENT_TYPES: TaskEventType[] = [
   "task.state",
   "task.reopened",
+  "task.retried",
   "task.resumed",
   "task.failed",
   "plan.updated",
@@ -74,6 +79,14 @@ export class HttpApiClient implements ApiClient {
   createProject(name: string): Promise<Project> {
     return this.request("/api/projects", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+  }
+
+  updateProject(projectId: string, name: string): Promise<Project> {
+    return this.request(`/api/projects/${projectId}`, {
+      method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name }),
     });
@@ -107,13 +120,16 @@ export class HttpApiClient implements ApiClient {
   getTask(taskId: string): Promise<TaskDetail> {
     return this.request(`/api/tasks/${taskId}`);
   }
-  listDataSources(projectId: string): Promise<import("./types").DataSource[]> { return this.request(`/api/projects/${projectId}/data-sources`); }
-  createDataSource(projectId: string, input: { name: string; dsn: string }): Promise<import("./types").DataSource> { return this.request(`/api/projects/${projectId}/data-sources`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }); }
+  listDataSources(): Promise<import("./types").DataSource[]> { return this.request("/api/data-sources"); }
+  createDataSource(input: { name: string; dsn: string }): Promise<import("./types").DataSource> { return this.request("/api/data-sources", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }); }
+  updateDataSource(sourceId: string, input: { name: string; dsn?: string }): Promise<import("./types").DataSource> { return this.request(`/api/data-sources/${sourceId}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }); }
+  deleteDataSource(sourceId: string): Promise<void> { return this.request(`/api/data-sources/${sourceId}`, { method: "DELETE" }); }
   getDataSourceSchema(sourceId: string): Promise<import("./types").DatabaseSchema> { return this.request(`/api/data-sources/${sourceId}/schema`); }
   getDataSourcePolicies(sourceId: string): Promise<import("./types").PolicySnapshot> { return this.request(`/api/data-sources/${sourceId}/policies`); }
-  replaceDataSourcePolicies(sourceId: string, rules: import("./types").PolicyRule[]): Promise<import("./types").PolicySnapshot> { return this.request(`/api/data-sources/${sourceId}/policies`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rules }) }); }
-  listBusinessKnowledge(projectId: string): Promise<import("./types").BusinessKnowledgeEntry[]> { return this.request(`/api/projects/${projectId}/knowledge`); }
-  createBusinessKnowledge(projectId: string, input: import("./types").SaveBusinessKnowledge): Promise<import("./types").BusinessKnowledgeEntry> { return this.request(`/api/projects/${projectId}/knowledge`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }); }
+  replaceDataSourcePolicies(sourceId: string, rules: import("./types").PolicyRule[], expectedVersion?: number): Promise<import("./types").PolicySnapshot> { return this.request(`/api/data-sources/${sourceId}/policies`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rules, expected_version: expectedVersion }) }); }
+  listBusinessKnowledge(): Promise<import("./types").BusinessKnowledgeEntry[]> { return this.request("/api/knowledge"); }
+  importBusinessKnowledge(file: File): Promise<import("./types").BusinessKnowledgeImportResult> { const form = new FormData(); form.append("file", file); return this.request("/api/knowledge/import", { method: "POST", body: form }); }
+  createBusinessKnowledge(input: import("./types").SaveBusinessKnowledge): Promise<import("./types").BusinessKnowledgeEntry> { return this.request("/api/knowledge", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }); }
   updateBusinessKnowledge(entryId: string, input: import("./types").SaveBusinessKnowledge): Promise<import("./types").BusinessKnowledgeEntry> { return this.request(`/api/knowledge/${entryId}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }); }
   deleteBusinessKnowledge(entryId: string): Promise<void> { return this.request(`/api/knowledge/${entryId}`, { method: "DELETE" }); }
 

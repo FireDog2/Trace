@@ -329,6 +329,32 @@ def test_agent_does_not_retry_non_transient_provider_error(
     assert delays == []
 
 
+def test_failed_task_can_be_retried_with_a_new_user_message(
+    settings, task_repository, tool_registry, task
+) -> None:
+    task_repository.transition(task.id, TaskStatus.FAILED)
+    provider = ScriptedProvider(
+        [ModelResponse(text="Recovered after retry.", tool_calls=())]
+    )
+
+    recovered = AgentRunner(
+        settings=settings,
+        provider=provider,
+        tools=tool_registry,
+        tasks=task_repository,
+    ).retry(task.id, "Try the workspace inventory again.")
+
+    assert recovered.status is TaskStatus.COMPLETED
+    assert [message.content for message in task_repository.list_messages(task.id)] == [
+        "Try the workspace inventory again.",
+        "Recovered after retry.",
+    ]
+    assert any(
+        event.event_type == "task.retried"
+        for event in task_repository.events_after(task.id, 0)
+    )
+
+
 def test_agent_reactively_compacts_and_retries_context_rejection(
     settings, task_repository, tool_registry, task
 ) -> None:

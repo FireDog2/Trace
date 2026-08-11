@@ -160,11 +160,17 @@ class PsycopgDriver:
     def __init__(
         self,
         *,
-        connect: Callable[[str], Any] = psycopg.connect,
+        connect: Callable[[str], Any] | None = None,
+        connect_timeout_seconds: int = 5,
         statement_timeout_ms: int = 8_000,
         lock_timeout_ms: int = 1_000,
     ) -> None:
-        self._connect = connect
+        self._connect = connect or (
+            lambda dsn: psycopg.connect(
+                dsn,
+                connect_timeout=connect_timeout_seconds,
+            )
+        )
         self._statement_timeout_ms = statement_timeout_ms
         self._lock_timeout_ms = lock_timeout_ms
 
@@ -181,9 +187,15 @@ class PsycopgDriver:
                         "SELECT c.relname, a.attname "
                         "FROM pg_catalog.pg_attribute AS a "
                         "JOIN pg_catalog.pg_class AS c ON c.oid = a.attrelid "
+                        "JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace "
                         "WHERE a.attnum > 0 AND NOT a.attisdropped "
                         "AND c.relkind IN ('r', 'p', 'v', 'm') "
+                        "AND n.nspname NOT IN ('pg_catalog', 'information_schema') "
+                        "AND n.nspname NOT LIKE 'pg_toast%' "
+                        "AND n.nspname NOT LIKE 'pg_temp_%' "
                         "AND pg_catalog.pg_table_is_visible(c.oid) "
+                        "AND pg_catalog.has_schema_privilege(n.oid, 'USAGE') "
+                        "AND pg_catalog.has_table_privilege(c.oid, 'SELECT') "
                         "ORDER BY c.relname, a.attnum"
                     )
                     rows = cursor.fetchall()
@@ -267,6 +279,7 @@ class SqlSafetyGateway:
         self.workspace = workspace
         self.tasks = tasks
         self.driver = driver or PsycopgDriver(
+            connect_timeout_seconds=settings.postgres_connect_timeout_seconds,
             statement_timeout_ms=settings.postgres_statement_timeout_ms,
             lock_timeout_ms=settings.postgres_lock_timeout_ms,
         )
@@ -287,10 +300,10 @@ class SqlSafetyGateway:
             source = self.sources.get_public(data_source_id)
         except RecordNotFoundError:
             return _denied("resource_not_found", "Task or data source was not found")
-        if task.project_id != project_id or source.project_id != project_id:
+        if task.project_id != project_id:
             return _denied(
                 "project_scope_denied",
-                "Task and data source must belong to the requested project",
+                "Task must belong to the requested project",
             )
         if source.dialect != "postgres":
             return _denied(

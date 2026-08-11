@@ -83,6 +83,12 @@ export interface SaveBusinessKnowledge {
   kind: BusinessKnowledgeKind; name: string; definition: string; formula?: string | null;
   dimensions: string[]; synonyms: string[]; source?: string | null;
 }
+export interface BusinessKnowledgeImportResult {
+  file_name: string;
+  created: BusinessKnowledgeEntry[];
+  skipped_names: string[];
+  category_counts: Record<BusinessKnowledgeKind, number>;
+}
 
 export interface AnalysisRun {
   id: string; task_id: string; status: "running" | "completed" | "failed" | "cancelled";
@@ -108,6 +114,7 @@ export interface ApprovalDecision {
 export type TaskEventType =
   | "task.state"
   | "task.reopened"
+  | "task.retried"
   | "task.resumed"
   | "task.failed"
   | "plan.updated"

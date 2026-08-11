@@ -13,9 +13,65 @@ from data_analysis_agent.model_config import SecretStorageUnavailable
 from data_analysis_agent.permissions import ToolAction
 from data_analysis_agent.providers import ModelResponse, ScriptedProvider
 from data_analysis_agent.reporting import ReportService
+from data_analysis_agent.scope import GLOBAL_PROJECT_ID
 from data_analysis_agent.team import AgentRole, AgentRunStatus
 from data_analysis_agent.tools import ToolCall, ToolContext
 from data_analysis_agent.tracing import TraceContext
+
+
+def test_project_can_be_renamed_and_global_workspace_stays_hidden(settings) -> None:
+    app = create_app(settings, ScriptedProvider(()))
+
+    with TestClient(app) as client:
+        created = client.post("/api/projects", json={"name": "Monthly review"})
+        updated = client.put(
+            f"/api/projects/{created.json()['id']}",
+            json={"name": "Quarterly review"},
+        )
+        projects = client.get("/api/projects")
+
+    assert created.status_code == 201
+    assert updated.status_code == 200
+    assert updated.json()["name"] == "Quarterly review"
+    assert [project["name"] for project in projects.json()] == ["Quarterly review"]
+    assert all(project["id"] != GLOBAL_PROJECT_ID for project in projects.json())
+
+
+def test_global_data_sources_and_knowledge_are_not_bound_to_a_user_project(settings) -> None:
+    app = create_app(settings, ScriptedProvider(()))
+    services = app.state.services
+    first = services.projects.create("First project")
+    second = services.projects.create("Second project")
+    legacy_source = services.data_sources.create(
+        first.id,
+        "Legacy warehouse",
+        "postgresql://reader@localhost/legacy",
+    )
+    services.knowledge.create(
+        second.id,
+        kind="term",
+        name="Legacy term",
+        definition="A previously project-scoped definition.",
+    )
+
+    with TestClient(app) as client:
+        source = client.post(
+            "/api/data-sources",
+            json={"name": "Shared warehouse", "dsn": "postgresql://reader@localhost/shared"},
+        )
+        knowledge = client.post(
+            "/api/knowledge",
+            json={"kind": "metric", "name": "Shared profit", "definition": "Revenue minus cost."},
+        )
+        sources = client.get("/api/data-sources")
+        entries = client.get("/api/knowledge")
+        search_result = services.knowledge.search_global("profit")
+
+    assert source.status_code == 201 and source.json()["project_id"] == GLOBAL_PROJECT_ID
+    assert knowledge.status_code == 201 and knowledge.json()["project_id"] == GLOBAL_PROJECT_ID
+    assert {item["id"] for item in sources.json()} == {legacy_source.id, source.json()["id"]}
+    assert {item["name"] for item in entries.json()} == {"Legacy term", "Shared profit"}
+    assert search_result[0].name == "Shared profit"
 
 
 def test_build_services_closes_open_connection_when_construction_fails(settings, monkeypatch) -> None:
@@ -148,6 +204,50 @@ def test_markdown_report_can_be_exported_as_source_or_pdf(settings) -> None:
     assert len(pdf.content) > 10_000
 
 
+def test_business_knowledge_document_import_creates_classified_entries(settings) -> None:
+    app = create_app(settings, ScriptedProvider(()))
+    services = app.state.services
+    project = services.projects.create("Knowledge import")
+    document = """# 经营利润
+定义：收入减去全部经营成本。
+公式：revenue - operating_cost
+
+# 数据导出规则
+定义：敏感字段必须审批，不得直接导出。
+""".encode()
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/projects/{project.id}/knowledge/import",
+            files={"file": ("财务口径.md", document, "text/markdown")},
+        )
+
+    assert response.status_code == 201
+    assert response.json()["category_counts"] == {"metric": 1, "term": 0, "rule": 1}
+    assert [entry["name"] for entry in response.json()["created"]] == ["经营利润", "数据导出规则"]
+    assert all(entry["source"] == "文档导入 · 财务口径.md" for entry in response.json()["created"])
+
+
+def test_policy_update_rejects_a_stale_editor_version(settings) -> None:
+    app = create_app(settings, ScriptedProvider(()))
+    services = app.state.services
+    project = services.projects.create("Policy editing")
+    source = services.data_sources.create(project.id, "Warehouse", "postgresql://readonly@localhost/warehouse")
+
+    with TestClient(app) as client:
+        first = client.put(
+            f"/api/data-sources/{source.id}/policies",
+            json={"expected_version": 1, "rules": [{"table": "orders", "column": None, "access": "allowed"}]},
+        )
+        stale = client.put(
+            f"/api/data-sources/{source.id}/policies",
+            json={"expected_version": 1, "rules": [{"table": "orders", "column": None, "access": "denied"}]},
+        )
+
+    assert first.status_code == 200 and first.json()["version"] == 2
+    assert stale.status_code == 409
+
+
 @pytest.mark.parametrize("failure", ("provider", "runner_constructor", "runner_run"))
 def test_worker_runner_factory_closes_fresh_worker_on_each_failure(
     settings, monkeypatch, failure
@@ -270,6 +370,7 @@ def test_production_worker_failure_handler_closes_fresh_connection_on_repository
 @pytest.mark.parametrize("helper,arguments,method", [
     ("_run_task", ("task-1",), "run"),
     ("_continue_task", ("task-1", "follow up", TaskStatus.COMPLETED), "follow_up"),
+    ("_continue_task", ("task-1", "retry", TaskStatus.FAILED), "retry"),
     ("_resume_approved_task", ("task-1",), "resume_approval"),
 ])
 def test_background_helpers_shutdown_teammates_before_closing_connection(
@@ -581,6 +682,51 @@ def test_completed_task_accepts_follow_up_after_application_restart(settings) ->
             "Now compare the East result with West.",
             "Follow-up diagnosis complete.",
         ]
+
+
+def test_failed_task_accepts_a_retry_message(settings) -> None:
+    provider = ScriptedProvider(
+        [ModelResponse(text="Recovered after retry.", tool_calls=())]
+    )
+    app = create_app(settings, provider)
+    services = app.state.services
+    project = services.projects.create("Retry review")
+    task = services.tasks.create(project.id, "List current artifacts")
+    services.tasks.transition(task.id, TaskStatus.FAILED)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/tasks/{task.id}/messages",
+            json={"content": "Retry the project inventory."},
+        )
+        detail = client.get(f"/api/tasks/{task.id}").json()
+
+    assert response.status_code == 200
+    assert detail["status"] == "completed"
+    assert [message["content"] for message in detail["messages"]] == [
+        "Retry the project inventory.",
+        "Recovered after retry.",
+    ]
+
+
+def test_running_task_rejects_a_second_message(settings) -> None:
+    app = create_app(settings, ScriptedProvider([]))
+    services = app.state.services
+    project = services.projects.create("Active review")
+    task = services.tasks.create(project.id, "Analyze current performance")
+    services.tasks.transition(task.id, TaskStatus.PLANNING)
+    services.tasks.transition(task.id, TaskStatus.RUNNING)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/tasks/{task.id}/messages",
+            json={"content": "Submit this again"},
+        )
+        detail = client.get(f"/api/tasks/{task.id}").json()
+
+    assert response.status_code == 409
+    assert response.json()["detail"].startswith("Task is already running")
+    assert detail["messages"] == []
 
 
 def test_approval_decision_is_visible_and_resumes_configured_agent(settings) -> None:
@@ -909,6 +1055,60 @@ def test_data_source_api_never_returns_dsn(settings) -> None:
         assert client.get(
             f"/api/projects/{project['id']}/data-sources"
         ).json() == [response.json()]
+
+
+def test_data_source_connection_can_be_updated_without_returning_saved_dsn(settings) -> None:
+    app = create_app(settings, secret_protector=RecordingProtector())
+    with TestClient(app) as client:
+        project = client.post("/api/projects", json={"name": "Review"}).json()
+        source = client.post(
+            f"/api/projects/{project['id']}/data-sources",
+            json={"name": "Warehouse", "dsn": "postgresql://reader:secret@localhost/review"},
+        ).json()
+
+        renamed = client.put(
+            f"/api/data-sources/{source['id']}",
+            json={"name": "Finance Warehouse"},
+        )
+        replaced = client.put(
+            f"/api/data-sources/{source['id']}",
+            json={"name": "Finance Warehouse", "dsn": "postgresql://reader:new-secret@localhost/finance"},
+        )
+        stored_dsn = app.state.services.data_sources.credentials(source["id"]).dsn
+
+    assert renamed.status_code == 200 and renamed.json()["name"] == "Finance Warehouse"
+    assert replaced.status_code == 200
+    assert "dsn" not in renamed.json() and "dsn" not in replaced.json()
+    assert "secret" not in renamed.text and "new-secret" not in replaced.text
+    assert stored_dsn.endswith("/finance")
+
+
+def test_data_source_can_be_deleted_globally_and_its_credentials_are_erased(settings) -> None:
+    app = create_app(settings, secret_protector=RecordingProtector())
+    with TestClient(app) as client:
+        source = client.post(
+            "/api/data-sources",
+            json={
+                "name": "Warehouse",
+                "dsn": "postgresql://reader:secret@localhost/review",
+            },
+        ).json()
+
+        deleted = client.delete(f"/api/data-sources/{source['id']}")
+        listed = client.get("/api/data-sources")
+        missing = client.get(f"/api/data-sources/{source['id']}/policies")
+        repeated = client.delete(f"/api/data-sources/{source['id']}")
+        stored = app.state.services.connection.execute(
+            "SELECT protected_dsn, deleted_at FROM data_sources WHERE id = ?",
+            (source["id"],),
+        ).fetchone()
+
+    assert deleted.status_code == 204
+    assert listed.json() == []
+    assert missing.status_code == 404
+    assert repeated.status_code == 404
+    assert bytes(stored["protected_dsn"]) == b""
+    assert stored["deleted_at"] is not None
 
 
 def test_data_source_policy_and_schema_apis_are_project_scoped(settings) -> None:

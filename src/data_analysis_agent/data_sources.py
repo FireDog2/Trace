@@ -21,6 +21,10 @@ class CredentialError(RepositoryError):
     """Raised when a data-source credential cannot be accessed safely."""
 
 
+class PolicyVersionConflict(RepositoryError):
+    """Raised when a policy editor tries to replace a stale snapshot."""
+
+
 class AccessLevel(StrEnum):
     ALLOWED = "allowed"
     APPROVAL_REQUIRED = "approval_required"
@@ -79,6 +83,9 @@ class DataSourceRepository:
     @sqlite_connection_guarded
     def create(self, project_id: str, name: str, dsn: str) -> DataSource:
         normalized_dsn = _postgres_dsn(dsn)
+        normalized_name = name.strip()
+        if not normalized_name:
+            raise ValueError("Data source name is required")
         source_id = str(uuid4())
         now = utc_now()
         try:
@@ -94,7 +101,7 @@ class DataSourceRepository:
                 (
                     source_id,
                     project_id,
-                    name,
+                    normalized_name,
                     sqlite3.Binary(protected_dsn),
                     now,
                     now,
@@ -107,6 +114,39 @@ class DataSourceRepository:
         return self.get_public(source_id)
 
     @sqlite_connection_guarded
+    def update(
+        self,
+        data_source_id: str,
+        *,
+        name: str,
+        dsn: str | None = None,
+    ) -> DataSource:
+        if self._public_row(data_source_id) is None:
+            raise RecordNotFoundError(f"Data source not found: {data_source_id}")
+        normalized_name = name.strip()
+        if not normalized_name:
+            raise ValueError("Data source name is required")
+        parameters: tuple[object, ...]
+        if dsn is not None:
+            normalized_dsn = _postgres_dsn(dsn)
+            try:
+                protected_dsn = self._secret_protector.protect(normalized_dsn)
+            except BaseException:
+                raise CredentialError("Data source credentials are unavailable") from None
+            sql = "UPDATE data_sources SET name = ?, protected_dsn = ?, updated_at = ? WHERE id = ?"
+            parameters = (normalized_name, sqlite3.Binary(protected_dsn), utc_now(), data_source_id)
+        else:
+            sql = "UPDATE data_sources SET name = ?, updated_at = ? WHERE id = ?"
+            parameters = (normalized_name, utc_now(), data_source_id)
+        try:
+            self._connection.execute(sql, parameters)
+            self._connection.commit()
+        except sqlite3.IntegrityError as exc:
+            self._connection.rollback()
+            raise RepositoryError("Unable to update data source") from exc
+        return self.get_public(data_source_id)
+
+    @sqlite_connection_guarded
     def get_public(self, data_source_id: str) -> DataSource:
         row = self._public_row(data_source_id)
         if row is None:
@@ -116,7 +156,8 @@ class DataSourceRepository:
     @sqlite_connection_guarded
     def credentials(self, data_source_id: str) -> DataSourceCredentials:
         row = self._connection.execute(
-            "SELECT id, protected_dsn FROM data_sources WHERE id = ?",
+            "SELECT id, protected_dsn FROM data_sources "
+            "WHERE id = ? AND deleted_at IS NULL",
             (data_source_id,),
         ).fetchone()
         if row is None:
@@ -131,16 +172,62 @@ class DataSourceRepository:
     def list_for_project(self, project_id: str) -> tuple[DataSource, ...]:
         rows = self._connection.execute(
             "SELECT id, project_id, name, dialect, policy_version, created_at, updated_at "
-            "FROM data_sources WHERE project_id = ? ORDER BY created_at, rowid",
+            "FROM data_sources WHERE project_id = ? AND deleted_at IS NULL "
+            "ORDER BY created_at, rowid",
             (project_id,),
         ).fetchall()
         return tuple(_data_source_from_row(row) for row in rows)
+
+    @sqlite_connection_guarded
+    def list_all(self) -> tuple[DataSource, ...]:
+        rows = self._connection.execute(
+            "SELECT id, project_id, name, dialect, policy_version, created_at, updated_at "
+            "FROM data_sources WHERE deleted_at IS NULL "
+            "ORDER BY name COLLATE NOCASE, created_at, rowid"
+        ).fetchall()
+        return tuple(_data_source_from_row(row) for row in rows)
+
+    @sqlite_connection_guarded
+    def delete(self, data_source_id: str) -> None:
+        """Retire a source while preserving its historical query audit trail."""
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            if self._public_row(data_source_id) is None:
+                raise RecordNotFoundError(f"Data source not found: {data_source_id}")
+            self._recover_stale_attempts_in_transaction(data_source_id)
+            active_attempt = self._connection.execute(
+                "SELECT id FROM database_query_attempts WHERE data_source_id = ? "
+                "AND status = 'in_flight' LIMIT 1",
+                (data_source_id,),
+            ).fetchone()
+            if active_attempt is not None:
+                raise RepositoryError(
+                    "Cannot delete data source while a query is in flight"
+                )
+            now = utc_now()
+            self._connection.execute(
+                "UPDATE data_sources SET name = ?, protected_dsn = ?, deleted_at = ?, "
+                "updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+                (
+                    f"__deleted__:{data_source_id}",
+                    sqlite3.Binary(b""),
+                    now,
+                    now,
+                    data_source_id,
+                ),
+            )
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
 
     @sqlite_connection_guarded
     def replace_policies(
         self,
         data_source_id: str,
         rules: dict[tuple[str, str | None], AccessLevel],
+        *,
+        expected_version: int | None = None,
     ) -> PolicySnapshot:
         normalized_rules: dict[tuple[str, str | None], AccessLevel] = {}
         for (table, column), level in rules.items():
@@ -154,8 +241,11 @@ class DataSourceRepository:
         now = utc_now()
         try:
             self._connection.execute("BEGIN IMMEDIATE")
-            if self._public_row(data_source_id) is None:
+            source_row = self._public_row(data_source_id)
+            if source_row is None:
                 raise RecordNotFoundError(f"Data source not found: {data_source_id}")
+            if expected_version is not None and int(source_row["policy_version"]) != expected_version:
+                raise PolicyVersionConflict("Data-access policy has changed")
             self._recover_stale_attempts_in_transaction(data_source_id)
             active_attempt = self._connection.execute(
                 "SELECT id FROM database_query_attempts WHERE data_source_id = ? "
@@ -233,7 +323,7 @@ class DataSourceRepository:
     def _public_row(self, data_source_id: str) -> sqlite3.Row | None:
         return self._connection.execute(
             "SELECT id, project_id, name, dialect, policy_version, created_at, updated_at "
-            "FROM data_sources WHERE id = ?",
+            "FROM data_sources WHERE id = ? AND deleted_at IS NULL",
             (data_source_id,),
         ).fetchone()
 

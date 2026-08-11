@@ -8,6 +8,7 @@ import { TraceTimeline } from "./TraceTimeline";
 
 type WorkspaceTab = "report" | "chart" | "data" | "code" | "team" | "trace";
 type ArtifactTab = Exclude<WorkspaceTab, "team" | "trace">;
+type WorkspaceSection = "evidence" | "runtime";
 
 interface ArtifactWorkspaceProps {
   task: TaskDetail; agents: AgentRun[]; runs: AnalysisRun[]; traceEvents: TraceEvent[];
@@ -23,6 +24,10 @@ const TAB_LABELS: Record<WorkspaceTab, string> = {
 const EMPTY_LABELS: Record<ArtifactTab, string> = {
   report: "暂无报告产物", chart: "暂无图表产物", data: "暂无数据产物", code: "暂无代码产物",
 };
+const SECTION_TABS: Record<WorkspaceSection, WorkspaceTab[]> = {
+  evidence: ["report", "chart", "data", "code"],
+  runtime: ["team", "trace"],
+};
 
 function artifactTab(artifact: Artifact): ArtifactTab {
   const type = artifact.artifact_type.toLowerCase();
@@ -35,6 +40,7 @@ function artifactTab(artifact: Artifact): ArtifactTab {
 export function ArtifactWorkspace({ task, agents, runs, traceEvents, selectedRunId, candidate,
   curating, onSelectRun, onAcceptRun, onDecideSkill, drawerOpen, onClose }: ArtifactWorkspaceProps) {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>("report");
+  const [activeSection, setActiveSection] = useState<WorkspaceSection>("evidence");
   const latestConclusion = [...task.messages].reverse().find((message) => message.role === "assistant")?.content;
   const grouped = useMemo(() => {
     const result: Record<ArtifactTab, Artifact[]> = { report: [], chart: [], data: [], code: [] };
@@ -44,13 +50,30 @@ export function ArtifactWorkspace({ task, agents, runs, traceEvents, selectedRun
   const selectedRun = runs.find((run) => run.id === selectedRunId);
   const tabCount = (tab: WorkspaceTab) => tab === "team" ? agents.length : tab === "trace" ? runs.length : grouped[tab].length;
 
-  return <aside className={drawerOpen ? "artifact-workspace drawer-open" : "artifact-workspace"} aria-label="最终产物">
-    <header className="artifact-workspace-header"><div><span>EVIDENCE / RUNTIME</span><h2>证据与运行</h2></div>
-      <div className="artifact-header-actions"><span>{task.artifacts.length} 产物 · {agents.length} Agent</span>
-        <button type="button" className="artifact-close" aria-label="关闭最终产物" onClick={onClose}>×</button></div>
+  function selectSection(section: WorkspaceSection) {
+    setActiveSection(section);
+    if (!SECTION_TABS[section].includes(activeTab)) {
+      setActiveTab(section === "evidence" ? "report" : "team");
+    }
+  }
+
+  return <aside className={drawerOpen ? "artifact-workspace drawer-open" : "artifact-workspace"} aria-label="证据与运行">
+    <header className="artifact-workspace-header"><div><span>ANALYSIS RECORD</span><h2>证据与运行</h2></div>
+      <div className="artifact-header-actions"><span>{task.artifacts.length} 证据 · {runs.length} 运行</span>
+        <button type="button" className="artifact-collapse" aria-label="隐藏证据与运行" onClick={onClose}>›</button></div>
     </header>
-    <div className="artifact-tabs" role="tablist" aria-label="证据与运行类型">
-      {(Object.keys(TAB_LABELS) as WorkspaceTab[]).map((tab) => <button type="button" role="tab"
+    <div className="workspace-section-switch" role="tablist" aria-label="内容分区">
+      <button type="button" role="tab" aria-label="证据" aria-selected={activeSection === "evidence"}
+        className={activeSection === "evidence" ? "active" : ""} onClick={() => selectSection("evidence")}>
+        <span aria-hidden="true">◇</span><span><strong>证据</strong><small>结论与可复现产物</small></span><b>{task.artifacts.length}</b>
+      </button>
+      <button type="button" role="tab" aria-label="运行" aria-selected={activeSection === "runtime"}
+        className={activeSection === "runtime" ? "active" : ""} onClick={() => selectSection("runtime")}>
+        <span aria-hidden="true">↳</span><span><strong>运行</strong><small>Agent、回放与 Skill</small></span><b>{runs.length}</b>
+      </button>
+    </div>
+    <div className={`artifact-tabs ${activeSection}`} role="tablist" aria-label={activeSection === "evidence" ? "证据类型" : "运行类型"}>
+      {SECTION_TABS[activeSection].map((tab) => <button type="button" role="tab"
         id={`artifact-tab-${tab}`} aria-controls="artifact-tab-panel" aria-selected={activeTab === tab}
         className={activeTab === tab ? "active" : ""} key={tab} onClick={() => setActiveTab(tab)}>
         {TAB_LABELS[tab]}<span>{tabCount(tab)}</span></button>)}

@@ -464,6 +464,15 @@ def build_tool_registry(
                     }
                     for task in tasks.list_for_project(context.project_id)
                 ],
+                "data_sources": [
+                    {
+                        "id": source.id,
+                        "name": source.name,
+                        "dialect": source.dialect,
+                        "policy_version": source.policy_version,
+                    }
+                    for source in (sql_gateway.sources.list_all() if sql_gateway else ())
+                ],
             }
         )
 
@@ -604,9 +613,7 @@ def build_tool_registry(
                 category="knowledge_unavailable",
                 retryable=False,
             )
-        entries = knowledge.search(
-            context.project_id, arguments.query, limit=arguments.limit
-        )
+        entries = knowledge.search_global(arguments.query, limit=arguments.limit)
         return HandlerResult(
             {
                 "query": arguments.query,
@@ -779,7 +786,7 @@ def build_tool_registry(
     definitions = (
         ToolDefinition(
             "inspect_workspace",
-            "List datasets, tasks, and artifacts available in the current project.",
+            "List current-project datasets, tasks, and artifacts plus shared database connections.",
             InspectWorkspaceInput,
             inspect_workspace,
         ),

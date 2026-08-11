@@ -1,5 +1,7 @@
 # Governed Data Analysis Agent
 
+**English** | [简体中文](README.zh-CN.md)
+
 A local-first, evidence-first agent workbench for governed data analysis. A lead
 agent can coordinate role-scoped teammates, query local files and read-only
 PostgreSQL sources, publish evidence-linked reports, and leave a durable replay of
@@ -31,58 +33,9 @@ and typed tool calls. The harness remains authoritative for state transitions,
 permissions, credentials, context projection, tool execution, retries, evidence,
 and traces.
 
-```mermaid
-flowchart TB
-  subgraph Experience["Experience layer"]
-    UI["React workbench<br/>projects · conversation · artifacts · agent team · trace"]
-    API["FastAPI boundary<br/>validation · redaction · lifecycle"]
-  end
+![Governed Data Analysis Agent harness architecture](docs/assets/harness-architecture.en.png)
 
-  subgraph Harness["Agent harness / control plane"]
-    Runner["Lead AgentRunner<br/>bounded model/tool loop"]
-    Prompt["Prompt assembly<br/>versioned stable + dynamic sections"]
-    Context["Context manager<br/>budget · projection · checkpoint"]
-    Recovery["Recovery state<br/>retry caps · loop detection · fallback"]
-    Team["Team manager<br/>role scope · leases · deadlines · cancellation"]
-    Registry["Tool registry<br/>typed schemas · project/task scope"]
-    Policy["Permission and approval policy<br/>allow · approve once · deny"]
-    Trace["Trace recorder<br/>correlation · redaction · replay"]
-  end
-
-  subgraph Execution["Execution and evidence plane"]
-    Knowledge["Business Knowledge<br/>versioned metric / term / rule"]
-    DuckDB["DuckDB + Python<br/>local bounded analysis"]
-    SQLGate["PostgreSQL safety gateway<br/>AST · policy · EXPLAIN · limits"]
-    Workspace["Project workspace<br/>datasets · artifacts · reports"]
-    Curator["Zero-tool Curator<br/>disabled Skill Candidate"]
-  end
-
-  subgraph Persistence["Durable state"]
-    SQLite[("SQLite metadata<br/>tasks · messages · approvals · agents<br/>checkpoints · traces · skills")]
-    PostgreSQL[("Read-only PostgreSQL")]
-    Files[("Project files and artifacts")]
-  end
-
-  UI --> API --> Runner
-  Runner --> Prompt
-  Runner --> Context
-  Runner --> Recovery
-  Runner --> Team
-  Runner --> Registry --> Policy
-  Runner --> Trace
-  Team --> Registry
-  Registry --> Knowledge
-  Registry --> DuckDB
-  Registry --> SQLGate --> PostgreSQL
-  Registry --> Workspace --> Files
-  Trace --> SQLite
-  Runner --> SQLite
-  Team --> SQLite
-  Knowledge --> SQLite
-  Policy --> SQLite
-  Context --> SQLite
-  API --> Curator --> SQLite
-```
+<p align="center"><sub>The model proposes; the harness governs context, permissions, execution, recovery, evidence, and durable state.</sub></p>
 
 ### Harness responsibilities
 

@@ -21,6 +21,7 @@ class Settings:
     context_target_tokens: int = 24_000
     context_recent_messages: int = 12
     context_max_tool_result_chars: int = 24_000
+    postgres_connect_timeout_seconds: int = 5
     postgres_statement_timeout_ms: int = 8_000
     postgres_lock_timeout_ms: int = 1_000
     postgres_max_rows: int = 1_000
@@ -36,6 +37,8 @@ class Settings:
             raise ValueError("max_tool_attempts must be between 1 and 10")
         if not 1 <= self.postgres_max_rows <= 10_000:
             raise ValueError("postgres_max_rows must be between 1 and 10000")
+        if not 1 <= self.postgres_connect_timeout_seconds <= 60:
+            raise ValueError("postgres_connect_timeout_seconds must be between 1 and 60")
         if not 1 <= self.max_teammate_turns <= 100:
             raise ValueError("max_teammate_turns must be between 1 and 100")
         if not 1 <= self.teammate_timeout_seconds <= 3_600:

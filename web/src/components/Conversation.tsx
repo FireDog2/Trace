@@ -1,10 +1,12 @@
 import { FormEvent, useState } from "react";
 
 import type { TaskDetail, TaskEvent } from "../types";
+import { Markdown } from "./Markdown";
 
 interface ConversationProps {
   task: TaskDetail;
   events: TaskEvent[];
+  onUpload(file: File): Promise<void>;
   onSend(content: string): Promise<void>;
   onApproval(approvalId: string, approved: boolean): Promise<void>;
 }
@@ -20,6 +22,8 @@ const STATUS_LABELS: Record<string, string> = {
   completed: "分析完成",
 };
 
+const ACTIVE_STATUSES = new Set(["understanding", "planning", "running", "synthesizing"]);
+
 interface ApprovalView {
   id: string;
   toolName: string;
@@ -30,13 +34,19 @@ interface ApprovalView {
 export function Conversation({
   task,
   events,
+  onUpload,
   onSend,
   onApproval,
 }: ConversationProps) {
   const [content, setContent] = useState("");
   const [sending, setSending] = useState(false);
   const [deciding, setDeciding] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadedFileName, setUploadedFileName] = useState("");
   const approvals = approvalViews(events);
+  const failed = task.status === "failed";
+  const active = ACTIVE_STATUSES.has(task.status);
+  const composerLocked = active || task.status === "cancelled";
   const executionRows = task.plan?.steps.map((step) => ({
     id: step.id,
     position: step.position,
@@ -47,7 +57,7 @@ export function Conversation({
   async function submit(event: FormEvent) {
     event.preventDefault();
     const message = content.trim();
-    if (!message || sending) return;
+    if (!message || sending || composerLocked) return;
     setSending(true);
     try {
       await onSend(message);
@@ -66,6 +76,16 @@ export function Conversation({
     }
   }
 
+  async function upload(file: File) {
+    setUploading(true);
+    try {
+      await onUpload(file);
+      setUploadedFileName(file.name);
+    } finally {
+      setUploading(false);
+    }
+  }
+
   return (
     <main className="conversation-panel" aria-label="分析对话">
       <header className="conversation-header">
@@ -77,6 +97,15 @@ export function Conversation({
       </header>
 
       <div className="conversation-scroll">
+        {failed && <section className="task-retry-guide" role="alert">
+          <span>RETRY AVAILABLE</span><strong>上次执行未完成</strong>
+          <p>检查模型连接后，可在下方补充或修改问题并重新执行；已有证据不会被删除。</p>
+        </section>}
+        {active && <section className="task-running-guide" role="status" aria-live="polite">
+          <span className="running-indicator" aria-hidden="true"><i /><i /><i /></span>
+          <div><strong>Agent 正在处理这个问题</strong>
+            <p>查询、分析和报告生成可能需要一些时间。执行完成后，结果会自动显示在对话中。</p></div>
+        </section>}
         <section className="agent-trace" aria-labelledby="agent-trace-heading">
           <h2 id="agent-trace-heading">Agent 执行轨迹</h2>
           <ol>
@@ -107,7 +136,9 @@ export function Conversation({
           return (
             <article key={message.id} className={`message ${message.role}`}>
               <span>{roleLabel}</span>
-              <p>{message.content}</p>
+              {message.role === "assistant"
+                ? <Markdown content={message.content} className="conversation-markdown" />
+                : <p>{message.content}</p>}
             </article>
           );
           })}
@@ -149,19 +180,31 @@ export function Conversation({
       </div>
 
       <form className="message-composer" onSubmit={submit}>
-        <label htmlFor="agent-message">给分析 Agent 留言</label>
+        <label htmlFor="agent-message">{active ? "当前问题正在执行" : failed ? "修改问题并重试" : "给分析 Agent 留言"}</label>
         <textarea
           id="agent-message"
-          aria-label="给分析 Agent 留言"
+          aria-label={active ? "当前问题正在执行" : failed ? "修改问题并重试" : "给分析 Agent 留言"}
           value={content}
-          disabled={sending}
-          placeholder="例如：物流成本按发货日期重新计算"
+          disabled={sending || composerLocked}
+          placeholder={active ? "完成后即可继续追问" : failed ? "例如：重试，并先列出当前项目的全部产物" : "例如：物流成本按发货日期重新计算"}
           onChange={(event) => setContent(event.target.value)}
         />
-        <div>
-          <span>Ctrl ↵</span>
-          <button type="submit" disabled={sending || !content.trim()}>
-            {sending ? "发送中" : "发送指令"}
+        <div className="composer-actions">
+          <div className="composer-attachments">
+            <label className={uploading ? "composer-upload uploading" : "composer-upload"}
+              title="上传分析数据或业务口径文档">
+              <span aria-hidden="true">＋</span>
+              <input type="file" accept=".csv,.xlsx,.pdf,.docx,.md,.txt" aria-label="上传分析文件" disabled={uploading || composerLocked} onChange={(event) => {
+                const file = event.target.files?.[0];
+                event.target.value = "";
+                if (file) void upload(file);
+              }} />
+            </label>
+            <span className="attachment-status">{uploading ? "正在上传…" : uploadedFileName ? `已添加 ${uploadedFileName}` : "添加数据或口径文档"}</span>
+          </div>
+          <span className="send-hint">{active ? "完成后可继续追问" : "Ctrl ↵"}</span>
+          <button type="submit" disabled={sending || composerLocked || !content.trim()}>
+            {active ? "执行中…" : sending ? "发送中" : failed ? "重新执行" : "发送指令"}
           </button>
         </div>
       </form>
