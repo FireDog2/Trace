@@ -11,9 +11,7 @@ from data_analysis_agent.db import migrate
 def test_migrate_creates_versioned_core_tables(db_connection) -> None:
     names = {
         row[0]
-        for row in db_connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table'"
-        )
+        for row in db_connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
 
     assert {
@@ -33,20 +31,40 @@ def test_migrate_creates_versioned_core_tables(db_connection) -> None:
         "data_sources",
         "data_access_policies",
         "task_query_budget",
-            "agent_runs",
-            "agent_messages",
-            "protected_agent_message_payloads",
-            "business_knowledge_entries",
-            "context_checkpoints",
+        "agent_runs",
+        "agent_messages",
+        "protected_agent_message_payloads",
+        "business_knowledge_entries",
+        "context_checkpoints",
     } <= names
     assert db_connection.execute(
         "SELECT version FROM schema_migrations ORDER BY version"
     ).fetchall() == [
-        (1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,),
-        (10,), (11,), (12,), (13,), (14,), (15,), (16,), (17,),
+        (1,),
+        (2,),
+        (3,),
+        (4,),
+        (5,),
+        (6,),
+        (7,),
+        (8,),
+        (9,),
+        (10,),
+        (11,),
+        (12,),
+        (13,),
+        (14,),
+        (15,),
+        (16,),
+        (17,),
     ]
     agent_run_columns = {row[1] for row in db_connection.execute("PRAGMA table_info(agent_runs)")}
-    assert {"turns_used", "deadline_at", "trace_run_id", "parent_event_id"} <= agent_run_columns
+    assert {
+        "turns_used",
+        "deadline_at",
+        "trace_run_id",
+        "parent_event_id",
+    } <= agent_run_columns
     for table in ("data_access_policies", "database_query_attempts"):
         assert any(
             row[2] == "data_sources"
@@ -63,23 +81,26 @@ def test_team_migration_replays_after_missing_version_record(db_connection) -> N
     assert db_connection.execute(
         "SELECT version FROM schema_migrations WHERE version = 7"
     ).fetchone() == (7,)
-    assert {row[0] for row in db_connection.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table'"
-    )} >= {"agent_runs", "agent_messages"}
+    assert {
+        row[0]
+        for row in db_connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    } >= {"agent_runs", "agent_messages"}
 
 
-def test_turn_deadline_migration_replays_when_its_version_record_is_missing(db_connection) -> None:
+def test_turn_deadline_migration_replays_when_its_version_record_is_missing(
+    db_connection,
+) -> None:
     db_connection.execute("DELETE FROM schema_migrations WHERE version = 9")
     db_connection.commit()
 
     migrate(db_connection)
 
-    assert db_connection.execute("SELECT version FROM schema_migrations WHERE version = 9").fetchone() == (9,)
+    assert db_connection.execute(
+        "SELECT version FROM schema_migrations WHERE version = 9"
+    ).fetchone() == (9,)
 
 
-def test_trace_correlation_migration_preserves_agent_rows_and_replays(
-    db_connection, task
-) -> None:
+def test_trace_correlation_migration_preserves_agent_rows_and_replays(db_connection, task) -> None:
     db_connection.execute(
         "INSERT INTO agent_runs(id, task_id, role, objective, status, cancel_requested, created_at) "
         "VALUES ('legacy-agent', ?, 'sql', 'Preserve me', 'created', 0, '2026-01-01T00:00:00+00:00')",
@@ -102,9 +123,7 @@ def test_trace_correlation_migration_preserves_agent_rows_and_replays(
 
 
 def test_data_source_migration_stores_encrypted_credentials_only(db_connection) -> None:
-    columns = {
-        row[1] for row in db_connection.execute("PRAGMA table_info(data_sources)")
-    }
+    columns = {row[1] for row in db_connection.execute("PRAGMA table_info(data_sources)")}
 
     assert "protected_dsn" in columns
     assert "dsn" not in columns
@@ -113,10 +132,7 @@ def test_data_source_migration_stores_encrypted_credentials_only(db_connection) 
 
 
 def test_model_configuration_is_a_singleton_table(db_connection) -> None:
-    columns = {
-        row[1]
-        for row in db_connection.execute("PRAGMA table_info(model_configuration)")
-    }
+    columns = {row[1] for row in db_connection.execute("PRAGMA table_info(model_configuration)")}
 
     assert columns == {
         "singleton_id",
@@ -163,12 +179,19 @@ def test_query_attempt_migration_is_replay_safe_and_records_durable_state(
     migrate(db_connection)
 
     columns = {
-        row[1]
-        for row in db_connection.execute("PRAGMA table_info(database_query_attempts)")
+        row[1] for row in db_connection.execute("PRAGMA table_info(database_query_attempts)")
     }
     assert {
-        "id", "task_id", "data_source_id", "policy_version", "sql_hash",
-        "approval_id", "status", "error_category", "started_at", "completed_at",
+        "id",
+        "task_id",
+        "data_source_id",
+        "policy_version",
+        "sql_hash",
+        "approval_id",
+        "status",
+        "error_category",
+        "started_at",
+        "completed_at",
     } <= columns
     assert db_connection.execute(
         "SELECT version FROM schema_migrations WHERE version = 4"
@@ -200,6 +223,7 @@ def test_connect_database_closes_connection_when_initialization_fails(
     connection = TrackingConnection()
     monkeypatch.setattr(db.sqlite3, "connect", lambda *args, **kwargs: connection)
     if failure == "migrate":
+
         def fail_migrate(_: object) -> None:
             raise sqlite3.DatabaseError("migration failed")
 

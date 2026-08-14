@@ -4,7 +4,7 @@ import json
 
 from data_analysis_agent.agent import AgentRunner
 from data_analysis_agent.providers import ModelResponse, ScriptedProvider
-from data_analysis_agent.team import TeamRepository, TeammateRunner
+from data_analysis_agent.team import TeammateRunner, TeamRepository
 from data_analysis_agent.team_types import AgentRole
 from data_analysis_agent.tools import ToolCall, ToolResult
 from data_analysis_agent.tracing import TraceContext, TraceRepository
@@ -51,10 +51,18 @@ def test_lead_trace_context_reaches_tool_and_records_safe_artifacts(
     assert registry.context.run_id == analysis_run.id
     events = traces.events_for_run(analysis_run.id)
     assert [event.event_type for event in events] == [
-        "agent.started", "prompt.assembled", "model.completed", "tool.started",
-        "tool.completed", "prompt.assembled", "model.completed", "agent.completed",
+        "agent.started",
+        "prompt.assembled",
+        "model.completed",
+        "tool.started",
+        "tool.completed",
+        "prompt.assembled",
+        "model.completed",
+        "agent.completed",
     ]
-    assert next(event for event in events if event.event_type == "tool.completed").artifact_ids == ("artifact-safe",)
+    assert next(event for event in events if event.event_type == "tool.completed").artifact_ids == (
+        "artifact-safe",
+    )
     serialized = json.dumps([event.payload for event in events])
     assert "secret_sentinel" not in serialized
     assert "private_table" not in serialized
@@ -105,7 +113,9 @@ def test_teammate_lifecycle_is_recorded_on_parent_analysis_run(
     assert completed.status.value == "completed"
     events = traces.events_for_run(analysis_run.id)
     assert [event.event_type for event in events] == [
-        "teammate.started", "prompt.assembled", "teammate.model.completed",
-        "teammate.completed"
+        "teammate.started",
+        "prompt.assembled",
+        "teammate.model.completed",
+        "teammate.completed",
     ]
     assert all(event.agent_id == run.id for event in events)

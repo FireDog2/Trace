@@ -10,7 +10,6 @@ from uuid import uuid4
 
 from data_analysis_agent.db import sqlite_connection_lock, utc_now
 
-
 AUTOMATIC_TOOLS = frozenset(
     {
         "inspect_workspace",
@@ -38,6 +37,7 @@ APPROVAL_TOOLS = frozenset(
         "overwrite_artifact",
     }
 )
+
 
 class PermissionLevel(StrEnum):
     ALLOW = "allow"
@@ -188,13 +188,10 @@ class ApprovalRepository:
                 "ORDER BY created_at, rowid",
                 (task_id, _action_json(action)),
             ).fetchall()
-            approved = next(
-                (row for row in rows if row["status"] == "approved"), None
-            )
+            approved = next((row for row in rows if row["status"] == "approved"), None)
             if approved is not None:
                 cursor = self._connection.execute(
-                    "UPDATE approvals SET status = 'consumed' "
-                    "WHERE id = ? AND status = 'approved'",
+                    "UPDATE approvals SET status = 'consumed' WHERE id = ? AND status = 'approved'",
                     (approved["id"],),
                 )
                 if cursor.rowcount == 1:
@@ -202,9 +199,7 @@ class ApprovalRepository:
                         "authorized",
                         replace(_approval_from_row(approved), status="consumed"),
                     )
-            pending = next(
-                (row for row in rows if row["status"] == "pending"), None
-            )
+            pending = next((row for row in rows if row["status"] == "pending"), None)
             if pending is not None:
                 return ApprovalResolution("pending", _approval_from_row(pending))
             rejected = next(
@@ -248,8 +243,7 @@ class ApprovalRepository:
             if row is None:
                 return False
             cursor = self._connection.execute(
-                "UPDATE approvals SET status = 'consumed' "
-                "WHERE id = ? AND status = 'approved'",
+                "UPDATE approvals SET status = 'consumed' WHERE id = ? AND status = 'approved'",
                 (row["id"],),
             )
             self._connection.commit()

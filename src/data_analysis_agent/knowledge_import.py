@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import csv
 import io
 import re
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from xml.etree import ElementTree
-
 
 SUPPORTED_KNOWLEDGE_DOCUMENTS = frozenset({".csv", ".docx", ".md", ".pdf", ".txt", ".xlsx"})
 MAX_DOCUMENT_CHARACTERS = 200_000
@@ -32,9 +30,7 @@ def extract_knowledge_candidates(filename: str, content: bytes) -> tuple[Knowled
     safe_name = Path(filename).name
     suffix = Path(safe_name).suffix.lower()
     if suffix not in SUPPORTED_KNOWLEDGE_DOCUMENTS:
-        raise KnowledgeDocumentError(
-            "仅支持 PDF、Word、Markdown、TXT、CSV 和 Excel 文档"
-        )
+        raise KnowledgeDocumentError("仅支持 PDF、Word、Markdown、TXT、CSV 和 Excel 文档")
     try:
         text = _extract_text(suffix, content)
     except KnowledgeDocumentError:
@@ -91,7 +87,9 @@ def _docx_text(content: bytes) -> str:
     for paragraph in root.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p"):
         value = "".join(
             node.text or ""
-            for node in paragraph.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t")
+            for node in paragraph.iter(
+                "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t"
+            )
         ).strip()
         if value:
             paragraphs.append(value)
@@ -107,7 +105,9 @@ def _xlsx_text(content: bytes) -> str:
         for sheet in workbook.worksheets:
             lines.append(f"# {sheet.title}")
             for row in sheet.iter_rows(values_only=True):
-                values = [str(value).strip() for value in row if value is not None and str(value).strip()]
+                values = [
+                    str(value).strip() for value in row if value is not None and str(value).strip()
+                ]
                 if values:
                     lines.append("：".join(values))
     finally:
@@ -142,16 +142,21 @@ def _parse_sections(text: str) -> tuple[KnowledgeCandidate, ...]:
     headings = list(heading_pattern.finditer(text))
     raw_sections: list[tuple[str | None, str]] = []
     if headings:
-        for index, heading in enumerate(headings):
+        for index, heading_match in enumerate(headings):
             end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
-            raw_sections.append((heading.group(1).strip(), text[heading.end():end].strip()))
+            raw_sections.append(
+                (
+                    heading_match.group(1).strip(),
+                    text[heading_match.end() : end].strip(),
+                )
+            )
     else:
         blocks = re.split(r"\n\s*\n+", text)
         raw_sections = [(None, block.strip()) for block in blocks if block.strip()]
 
     parsed: list[KnowledgeCandidate] = []
-    for heading, body in raw_sections:
-        candidate = _parse_section(heading, body)
+    for section_heading, body in raw_sections:
+        candidate = _parse_section(section_heading, body)
         if candidate is not None:
             parsed.append(candidate)
     return tuple(parsed)
@@ -182,7 +187,12 @@ def _parse_section(heading: str | None, body: str) -> KnowledgeCandidate | None:
 
     name = _first(fields, "名称", "指标名称", "术语名称", "规则名称") or (heading or "")
     definition = _first(fields, "定义", "口径", "说明", "释义")
-    if not name and free_lines and len(free_lines[0]) <= 160 and (definition or len(free_lines) >= 2):
+    if (
+        not name
+        and free_lines
+        and len(free_lines[0]) <= 160
+        and (definition or len(free_lines) >= 2)
+    ):
         name = free_lines.pop(0)
     if not definition:
         definition = "\n".join(free_lines)
@@ -221,19 +231,39 @@ def _classify(name: str, definition: str) -> str:
     value = f"{name} {definition}".casefold()
     if any(token in value for token in ("规则", "必须", "不得", "应当", "排除", "仅限")):
         return "rule"
-    if any(token in value for token in (
-        "指标", "公式", "计算", "利润", "收入", "成本", "销售额", "gmv", "kpi", "率",
-        "metric", "revenue", "cost", "profit", "margin",
-    )):
+    if any(
+        token in value
+        for token in (
+            "指标",
+            "公式",
+            "计算",
+            "利润",
+            "收入",
+            "成本",
+            "销售额",
+            "gmv",
+            "kpi",
+            "率",
+            "metric",
+            "revenue",
+            "cost",
+            "profit",
+            "margin",
+        )
+    ):
         return "metric"
     return "term"
 
 
 def _split_values(value: str) -> tuple[str, ...]:
-    return tuple(dict.fromkeys(item.strip() for item in re.split(r"[,，、;；]", value) if item.strip()))
+    return tuple(
+        dict.fromkeys(item.strip() for item in re.split(r"[,，、;；]", value) if item.strip())
+    )
 
 
-def _deduplicate(candidates: tuple[KnowledgeCandidate, ...]) -> tuple[KnowledgeCandidate, ...]:
+def _deduplicate(
+    candidates: tuple[KnowledgeCandidate, ...],
+) -> tuple[KnowledgeCandidate, ...]:
     output: list[KnowledgeCandidate] = []
     seen: set[str] = set()
     for candidate in candidates:

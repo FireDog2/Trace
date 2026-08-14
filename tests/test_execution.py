@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from data_analysis_agent.domain import ArtifactType, ExecutionStatus
 import threading
 
 import pytest
 
 import data_analysis_agent.execution as execution_module
-from data_analysis_agent.execution import DuckDBExecutor, QueryTimeoutError, ReadOnlyQueryError
+from data_analysis_agent.domain import ArtifactType, ExecutionStatus
+from data_analysis_agent.execution import (
+    DuckDBExecutor,
+    QueryTimeoutError,
+    ReadOnlyQueryError,
+)
 
 
 def test_duckdb_rejects_mutating_sql(duckdb_executor, dataset_artifact) -> None:
@@ -25,8 +29,7 @@ def test_duckdb_rejects_mutating_sql(duckdb_executor, dataset_artifact) -> None:
 def test_duckdb_queries_registered_csv(duckdb_executor, dataset_artifact) -> None:
     result = duckdb_executor.query(
         dataset_artifact.project_id,
-        "SELECT region, SUM(profit) AS profit "
-        "FROM operations GROUP BY region ORDER BY region",
+        "SELECT region, SUM(profit) AS profit FROM operations GROUP BY region ORDER BY region",
         {"operations": dataset_artifact.id},
     )
 
@@ -79,8 +82,7 @@ def test_python_rejects_and_removes_undeclared_output(
 ) -> None:
     result = python_executor.run(
         task.id,
-        "from pathlib import Path\n"
-        "Path('derived/hidden.txt').write_text('x', encoding='utf-8')",
+        "from pathlib import Path\nPath('derived/hidden.txt').write_text('x', encoding='utf-8')",
         (),
     )
 

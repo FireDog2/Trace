@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import UTC, datetime, timedelta
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from types import MappingProxyType
 from urllib.parse import urlsplit
@@ -134,7 +134,12 @@ class DataSourceRepository:
             except BaseException:
                 raise CredentialError("Data source credentials are unavailable") from None
             sql = "UPDATE data_sources SET name = ?, protected_dsn = ?, updated_at = ? WHERE id = ?"
-            parameters = (normalized_name, sqlite3.Binary(protected_dsn), utc_now(), data_source_id)
+            parameters = (
+                normalized_name,
+                sqlite3.Binary(protected_dsn),
+                utc_now(),
+                data_source_id,
+            )
         else:
             sql = "UPDATE data_sources SET name = ?, updated_at = ? WHERE id = ?"
             parameters = (normalized_name, utc_now(), data_source_id)
@@ -156,8 +161,7 @@ class DataSourceRepository:
     @sqlite_connection_guarded
     def credentials(self, data_source_id: str) -> DataSourceCredentials:
         row = self._connection.execute(
-            "SELECT id, protected_dsn FROM data_sources "
-            "WHERE id = ? AND deleted_at IS NULL",
+            "SELECT id, protected_dsn FROM data_sources WHERE id = ? AND deleted_at IS NULL",
             (data_source_id,),
         ).fetchone()
         if row is None:
@@ -201,9 +205,7 @@ class DataSourceRepository:
                 (data_source_id,),
             ).fetchone()
             if active_attempt is not None:
-                raise RepositoryError(
-                    "Cannot delete data source while a query is in flight"
-                )
+                raise RepositoryError("Cannot delete data source while a query is in flight")
             now = utc_now()
             self._connection.execute(
                 "UPDATE data_sources SET name = ?, protected_dsn = ?, deleted_at = ?, "
@@ -244,7 +246,10 @@ class DataSourceRepository:
             source_row = self._public_row(data_source_id)
             if source_row is None:
                 raise RecordNotFoundError(f"Data source not found: {data_source_id}")
-            if expected_version is not None and int(source_row["policy_version"]) != expected_version:
+            if (
+                expected_version is not None
+                and int(source_row["policy_version"]) != expected_version
+            ):
                 raise PolicyVersionConflict("Data-access policy has changed")
             self._recover_stale_attempts_in_transaction(data_source_id)
             active_attempt = self._connection.execute(

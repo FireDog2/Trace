@@ -13,7 +13,9 @@ def _message(index: int, role: str, content: str, safe: str | None = None) -> Co
     return ContextMessage(str(index), role, content, safe if safe is not None else content)
 
 
-def test_compaction_persists_projection_without_mutating_transcript(db_connection) -> None:
+def test_compaction_persists_projection_without_mutating_transcript(
+    db_connection,
+) -> None:
     repository = ContextCheckpointRepository(db_connection)
     manager = ContextManager(
         repository,
@@ -23,7 +25,11 @@ def test_compaction_persists_projection_without_mutating_transcript(db_connectio
         max_tool_result_chars=1_000,
     )
     messages = tuple(
-        _message(index, "user" if index % 2 == 0 else "assistant", f"turn-{index} " + "x" * 900)
+        _message(
+            index,
+            "user" if index % 2 == 0 else "assistant",
+            f"turn-{index} " + "x" * 900,
+        )
         for index in range(12)
     )
 
@@ -63,8 +69,12 @@ def test_auto_compaction_handles_a_short_but_oversized_history(db_connection) ->
     )
 
     projection = manager.project(
-        owner_type="task", owner_id="task-short", system="system", objective="objective",
-        messages=messages, tools=(),
+        owner_type="task",
+        owner_id="task-short",
+        system="system",
+        objective="objective",
+        messages=messages,
+        tools=(),
     )
 
     assert projection.reason == "auto"
@@ -72,7 +82,9 @@ def test_auto_compaction_handles_a_short_but_oversized_history(db_connection) ->
     assert projection.projected_tokens < projection.original_tokens
 
 
-def test_compaction_preserves_recent_tool_protocol_and_uses_safe_checkpoint(db_connection) -> None:
+def test_compaction_preserves_recent_tool_protocol_and_uses_safe_checkpoint(
+    db_connection,
+) -> None:
     repository = ContextCheckpointRepository(db_connection)
     manager = ContextManager(
         repository,
@@ -85,16 +97,33 @@ def test_compaction_preserves_recent_tool_protocol_and_uses_safe_checkpoint(db_c
     messages = (
         _message(0, "user", "x" * 6_000),
         _message(1, "assistant", old_secret, "safe prior analysis"),
-        _message(2, "assistant_tool_call", json.dumps({"tool_calls": [{"id": "c1", "name": "inspect_workspace", "arguments": {}}]})),
-        _message(3, "tool", json.dumps({"call_id": "c1", "success": True, "output": {"artifact_id": "a1"}})),
+        _message(
+            2,
+            "assistant_tool_call",
+            json.dumps(
+                {"tool_calls": [{"id": "c1", "name": "inspect_workspace", "arguments": {}}]}
+            ),
+        ),
+        _message(
+            3,
+            "tool",
+            json.dumps({"call_id": "c1", "success": True, "output": {"artifact_id": "a1"}}),
+        ),
     )
 
     projection = manager.project(
-        owner_type="agent", owner_id="agent-1", system="system", objective="objective",
-        messages=messages, tools=(),
+        owner_type="agent",
+        owner_id="agent-1",
+        system="system",
+        objective="objective",
+        messages=messages,
+        tools=(),
     )
 
-    assert [message.role for message in projection.messages[-2:]] == ["assistant_tool_call", "tool"]
+    assert [message.role for message in projection.messages[-2:]] == [
+        "assistant_tool_call",
+        "tool",
+    ]
     checkpoint = repository.latest("agent", "agent-1")
     assert checkpoint is not None
     assert old_secret not in checkpoint.summary
@@ -109,13 +138,26 @@ def test_large_tool_result_is_budgeted_as_valid_protocol_json(db_connection) -> 
         recent_messages=4,
         max_tool_result_chars=1_000,
     )
-    content = json.dumps({
-        "call_id": "c1", "success": True,
-        "output": {"artifact_id": "a1", "preview": "x" * 5_000},
-    })
+    content = json.dumps(
+        {
+            "call_id": "c1",
+            "success": True,
+            "output": {"artifact_id": "a1", "preview": "x" * 5_000},
+        }
+    )
     projection = manager.project(
-        owner_type="task", owner_id="task-1", system="system", objective="objective",
-        messages=(_message(0, "assistant_tool_call", json.dumps({"tool_calls": [{"id": "c1", "name": "query_data", "arguments": {}}]})), _message(1, "tool", content)),
+        owner_type="task",
+        owner_id="task-1",
+        system="system",
+        objective="objective",
+        messages=(
+            _message(
+                0,
+                "assistant_tool_call",
+                json.dumps({"tool_calls": [{"id": "c1", "name": "query_data", "arguments": {}}]}),
+            ),
+            _message(1, "tool", content),
+        ),
         tools=(),
     )
 

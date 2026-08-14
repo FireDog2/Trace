@@ -4,9 +4,17 @@ from pathlib import Path
 
 import pytest
 
-from data_analysis_agent.data_sources import AccessLevel, CredentialError, DataSourceRepository
+from data_analysis_agent.data_sources import (
+    AccessLevel,
+    CredentialError,
+    DataSourceRepository,
+)
 from data_analysis_agent.db import migrate
-from data_analysis_agent.repositories import ProjectRepository, RecordNotFoundError, RepositoryError
+from data_analysis_agent.repositories import (
+    ProjectRepository,
+    RecordNotFoundError,
+    RepositoryError,
+)
 
 
 class RecordingProtector:
@@ -43,9 +51,7 @@ class PauseAfterVersionReadConnection:
             "SELECT id, project_id, name, dialect, policy_version"
         ):
             self.pause_enabled = False
-            return PauseAfterFetchCursor(
-                cursor, self._version_read, self._replacement_done
-            )
+            return PauseAfterFetchCursor(cursor, self._version_read, self._replacement_done)
         return cursor
 
     def __getattr__(self, name: str):
@@ -106,14 +112,18 @@ def test_data_source_connection_can_be_renamed_without_revealing_or_replacing_ds
 
     assert renamed.name == "Finance Warehouse"
     assert not hasattr(renamed, "dsn")
-    assert repository.credentials(source.id).dsn == "postgresql://analyst:secret@localhost/portfolio"
+    assert (
+        repository.credentials(source.id).dsn == "postgresql://analyst:secret@localhost/portfolio"
+    )
 
     repository.update(
         source.id,
         name="Finance Warehouse",
         dsn="postgresql://reader:new-secret@localhost/finance",
     )
-    assert repository.credentials(source.id).dsn == "postgresql://reader:new-secret@localhost/finance"
+    assert (
+        repository.credentials(source.id).dsn == "postgresql://reader:new-secret@localhost/finance"
+    )
 
 
 def test_data_source_can_be_deleted_without_losing_audit_rows_or_credentials(
@@ -125,9 +135,7 @@ def test_data_source_can_be_deleted_without_losing_audit_rows_or_credentials(
         "Warehouse",
         "postgresql://analyst:secret@localhost/portfolio",
     )
-    repository.replace_policies(
-        source.id, {("orders", None): AccessLevel.ALLOWED}
-    )
+    repository.replace_policies(source.id, {("orders", None): AccessLevel.ALLOWED})
 
     repository.delete(source.id)
 
@@ -146,14 +154,15 @@ def test_data_source_can_be_deleted_without_losing_audit_rows_or_credentials(
     assert stored["name"] == f"__deleted__:{source.id}"
     assert bytes(stored["protected_dsn"]) == b""
     assert stored["deleted_at"] is not None
-    assert db_connection.execute(
-        "SELECT COUNT(*) FROM data_access_policies WHERE data_source_id = ?",
-        (source.id,),
-    ).fetchone()[0] == 1
-
-    replacement = repository.create(
-        project.id, "Warehouse", "postgresql://localhost/replacement"
+    assert (
+        db_connection.execute(
+            "SELECT COUNT(*) FROM data_access_policies WHERE data_source_id = ?",
+            (source.id,),
+        ).fetchone()[0]
+        == 1
     )
+
+    replacement = repository.create(project.id, "Warehouse", "postgresql://localhost/replacement")
     assert replacement.name == "Warehouse"
 
 
@@ -177,13 +186,9 @@ def test_replacing_policies_increments_version(db_connection, project) -> None:
     assert snapshot.resolve("unknown", "id") is AccessLevel.DENIED
 
 
-def test_public_reads_and_project_listing_never_expose_credentials(
-    db_connection, project
-) -> None:
+def test_public_reads_and_project_listing_never_expose_credentials(db_connection, project) -> None:
     repository = DataSourceRepository(db_connection, RecordingProtector())
-    first = repository.create(
-        project.id, "Warehouse", "postgresql://localhost/warehouse"
-    )
+    first = repository.create(project.id, "Warehouse", "postgresql://localhost/warehouse")
     second = repository.create(project.id, "Ledger", "postgresql://localhost/ledger")
 
     public = repository.get_public(first.id)
@@ -220,9 +225,7 @@ def test_replacing_policies_rolls_back_delete_and_version_on_insert_failure(
 ) -> None:
     repository = DataSourceRepository(db_connection, RecordingProtector())
     source = repository.create(project.id, "Warehouse", "postgresql://localhost/db")
-    original = repository.replace_policies(
-        source.id, {("orders", None): AccessLevel.ALLOWED}
-    )
+    original = repository.replace_policies(source.id, {("orders", None): AccessLevel.ALLOWED})
     db_connection.execute(
         "CREATE TRIGGER reject_broken_policy BEFORE INSERT ON data_access_policies "
         "WHEN NEW.table_name = 'broken' BEGIN "
@@ -230,9 +233,7 @@ def test_replacing_policies_rolls_back_delete_and_version_on_insert_failure(
     )
 
     with pytest.raises(sqlite3.IntegrityError, match="rejected test policy"):
-        repository.replace_policies(
-            source.id, {("broken", None): AccessLevel.APPROVAL_REQUIRED}
-        )
+        repository.replace_policies(source.id, {("broken", None): AccessLevel.APPROVAL_REQUIRED})
 
     restored = repository.policy_snapshot(source.id)
     assert restored.version == original.version
@@ -273,12 +274,8 @@ def test_policy_snapshot_reads_version_and_rules_from_one_database_snapshot(
         reader_connection, version_read, replacement_done
     )
     reader_repository = DataSourceRepository(pausing_connection, RecordingProtector())
-    source = reader_repository.create(
-        project.id, "Warehouse", "postgresql://localhost/db"
-    )
-    reader_repository.replace_policies(
-        source.id, {("orders", None): AccessLevel.ALLOWED}
-    )
+    source = reader_repository.create(project.id, "Warehouse", "postgresql://localhost/db")
+    reader_repository.replace_policies(source.id, {("orders", None): AccessLevel.ALLOWED})
     replacement_errors: list[BaseException] = []
 
     def replace_from_second_connection() -> None:
@@ -286,12 +283,8 @@ def test_policy_snapshot_reads_version_and_rules_from_one_database_snapshot(
         try:
             if not version_read.wait(timeout=5):
                 raise AssertionError("Snapshot version read did not occur")
-            writer_repository = DataSourceRepository(
-                writer_connection, RecordingProtector()
-            )
-            writer_repository.replace_policies(
-                source.id, {("orders", None): AccessLevel.DENIED}
-            )
+            writer_repository = DataSourceRepository(writer_connection, RecordingProtector())
+            writer_repository.replace_policies(source.id, {("orders", None): AccessLevel.DENIED})
         except BaseException as exc:
             replacement_errors.append(exc)
         finally:
@@ -339,9 +332,7 @@ def test_create_accepts_postgresql_uri_schemes(db_connection, project, dsn: str)
         "",
     ],
 )
-def test_create_rejects_non_postgresql_dsn_before_storing(
-    db_connection, project, dsn: str
-) -> None:
+def test_create_rejects_non_postgresql_dsn_before_storing(db_connection, project, dsn: str) -> None:
     repository = DataSourceRepository(db_connection, RecordingProtector())
 
     with pytest.raises(ValueError, match="PostgreSQL DSN"):
@@ -355,14 +346,10 @@ def test_duplicate_data_source_name_rolls_back_and_raises_repository_error(
     db_connection, project
 ) -> None:
     repository = DataSourceRepository(db_connection, RecordingProtector())
-    first = repository.create(
-        project.id, "Warehouse", "postgresql://localhost/primary"
-    )
+    first = repository.create(project.id, "Warehouse", "postgresql://localhost/primary")
 
     with pytest.raises(RepositoryError, match="Unable to create data source"):
-        repository.create(
-            project.id, "Warehouse", "postgresql://localhost/duplicate"
-        )
+        repository.create(project.id, "Warehouse", "postgresql://localhost/duplicate")
     assert repository.list_for_project(project.id) == (first,)
     second = repository.create(project.id, "Ledger", "postgresql://localhost/secondary")
     assert repository.list_for_project(project.id) == (first, second)
@@ -379,6 +366,8 @@ def test_create_never_reflects_protector_failure_or_dsn(db_connection, project) 
             return value.decode()
 
     with pytest.raises(CredentialError) as error:
-        DataSourceRepository(db_connection, BrokenProtector()).create(project.id, "Warehouse", secret)
+        DataSourceRepository(db_connection, BrokenProtector()).create(
+            project.id, "Warehouse", secret
+        )
 
     assert secret not in str(error.value)

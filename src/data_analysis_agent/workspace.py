@@ -6,7 +6,6 @@ from uuid import uuid4
 
 from data_analysis_agent.settings import Settings
 
-
 PROJECT_DIRECTORIES = (
     "source",
     "derived",

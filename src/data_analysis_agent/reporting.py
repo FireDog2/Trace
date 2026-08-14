@@ -11,7 +11,6 @@ from data_analysis_agent.repositories import (
 )
 from data_analysis_agent.workspace import WorkspaceService
 
-
 ARTIFACT_REFERENCE = re.compile(r"artifact://([A-Za-z0-9_-]+)")
 
 
@@ -49,9 +48,7 @@ class ReportService:
                     f"Evidence artifact does not exist: {evidence_id}"
                 ) from exc
             if evidence.project_id != task.project_id:
-                raise InvalidEvidenceReference(
-                    "Evidence artifact belongs to another project"
-                )
+                raise InvalidEvidenceReference("Evidence artifact belongs to another project")
 
         path = self._workspace.resolve_inside(
             task.project_id,

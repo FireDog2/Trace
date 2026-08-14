@@ -4,22 +4,17 @@ import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
-from concurrent.futures import ThreadPoolExecutor
-import sqlite3
-
 import pytest
 
+from data_analysis_agent.db import migrate
+from data_analysis_agent.repositories import ProjectRepository, TaskRepository
 from data_analysis_agent.team import (
     AgentRole,
     AgentRunStatus,
     InvalidAgentRunTransition,
-    TeamRepository,
     TeamCapacityError,
+    TeamRepository,
 )
-from data_analysis_agent.db import migrate
-from data_analysis_agent.repositories import ProjectRepository, TaskRepository
-from data_analysis_agent.db import migrate
-from data_analysis_agent.repositories import ProjectRepository, TaskRepository
 
 
 def test_repository_persists_independent_teammate_history(db_connection, task) -> None:
@@ -34,7 +29,10 @@ def test_repository_persists_independent_teammate_history(db_connection, task) -
         "Preparing a bounded query"
     ]
     assert repository.list_messages(report_run.id) == ()
-    assert [item.id for item in repository.list_runs(task.id)] == [sql_run.id, report_run.id]
+    assert [item.id for item in repository.list_runs(task.id)] == [
+        sql_run.id,
+        report_run.id,
+    ]
 
 
 def test_run_transitions_reject_terminal_restart(db_connection, task) -> None:
@@ -58,9 +56,7 @@ def test_active_count_is_serialized_with_concurrent_creates(tmp_path) -> None:
         with ThreadPoolExecutor(max_workers=3) as executor:
             list(
                 executor.map(
-                    lambda index: repository.create_run(
-                        task.id, AgentRole.SQL, f"Query {index}"
-                    ),
+                    lambda index: repository.create_run(task.id, AgentRole.SQL, f"Query {index}"),
                     range(3),
                 )
             )
@@ -111,7 +107,10 @@ def test_messages_require_existing_task_run_and_have_stable_order(db_connection,
     first = repository.append_message(run.id, "assistant", "first")
     second = repository.append_message(run.id, "tool", "second")
 
-    assert [message.id for message in repository.list_messages(run.id)] == [first.id, second.id]
+    assert [message.id for message in repository.list_messages(run.id)] == [
+        first.id,
+        second.id,
+    ]
     with pytest.raises(Exception):
         repository.create_run("missing-task", AgentRole.SQL, "Fails FK")
 
@@ -145,7 +144,8 @@ def test_two_sqlite_connections_allow_exactly_one_worker_claim(tmp_path) -> None
     path = tmp_path / "team.sqlite"
     first = sqlite3.connect(path, check_same_thread=False)
     second = sqlite3.connect(path, check_same_thread=False)
-    migrate(first); migrate(second)
+    migrate(first)
+    migrate(second)
     project = ProjectRepository(first).create("Concurrent")
     task = TaskRepository(first).create(project.id, "Concurrent run")
     one, two = TeamRepository(first), TeamRepository(second)
@@ -160,7 +160,8 @@ def test_two_sqlite_connections_allow_exactly_one_worker_claim(tmp_path) -> None
         outcomes = list(pool.map(lambda pair: claim(*pair), ((one, "one"), (two, "two"))))
     assert sum(item is not None for item in outcomes) == 1
     assert one.get_run(run.id).worker_token in {"one", "two"}
-    first.close(); second.close()
+    first.close()
+    second.close()
 
 
 def test_create_run_if_capacity_rejects_a_fourth_active_run(db_connection, task) -> None:
@@ -171,7 +172,9 @@ def test_create_run_if_capacity_rejects_a_fourth_active_run(db_connection, task)
         repository.create_run_if_capacity(task.id, AgentRole.SQL, "Fourth", max_active=3)
 
 
-def test_startup_cancels_queued_cancel_request_and_interrupts_other_created_runs(db_connection, task) -> None:
+def test_startup_cancels_queued_cancel_request_and_interrupts_other_created_runs(
+    db_connection, task
+) -> None:
     repository = TeamRepository(db_connection)
     queued = repository.create_run(task.id, AgentRole.SQL, "Queued")
     stale = repository.create_run(task.id, AgentRole.SQL, "Stale")

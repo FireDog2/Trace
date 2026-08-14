@@ -9,10 +9,10 @@ from fastapi.testclient import TestClient
 
 from data_analysis_agent.api import create_app
 from data_analysis_agent.data_sources import DataSourceRepository
-from data_analysis_agent.db import migrate
 from data_analysis_agent.datasets import DatasetService
-from data_analysis_agent.execution import DuckDBExecutor, PythonExecutor
+from data_analysis_agent.db import migrate
 from data_analysis_agent.domain import ArtifactType
+from data_analysis_agent.execution import DuckDBExecutor, PythonExecutor
 from data_analysis_agent.permissions import ApprovalRepository, PermissionPolicy
 from data_analysis_agent.postgres import SqlSafetyGateway
 from data_analysis_agent.providers import ModelResponse, ScriptedProvider

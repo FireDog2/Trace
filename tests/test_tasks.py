@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from data_analysis_agent.domain import PlanStepDraft, TaskStatus
+from data_analysis_agent.domain import PlanStepDraft, StepStatus, TaskStatus
 from data_analysis_agent.repositories import InvalidTaskTransition
 
 
@@ -43,6 +43,38 @@ def test_plan_revisions_preserve_history(task_repository, task) -> None:
     assert second.revision == first.revision + 1
     assert len(task_repository.get_plan_revision(first.id).steps) == 1
     assert len(task_repository.get_plan_revision(second.id).steps) == 2
+
+
+def test_completing_task_closes_only_the_latest_plan(task_repository, task) -> None:
+    first = task_repository.revise_plan(
+        task.id,
+        (PlanStepDraft("Inspect data"),),
+        "Initial plan",
+    )
+    latest = task_repository.revise_plan(
+        task.id,
+        (
+            PlanStepDraft("Inspect data"),
+            PlanStepDraft("Publish evidence-linked report"),
+        ),
+        "Refined plan",
+    )
+
+    for status in (
+        TaskStatus.PLANNING,
+        TaskStatus.RUNNING,
+        TaskStatus.SYNTHESIZING,
+        TaskStatus.COMPLETED,
+    ):
+        task_repository.transition(task.id, status)
+
+    assert tuple(step.status for step in task_repository.get_plan_revision(first.id).steps) == (
+        StepStatus.PENDING,
+    )
+    assert tuple(step.status for step in task_repository.get_plan_revision(latest.id).steps) == (
+        StepStatus.COMPLETED,
+        StepStatus.COMPLETED,
+    )
 
 
 def test_events_have_monotonic_task_sequence(task_repository, task) -> None:

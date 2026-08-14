@@ -13,7 +13,6 @@ from data_analysis_agent.db import (
 )
 from data_analysis_agent.repositories import RecordNotFoundError, RepositoryError
 
-
 KNOWLEDGE_KINDS = frozenset({"metric", "term", "rule"})
 
 
@@ -99,8 +98,7 @@ class BusinessKnowledgeRepository:
     @sqlite_connection_guarded
     def list_all(self) -> tuple[BusinessKnowledgeEntry, ...]:
         rows = self._connection.execute(
-            "SELECT * FROM business_knowledge_entries "
-            "ORDER BY kind,name COLLATE NOCASE,updated_at"
+            "SELECT * FROM business_knowledge_entries ORDER BY kind,name COLLATE NOCASE,updated_at"
         ).fetchall()
         return tuple(_entry(row) for row in rows)
 
@@ -181,9 +179,7 @@ class BusinessKnowledgeRepository:
         ranked.sort(key=lambda item: (-item[0], item[1]))
         return tuple(item[2] for item in ranked[:limit])
 
-    def search_global(
-        self, query: str, *, limit: int = 8
-    ) -> tuple[BusinessKnowledgeEntry, ...]:
+    def search_global(self, query: str, *, limit: int = 8) -> tuple[BusinessKnowledgeEntry, ...]:
         normalized = query.strip().casefold()
         if not normalized:
             raise ValueError("Knowledge search query must not be empty")

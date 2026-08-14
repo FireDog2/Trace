@@ -26,6 +26,10 @@ jobs:
       - run: python -m pip install -e ".[dev]"
       - run: npm --prefix web ci
       - run: psql "$PORTFOLIO_POSTGRES_ADMIN_DSN" -f tests/fixtures/postgres_business_review.sql
-      - run: python -m pytest -v
+      - run: ruff check src tests scripts
+      - run: ruff format --check src tests scripts
+      - run: mypy src
+      - run: python -m pytest --cov=data_analysis_agent --cov-report=term-missing -v
+      - run: npm --prefix web run format:check
       - run: npm --prefix web test -- --run
       - run: npm --prefix web run build

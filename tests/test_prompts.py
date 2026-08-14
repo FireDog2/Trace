@@ -17,7 +17,12 @@ def test_prompt_sections_are_deterministic_versioned_and_role_scoped() -> None:
 
     assert first is second
     assert first.section_ids == (
-        "identity", "safety", "role.knowledge", "recovery", "output.handoff", "runtime"
+        "identity",
+        "safety",
+        "role.knowledge",
+        "recovery",
+        "output.handoff",
+        "runtime",
     )
     assert all(section.version == 1 for section in first.sections)
     assert "Business Knowledge" in first.text

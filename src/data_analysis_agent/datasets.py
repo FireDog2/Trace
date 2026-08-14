@@ -13,7 +13,6 @@ from data_analysis_agent.domain import Artifact, ArtifactType
 from data_analysis_agent.repositories import ArtifactRepository
 from data_analysis_agent.workspace import WorkspaceService
 
-
 SUPPORTED_EXTENSIONS = {".csv", ".xlsx"}
 
 
@@ -94,8 +93,7 @@ class DatasetService:
         frame, sheets = self._read_frame(artifact.path)
         sample_limit = min(max(sample_rows, 0), 100)
         null_counts = {
-            name: int(count)
-            for name, count in frame.null_count().row(0, named=True).items()
+            name: int(count) for name, count in frame.null_count().row(0, named=True).items()
         }
         columns = tuple(
             DatasetColumn(
@@ -106,10 +104,7 @@ class DatasetService:
             for name, data_type in frame.schema.items()
         )
         sample = tuple(
-            {
-                name: _json_scalar(value)
-                for name, value in row.items()
-            }
+            {name: _json_scalar(value) for name, value in row.items()}
             for row in frame.head(sample_limit).to_dicts()
         )
         duplicate_count = int(frame.is_duplicated().sum()) if frame.height else 0

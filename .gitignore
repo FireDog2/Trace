@@ -3,11 +3,13 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.pytest-tmp*/
 .coverage
 htmlcov/
 node_modules/
 web/dist/
 *.tsbuildinfo
 .data-analysis-agent/
+.data-analysis-agent-demo*/
 *.sqlite3
 .env

@@ -7,7 +7,6 @@ import pytest
 from data_analysis_agent.data_sources import AccessLevel, PolicySnapshot
 from data_analysis_agent.sql_safety import SqlAstValidator, SqlValidationError
 
-
 CATALOG = {
     "orders": ("id", "region", "amount", "customer_email"),
     "customers": ("id", "name"),
@@ -127,16 +126,12 @@ def test_validator_expands_qualified_star_through_cte() -> None:
         POLICY,
     )
 
-    assert ("orders", "customer_email") in {
-        (item.table, item.column) for item in result.references
-    }
+    assert ("orders", "customer_email") in {(item.table, item.column) for item in result.references}
     assert result.access_level is AccessLevel.APPROVAL_REQUIRED
 
 
 def test_validator_expands_nested_qualified_star_before_policy_check() -> None:
-    result = SqlAstValidator().validate(
-        "SELECT row_to_json(o.*) FROM orders AS o", CATALOG, POLICY
-    )
+    result = SqlAstValidator().validate("SELECT row_to_json(o.*) FROM orders AS o", CATALOG, POLICY)
 
     assert result.access_level is AccessLevel.APPROVAL_REQUIRED
     assert {(item.table, item.column) for item in result.references} == {
@@ -207,8 +202,7 @@ def test_validator_preserves_quoted_mixed_case_identifier_markers() -> None:
 
 def test_validator_uses_strongest_policy_result() -> None:
     result = SqlAstValidator().validate(
-        "SELECT o.customer_email, c.name "
-        "FROM orders o CROSS JOIN customers c",
+        "SELECT o.customer_email, c.name FROM orders o CROSS JOIN customers c",
         CATALOG,
         POLICY,
     )
@@ -217,9 +211,7 @@ def test_validator_uses_strongest_policy_result() -> None:
 
 
 def test_validator_returns_stable_normalized_sql_and_hash() -> None:
-    result = SqlAstValidator().validate(
-        "select O.REGION from ORDERS as O", CATALOG, POLICY
-    )
+    result = SqlAstValidator().validate("select O.REGION from ORDERS as O", CATALOG, POLICY)
 
     assert result.normalized_sql == "SELECT o.region FROM orders AS o"
     assert result.sql_hash == sha256(result.normalized_sql.encode("utf-8")).hexdigest()
@@ -248,10 +240,8 @@ def test_validator_rejects_dangerous_or_unknown_postgres_functions(sql: str) -> 
         "SELECT SUM(amount), AVG(amount), MIN(amount), MAX(amount), COUNT(*) FROM orders",
         "SELECT LOWER(region), UPPER(region), LENGTH(region), "
         "CONCAT(region, '-review') FROM orders",
-        "SELECT DATE_TRUNC('month', CURRENT_DATE), "
-        "EXTRACT(YEAR FROM CURRENT_DATE) FROM orders",
-        "SELECT ABS(amount), ROUND(amount, 2), SQRT(amount), POWER(amount, 2) "
-        "FROM orders",
+        "SELECT DATE_TRUNC('month', CURRENT_DATE), EXTRACT(YEAR FROM CURRENT_DATE) FROM orders",
+        "SELECT ABS(amount), ROUND(amount, 2), SQRT(amount), POWER(amount, 2) FROM orders",
         "SELECT COALESCE(region, 'unknown'), NULLIF(amount, 0), "
         "ROW_NUMBER() OVER (ORDER BY amount), LAG(amount) OVER (ORDER BY amount) "
         "FROM orders",
@@ -284,7 +274,7 @@ def test_validator_rejects_every_schema_qualified_function(sql: str) -> None:
     [
         'SELECT "JSONB_AGG"(region) FROM orders',
         'SELECT "jsonb_agg"(region) FROM orders',
-        'SELECT COALESCE("JSON_BUILD_OBJECT"(\'region\', region), NULL) FROM orders',
+        "SELECT COALESCE(\"JSON_BUILD_OBJECT\"('region', region), NULL) FROM orders",
         'SELECT UPPER("AGE"(CURRENT_DATE, CURRENT_DATE)::text) FROM orders',
     ],
 )

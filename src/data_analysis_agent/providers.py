@@ -138,7 +138,13 @@ class OpenAICompatibleProvider:
             if not isinstance(content, str):
                 raise TypeError("Assistant content is not text")
             return ModelResponse(text=content, tool_calls=calls)
-        except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        except (
+            KeyError,
+            IndexError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
             raise ProviderError(
                 "malformed_response",
                 "The model service returned an invalid response",

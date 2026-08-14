@@ -37,7 +37,9 @@ def test_project_can_be_renamed_and_global_workspace_stays_hidden(settings) -> N
     assert all(project["id"] != GLOBAL_PROJECT_ID for project in projects.json())
 
 
-def test_global_data_sources_and_knowledge_are_not_bound_to_a_user_project(settings) -> None:
+def test_global_data_sources_and_knowledge_are_not_bound_to_a_user_project(
+    settings,
+) -> None:
     app = create_app(
         settings,
         ScriptedProvider(()),
@@ -61,11 +63,18 @@ def test_global_data_sources_and_knowledge_are_not_bound_to_a_user_project(setti
     with TestClient(app) as client:
         source = client.post(
             "/api/data-sources",
-            json={"name": "Shared warehouse", "dsn": "postgresql://reader@localhost/shared"},
+            json={
+                "name": "Shared warehouse",
+                "dsn": "postgresql://reader@localhost/shared",
+            },
         )
         knowledge = client.post(
             "/api/knowledge",
-            json={"kind": "metric", "name": "Shared profit", "definition": "Revenue minus cost."},
+            json={
+                "kind": "metric",
+                "name": "Shared profit",
+                "definition": "Revenue minus cost.",
+            },
         )
         sources = client.get("/api/data-sources")
         entries = client.get("/api/knowledge")
@@ -73,27 +82,39 @@ def test_global_data_sources_and_knowledge_are_not_bound_to_a_user_project(setti
 
     assert source.status_code == 201 and source.json()["project_id"] == GLOBAL_PROJECT_ID
     assert knowledge.status_code == 201 and knowledge.json()["project_id"] == GLOBAL_PROJECT_ID
-    assert {item["id"] for item in sources.json()} == {legacy_source.id, source.json()["id"]}
+    assert {item["id"] for item in sources.json()} == {
+        legacy_source.id,
+        source.json()["id"],
+    }
     assert {item["name"] for item in entries.json()} == {"Legacy term", "Shared profit"}
     assert search_result[0].name == "Shared profit"
 
 
-def test_build_services_closes_open_connection_when_construction_fails(settings, monkeypatch) -> None:
+def test_build_services_closes_open_connection_when_construction_fails(
+    settings, monkeypatch
+) -> None:
     class Connection:
         closed = False
+
         def close(self):
             self.closed = True
 
     connection = Connection()
     monkeypatch.setattr(api_module, "connect_database", lambda _: connection)
-    monkeypatch.setattr(api_module, "_build_services", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("builder failed")))
+    monkeypatch.setattr(
+        api_module,
+        "_build_services",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("builder failed")),
+    )
 
     with pytest.raises(RuntimeError, match="builder failed"):
         api_module.build_services(settings)
     assert connection.closed is True
 
 
-def test_trace_routes_replay_without_execution_and_accept_completed_run(settings) -> None:
+def test_trace_routes_replay_without_execution_and_accept_completed_run(
+    settings,
+) -> None:
     skill = """---
 name: safe-sql-diagnostic
 description: Safe workflow.
@@ -114,7 +135,12 @@ Return a safe summary.
     project = services.projects.create("Trace route")
     task = services.tasks.create(project.id, "Replay safely")
     run = services.traces.start_run(task.id)
-    services.trace_recorder.event(TraceContext(run.id, task.id), "tool.completed", "completed", {"dsn": "postgresql://secret", "row_count": 3})
+    services.trace_recorder.event(
+        TraceContext(run.id, task.id),
+        "tool.completed",
+        "completed",
+        {"dsn": "postgresql://secret", "row_count": 3},
+    )
     services.approvals.request(
         task.id,
         ToolAction("query_database", {"dsn": "postgresql://analyst:secret@db"}),
@@ -188,9 +214,7 @@ def test_markdown_report_can_be_exported_as_source_or_pdf(settings) -> None:
     project = services.projects.create("PDF export")
     services.workspace.create_project(project.id)
     task = services.tasks.create(project.id, "华东利润诊断")
-    report = ReportService(
-        services.workspace, services.artifacts, services.tasks
-    ).publish(
+    report = ReportService(services.workspace, services.artifacts, services.tasks).publish(
         task.id,
         "# 分析报告\n\n**利润下降** 12%。\n\n## 原因\n\n- 物流成本上升\n- 收入稳定",
     )
@@ -208,7 +232,9 @@ def test_markdown_report_can_be_exported_as_source_or_pdf(settings) -> None:
     assert len(pdf.content) > 10_000
 
 
-def test_business_knowledge_document_import_creates_classified_entries(settings) -> None:
+def test_business_knowledge_document_import_creates_classified_entries(
+    settings,
+) -> None:
     app = create_app(settings, ScriptedProvider(()))
     services = app.state.services
     project = services.projects.create("Knowledge import")
@@ -228,7 +254,10 @@ def test_business_knowledge_document_import_creates_classified_entries(settings)
 
     assert response.status_code == 201
     assert response.json()["category_counts"] == {"metric": 1, "term": 0, "rule": 1}
-    assert [entry["name"] for entry in response.json()["created"]] == ["经营利润", "数据导出规则"]
+    assert [entry["name"] for entry in response.json()["created"]] == [
+        "经营利润",
+        "数据导出规则",
+    ]
     assert all(entry["source"] == "文档导入 · 财务口径.md" for entry in response.json()["created"])
 
 
@@ -240,16 +269,24 @@ def test_policy_update_rejects_a_stale_editor_version(settings) -> None:
     )
     services = app.state.services
     project = services.projects.create("Policy editing")
-    source = services.data_sources.create(project.id, "Warehouse", "postgresql://readonly@localhost/warehouse")
+    source = services.data_sources.create(
+        project.id, "Warehouse", "postgresql://readonly@localhost/warehouse"
+    )
 
     with TestClient(app) as client:
         first = client.put(
             f"/api/data-sources/{source.id}/policies",
-            json={"expected_version": 1, "rules": [{"table": "orders", "column": None, "access": "allowed"}]},
+            json={
+                "expected_version": 1,
+                "rules": [{"table": "orders", "column": None, "access": "allowed"}],
+            },
         )
         stale = client.put(
             f"/api/data-sources/{source.id}/policies",
-            json={"expected_version": 1, "rules": [{"table": "orders", "column": None, "access": "denied"}]},
+            json={
+                "expected_version": 1,
+                "rules": [{"table": "orders", "column": None, "access": "denied"}],
+            },
         )
 
     assert first.status_code == 200 and first.json()["version"] == 2
@@ -268,14 +305,17 @@ def test_worker_runner_factory_closes_fresh_worker_on_each_failure(
 
     class WorkerConnection:
         closed = False
+
         def close(self):
             self.closed = True
 
     worker_connection = WorkerConnection()
+
     class Worker:
         connection = worker_connection
         team_repository = main.team_repository
         tools = main.tools
+
         def resolve_provider(self):
             if failure == "provider":
                 raise RuntimeError("provider failed")
@@ -283,13 +323,20 @@ def test_worker_runner_factory_closes_fresh_worker_on_each_failure(
 
     monkeypatch.setattr(api_module, "build_services", lambda *args, **kwargs: Worker())
     if failure == "runner_constructor":
-        monkeypatch.setattr(api_module, "TeammateRunner", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("ctor failed")))
+        monkeypatch.setattr(
+            api_module,
+            "TeammateRunner",
+            lambda **kwargs: (_ for _ in ()).throw(RuntimeError("ctor failed")),
+        )
     elif failure == "runner_run":
+
         class FailingRunner:
             def __init__(self, **kwargs):
                 pass
+
             def run(self, run_id):
                 raise RuntimeError("run failed")
+
         monkeypatch.setattr(api_module, "TeammateRunner", FailingRunner)
 
     runner = main.team_manager._runner_factory(AgentRole.SQL, Event())  # type: ignore[union-attr]
@@ -354,10 +401,13 @@ def test_production_worker_failure_handler_closes_fresh_connection_on_repository
             lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("read failed")),
         )
     else:
+
         class ActiveRun:
             status = AgentRunStatus.CREATED
 
-        monkeypatch.setattr(api_module.TeamRepository, "get_run", lambda *args, **kwargs: ActiveRun())
+        monkeypatch.setattr(
+            api_module.TeamRepository, "get_run", lambda *args, **kwargs: ActiveRun()
+        )
         monkeypatch.setattr(
             api_module.TeamRepository,
             "fail_run",
@@ -375,12 +425,15 @@ def test_production_worker_failure_handler_closes_fresh_connection_on_repository
     main.connection.close()
 
 
-@pytest.mark.parametrize("helper,arguments,method", [
-    ("_run_task", ("task-1",), "run"),
-    ("_continue_task", ("task-1", "follow up", TaskStatus.COMPLETED), "follow_up"),
-    ("_continue_task", ("task-1", "retry", TaskStatus.FAILED), "retry"),
-    ("_resume_approved_task", ("task-1",), "resume_approval"),
-])
+@pytest.mark.parametrize(
+    "helper,arguments,method",
+    [
+        ("_run_task", ("task-1",), "run"),
+        ("_continue_task", ("task-1", "follow up", TaskStatus.COMPLETED), "follow_up"),
+        ("_continue_task", ("task-1", "retry", TaskStatus.FAILED), "retry"),
+        ("_resume_approved_task", ("task-1",), "resume_approval"),
+    ],
+)
 def test_background_helpers_shutdown_teammates_before_closing_connection(
     settings, monkeypatch, helper, arguments, method
 ) -> None:
@@ -391,6 +444,9 @@ def test_background_helpers_shutdown_teammates_before_closing_connection(
             events.append("connection.close")
 
     class Manager:
+        def resume_waiting(self, task_id):
+            events.append(f"manager.resume_waiting:{task_id}")
+
         def shutdown(self):
             events.append("manager.shutdown")
 
@@ -398,21 +454,33 @@ def test_background_helpers_shutdown_teammates_before_closing_connection(
         def __getattr__(self, name):
             if name != method:
                 raise AttributeError(name)
-            return lambda *args: events.append(f"agent.{name}")
+
+            def invoke(*args):
+                if name == "resume_approval" and len(args) > 1 and args[1] is not None:
+                    args[1]()
+                events.append(f"agent.{name}")
+
+            return invoke
 
     class Services:
         connection = Connection()
         team_manager = Manager()
+
         def agent(self):
             return Agent()
 
     monkeypatch.setattr(api_module, "build_services", lambda *args, **kwargs: Services())
     getattr(api_module, helper)(settings, ScriptedProvider(()), *arguments)
 
-    assert events == [f"agent.{method}", "manager.shutdown", "connection.close"]
+    expected = [f"agent.{method}", "manager.shutdown", "connection.close"]
+    if helper == "_resume_approved_task":
+        expected.insert(0, "manager.resume_waiting:task-1")
+    assert events == expected
 
 
-def test_production_lead_delegates_database_and_artifact_work_to_teammates(settings) -> None:
+def test_production_lead_delegates_database_and_artifact_work_to_teammates(
+    settings,
+) -> None:
     protector = RecordingProtector()
     lead = api_module.build_services(settings, ScriptedProvider(()), protector)
     try:
@@ -424,19 +492,28 @@ def test_production_lead_delegates_database_and_artifact_work_to_teammates(setti
         assert not {"run_python", "save_artifact", "write_report"} & lead_names
         assert {"spawn_teammate", "list_teammates", "await_teammates"} <= lead_names
         rejected = lead.tools.execute(
-            ToolCall("lead-query", "query_database", {"data_source_id": "source", "sql": "SELECT 1"}),
+            ToolCall(
+                "lead-query",
+                "query_database",
+                {"data_source_id": "source", "sql": "SELECT 1"},
+            ),
             ToolContext(project.id, task.id),
         )
         assert rejected.error_category == "unknown_tool"
 
         worker = api_module.build_services(
-            settings, secret_protector=protector, with_team_manager=False,
+            settings,
+            secret_protector=protector,
+            with_team_manager=False,
         )
         try:
             worker_names = {schema.name for schema in worker.tools.schemas()}
             assert {
-                "query_database", "search_business_knowledge", "run_python",
-                "save_artifact", "write_report"
+                "query_database",
+                "search_business_knowledge",
+                "run_python",
+                "save_artifact",
+                "write_report",
             } <= worker_names
             lead.knowledge.create(
                 project.id,
@@ -463,9 +540,7 @@ def test_production_lead_delegates_database_and_artifact_work_to_teammates(setti
 
 
 def test_business_knowledge_api_crud_and_versioning(api_client) -> None:
-    project = api_client.post(
-        "/api/projects", json={"name": "Metric catalog"}
-    ).json()
+    project = api_client.post("/api/projects", json={"name": "Metric catalog"}).json()
     payload = {
         "kind": "metric",
         "name": "Operating profit",
@@ -476,38 +551,30 @@ def test_business_knowledge_api_crud_and_versioning(api_client) -> None:
         "source": "Finance handbook",
     }
 
-    created_response = api_client.post(
-        f"/api/projects/{project['id']}/knowledge", json=payload
-    )
+    created_response = api_client.post(f"/api/projects/{project['id']}/knowledge", json=payload)
     assert created_response.status_code == 201
     created = created_response.json()
     assert created["version"] == 1
 
-    listed = api_client.get(
-        f"/api/projects/{project['id']}/knowledge"
-    ).json()
+    listed = api_client.get(f"/api/projects/{project['id']}/knowledge").json()
     assert listed == [created]
 
     payload["definition"] = "Revenue minus all operating expenses."
-    updated_response = api_client.put(
-        f"/api/knowledge/{created['id']}", json=payload
-    )
+    updated_response = api_client.put(f"/api/knowledge/{created['id']}", json=payload)
     assert updated_response.status_code == 200
     assert updated_response.json()["version"] == 2
 
-    duplicate_response = api_client.post(
-        f"/api/projects/{project['id']}/knowledge", json=payload
-    )
+    duplicate_response = api_client.post(f"/api/projects/{project['id']}/knowledge", json=payload)
     assert duplicate_response.status_code == 409
 
     deleted = api_client.delete(f"/api/knowledge/{created['id']}")
     assert deleted.status_code == 204
-    assert api_client.get(
-        f"/api/projects/{project['id']}/knowledge"
-    ).json() == []
+    assert api_client.get(f"/api/projects/{project['id']}/knowledge").json() == []
 
 
-def test_explicit_teammate_provider_factory_creates_fresh_workers_without_model_config(settings) -> None:
+def test_explicit_teammate_provider_factory_creates_fresh_workers_without_model_config(
+    settings,
+) -> None:
     created: list[ScriptedProvider] = []
 
     def teammate_provider_factory() -> ScriptedProvider:
@@ -577,14 +644,16 @@ def test_project_dataset_task_lifecycle(api_client, operations_csv) -> None:
     task = task_response.json()
 
     assert dataset["artifact_type"] == "source_dataset"
-    assert api_client.get(
-        f"/api/projects/{project['id']}/artifacts"
-    ).json()[0]["title"] == "operations.csv"
+    assert (
+        api_client.get(f"/api/projects/{project['id']}/artifacts").json()[0]["title"]
+        == "operations.csv"
+    )
     assert task["status"] == "understanding"
     assert api_client.get(f"/api/tasks/{task['id']}").status_code == 200
-    assert api_client.get(
-        f"/api/artifacts/{dataset['id']}/dataset-inspection"
-    ).json()["row_count"] == 12
+    assert (
+        api_client.get(f"/api/artifacts/{dataset['id']}/dataset-inspection").json()["row_count"]
+        == 12
+    )
 
 
 def test_events_endpoint_replays_after_sequence(api_client) -> None:
@@ -643,11 +712,11 @@ def test_agents_endpoint_exposes_safe_state_and_lifecycle_events(settings) -> No
         ]
         assert "messages" not in response.text
         assert "credentials" not in response.text
-        assert 'event: agent.created' in events
-        assert 'event: agent.state' in events
-        assert 'event: agent.message' in events
-        assert 'event: agent.completed' in events
-        assert events.index('event: agent.created') < events.index('event: agent.completed')
+        assert "event: agent.created" in events
+        assert "event: agent.state" in events
+        assert "event: agent.message" in events
+        assert "event: agent.completed" in events
+        assert events.index("event: agent.created") < events.index("event: agent.completed")
         assert run.id in events
     finally:
         services.team_manager.shutdown()  # type: ignore[union-attr]
@@ -693,9 +762,7 @@ def test_completed_task_accepts_follow_up_after_application_restart(settings) ->
 
 
 def test_failed_task_accepts_a_retry_message(settings) -> None:
-    provider = ScriptedProvider(
-        [ModelResponse(text="Recovered after retry.", tool_calls=())]
-    )
+    provider = ScriptedProvider([ModelResponse(text="Recovered after retry.", tool_calls=())])
     app = create_app(settings, provider)
     services = app.state.services
     project = services.projects.create("Retry review")
@@ -738,9 +805,7 @@ def test_running_task_rejects_a_second_message(settings) -> None:
 
 
 def test_approval_decision_is_visible_and_resumes_configured_agent(settings) -> None:
-    provider = ScriptedProvider(
-        [ModelResponse(text="Approved action handled.", tool_calls=())]
-    )
+    provider = ScriptedProvider([ModelResponse(text="Approved action handled.", tool_calls=())])
     app = create_app(settings, provider)
     services = app.state.services
     project = services.projects.create("Approval review")
@@ -790,9 +855,7 @@ def test_approval_stays_pending_when_model_is_unconfigured(settings) -> None:
 
 
 def test_model_configuration_api_never_returns_key(settings) -> None:
-    with TestClient(
-        create_app(settings, secret_protector=RecordingProtector())
-    ) as client:
+    with TestClient(create_app(settings, secret_protector=RecordingProtector())) as client:
         response = client.put(
             "/api/model-config",
             json={
@@ -813,7 +876,9 @@ def test_model_configuration_api_never_returns_key(settings) -> None:
         assert "openai-secret" not in client.get("/api/model-config").text
 
 
-def test_model_configuration_api_preserves_blank_key_for_same_provider(settings) -> None:
+def test_model_configuration_api_preserves_blank_key_for_same_provider(
+    settings,
+) -> None:
     protector = RecordingProtector()
     app = create_app(settings, secret_protector=protector)
     with TestClient(app) as client:
@@ -840,9 +905,7 @@ def test_model_configuration_api_preserves_blank_key_for_same_provider(settings)
 
 
 def test_builtin_model_configuration_rejects_endpoint_override(settings) -> None:
-    with TestClient(
-        create_app(settings, secret_protector=RecordingProtector())
-    ) as client:
+    with TestClient(create_app(settings, secret_protector=RecordingProtector())) as client:
         response = client.put(
             "/api/model-config",
             json={
@@ -858,9 +921,7 @@ def test_builtin_model_configuration_rejects_endpoint_override(settings) -> None
 
 
 def test_unconfigured_task_is_rejected_before_creation(settings) -> None:
-    with TestClient(
-        create_app(settings, secret_protector=RecordingProtector())
-    ) as client:
+    with TestClient(create_app(settings, secret_protector=RecordingProtector())) as client:
         project = client.post("/api/projects", json={"name": "Review"}).json()
 
         response = client.post(
@@ -878,9 +939,7 @@ def test_saved_configuration_is_resolved_for_a_new_task(settings) -> None:
 
     def provider_factory(credentials, timeout_seconds=60):
         captured.append((credentials, timeout_seconds))
-        return ScriptedProvider(
-            [ModelResponse(text="Configured model completed.", tool_calls=())]
-        )
+        return ScriptedProvider([ModelResponse(text="Configured model completed.", tool_calls=())])
 
     with TestClient(
         create_app(
@@ -983,9 +1042,7 @@ def test_latest_configuration_is_resolved_for_each_agent_run(settings) -> None:
 
 
 def test_unreadable_saved_key_rejects_task_before_creation(settings) -> None:
-    with TestClient(
-        create_app(settings, secret_protector=UnreadableProtector())
-    ) as client:
+    with TestClient(create_app(settings, secret_protector=UnreadableProtector())) as client:
         client.put(
             "/api/model-config",
             json={
@@ -1006,9 +1063,7 @@ def test_unreadable_saved_key_rejects_task_before_creation(settings) -> None:
 
 
 def test_unavailable_secret_storage_returns_service_unavailable(settings) -> None:
-    with TestClient(
-        create_app(settings, secret_protector=UnavailableProtector())
-    ) as client:
+    with TestClient(create_app(settings, secret_protector=UnavailableProtector())) as client:
         response = client.put(
             "/api/model-config",
             json={
@@ -1044,9 +1099,7 @@ def test_secret_storage_error_never_reflects_secret(settings) -> None:
 
 
 def test_data_source_api_never_returns_dsn(settings) -> None:
-    with TestClient(
-        create_app(settings, secret_protector=RecordingProtector())
-    ) as client:
+    with TestClient(create_app(settings, secret_protector=RecordingProtector())) as client:
         project = client.post("/api/projects", json={"name": "Review"}).json()
 
         response = client.post(
@@ -1060,18 +1113,21 @@ def test_data_source_api_never_returns_dsn(settings) -> None:
         assert response.status_code == 201
         assert "dsn" not in response.json()
         assert "secret" not in response.text
-        assert client.get(
-            f"/api/projects/{project['id']}/data-sources"
-        ).json() == [response.json()]
+        assert client.get(f"/api/projects/{project['id']}/data-sources").json() == [response.json()]
 
 
-def test_data_source_connection_can_be_updated_without_returning_saved_dsn(settings) -> None:
+def test_data_source_connection_can_be_updated_without_returning_saved_dsn(
+    settings,
+) -> None:
     app = create_app(settings, secret_protector=RecordingProtector())
     with TestClient(app) as client:
         project = client.post("/api/projects", json={"name": "Review"}).json()
         source = client.post(
             f"/api/projects/{project['id']}/data-sources",
-            json={"name": "Warehouse", "dsn": "postgresql://reader:secret@localhost/review"},
+            json={
+                "name": "Warehouse",
+                "dsn": "postgresql://reader:secret@localhost/review",
+            },
         ).json()
 
         renamed = client.put(
@@ -1080,7 +1136,10 @@ def test_data_source_connection_can_be_updated_without_returning_saved_dsn(setti
         )
         replaced = client.put(
             f"/api/data-sources/{source['id']}",
-            json={"name": "Finance Warehouse", "dsn": "postgresql://reader:new-secret@localhost/finance"},
+            json={
+                "name": "Finance Warehouse",
+                "dsn": "postgresql://reader:new-secret@localhost/finance",
+            },
         )
         stored_dsn = app.state.services.data_sources.credentials(source["id"]).dsn
 
@@ -1091,7 +1150,9 @@ def test_data_source_connection_can_be_updated_without_returning_saved_dsn(setti
     assert stored_dsn.endswith("/finance")
 
 
-def test_data_source_can_be_deleted_globally_and_its_credentials_are_erased(settings) -> None:
+def test_data_source_can_be_deleted_globally_and_its_credentials_are_erased(
+    settings,
+) -> None:
     app = create_app(settings, secret_protector=RecordingProtector())
     with TestClient(app) as client:
         source = client.post(
@@ -1142,16 +1203,12 @@ def test_data_source_policy_and_schema_apis_are_project_scoped(settings) -> None
 
         assert policy.status_code == 200
         assert policy.json()["version"] == 2
-        current_policy = client.get(
-            f"/api/data-sources/{source['id']}/policies"
-        )
+        current_policy = client.get(f"/api/data-sources/{source['id']}/policies")
         assert current_policy.status_code == 200
         assert current_policy.json() == {
             "data_source_id": source["id"],
             "version": 2,
-            "rules": [
-                {"table": "orders", "column": None, "access": "allowed"}
-            ],
+            "rules": [{"table": "orders", "column": None, "access": "allowed"}],
         }
         assert "postgresql://" not in current_policy.text
         schema = client.get(f"/api/data-sources/{source['id']}/schema")
@@ -1180,7 +1237,11 @@ def test_api_validation_never_reflects_a_sensitive_extra_field_name(settings) ->
         project = client.post("/api/projects", json={"name": "Review"}).json()
         response = client.post(
             f"/api/projects/{project['id']}/data-sources",
-            json={"name": "Warehouse", "dsn": "postgresql://localhost/review", secret_key: "x"},
+            json={
+                "name": "Warehouse",
+                "dsn": "postgresql://localhost/review",
+                secret_key: "x",
+            },
         )
 
     assert response.status_code == 422

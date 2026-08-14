@@ -10,7 +10,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from data_analysis_agent.datasets import DatasetService
 from data_analysis_agent.domain import ArtifactType, PlanStepDraft, TaskStatus
-from data_analysis_agent.execution import DuckDBExecutor, PythonExecutor, QueryTimeoutError
+from data_analysis_agent.execution import (
+    DuckDBExecutor,
+    PythonExecutor,
+    QueryTimeoutError,
+)
 from data_analysis_agent.knowledge import BusinessKnowledgeRepository
 from data_analysis_agent.permissions import (
     ApprovalRepository,
@@ -25,8 +29,8 @@ from data_analysis_agent.repositories import (
     RecordNotFoundError,
     TaskRepository,
 )
-from data_analysis_agent.workspace import WorkspaceService
 from data_analysis_agent.team_types import AgentRole
+from data_analysis_agent.workspace import WorkspaceService
 
 if TYPE_CHECKING:
     from data_analysis_agent.team import TeamManager, TeamRepository
@@ -152,7 +156,9 @@ class SpawnTeammateInput(ToolInput):
 
 
 class AwaitTeammatesInput(ToolInput):
-    agent_ids: list[Annotated[str, Field(min_length=1, max_length=128)]] = Field(min_length=1, max_length=3)
+    agent_ids: list[Annotated[str, Field(min_length=1, max_length=128)]] = Field(
+        min_length=1, max_length=3
+    )
     timeout_seconds: int = Field(default=30, ge=1, le=120)
 
 
@@ -255,9 +261,7 @@ class ToolRegistry:
             )
 
         normalized_arguments = arguments.model_dump(mode="json")
-        decision = self._permission_policy.classify(
-            ToolAction(call.name, normalized_arguments)
-        )
+        decision = self._permission_policy.classify(ToolAction(call.name, normalized_arguments))
         if decision.level is PermissionLevel.DENY:
             return ToolResult(
                 call_id=call.id,
@@ -416,6 +420,7 @@ def build_tool_registry(
         if trace_recorder is None or context.run_id is None:
             return
         from data_analysis_agent.tracing import TraceContext
+
         try:
             trace_recorder.event(
                 TraceContext(
@@ -439,6 +444,7 @@ def build_tool_registry(
                 )
             except Exception:
                 pass
+
     def inspect_workspace(
         arguments: ToolInput,
         context: ToolContext,
@@ -603,9 +609,7 @@ def build_tool_registry(
             retryable=outcome.retryable,
         )
 
-    def search_business_knowledge(
-        arguments: ToolInput, context: ToolContext
-    ) -> HandlerResult:
+    def search_business_knowledge(arguments: ToolInput, context: ToolContext) -> HandlerResult:
         assert isinstance(arguments, SearchBusinessKnowledgeInput)
         if knowledge is None:
             raise ToolHandlerError(
@@ -735,22 +739,32 @@ def build_tool_registry(
         try:
             run = repository.get_run(agent_id)
         except KeyError:
-            raise ToolHandlerError("Teammate was not found", category="permission_denied", retryable=False) from None
+            raise ToolHandlerError(
+                "Teammate was not found", category="permission_denied", retryable=False
+            ) from None
         if run.task_id != context.task_id:
-            raise ToolHandlerError("Teammate does not belong to this task", category="permission_denied", retryable=False)
+            raise ToolHandlerError(
+                "Teammate does not belong to this task",
+                category="permission_denied",
+                retryable=False,
+            )
         return run
 
     def spawn_teammate(arguments: ToolInput, context: ToolContext) -> HandlerResult:
-        from data_analysis_agent.team import AgentRole, TeamCapacityError
+        from data_analysis_agent.team import TeamCapacityError
         from data_analysis_agent.tracing import TraceContext
+
         assert isinstance(arguments, SpawnTeammateInput)
         try:
             trace_context = (
                 TraceContext(
-                    context.run_id, context.task_id, agent_id=context.agent_id,
+                    context.run_id,
+                    context.task_id,
+                    agent_id=context.agent_id,
                     parent_event_id=context.parent_event_id,
                 )
-                if context.run_id else None
+                if context.run_id
+                else None
             )
             if trace_context is None:
                 run = coordinator["manager"].spawn(
@@ -758,12 +772,20 @@ def build_tool_registry(
                 )
             else:
                 run = coordinator["manager"].spawn(
-                    context.task_id, arguments.role, arguments.objective,
+                    context.task_id,
+                    arguments.role,
+                    arguments.objective,
                     trace_context=trace_context,
                 )
         except (ValueError, TeamCapacityError):
-            raise ToolHandlerError("Teammate capacity is unavailable", category="permission_denied", retryable=False) from None
-        return HandlerResult({"agent_id": run.id, "role": run.role.value, "status": run.status.value})
+            raise ToolHandlerError(
+                "Teammate capacity is unavailable",
+                category="permission_denied",
+                retryable=False,
+            ) from None
+        return HandlerResult(
+            {"agent_id": run.id, "role": run.role.value, "status": run.status.value}
+        )
 
     def list_teammates(arguments: ToolInput, context: ToolContext) -> HandlerResult:
         del arguments
@@ -774,8 +796,35 @@ def build_tool_registry(
         assert isinstance(arguments, AwaitTeammatesInput)
         for agent_id in arguments.agent_ids:
             _owned_run(agent_id, context)
-        runs = coordinator["manager"].await_runs(tuple(arguments.agent_ids), arguments.timeout_seconds)
-        return HandlerResult({"agents": [_rich_run(run) for run in runs]})
+        runs = coordinator["manager"].await_runs(
+            tuple(arguments.agent_ids), arguments.timeout_seconds
+        )
+        pending_approvals = tuple(
+            approval
+            for approval in approvals.list_for_task(context.task_id)
+            if approval.status == "pending"
+        )
+        approval_wait = (
+            tasks.get(context.task_id).status is TaskStatus.NEEDS_INPUT
+            and any(run.status.value == "waiting" for run in runs)
+            and bool(pending_approvals)
+        )
+        output: dict[str, Any] = {"agents": [_rich_run(run) for run in runs]}
+        if approval_wait:
+            output.update(
+                {
+                    "wait_reason": "approval_required",
+                    "approvals": [
+                        {
+                            "approval_id": approval.id,
+                            "tool_name": approval.action.tool_name,
+                            "reason": approval.reason,
+                        }
+                        for approval in pending_approvals
+                    ],
+                }
+            )
+        return HandlerResult(output, pauses_task=approval_wait)
 
     def cancel_teammate(arguments: ToolInput, context: ToolContext) -> HandlerResult:
         assert isinstance(arguments, CancelTeammateInput)
@@ -783,7 +832,7 @@ def build_tool_registry(
         run = coordinator["manager"].cancel(arguments.agent_id)
         return HandlerResult({"agent_id": run.id, "status": run.status.value})
 
-    definitions = (
+    definitions: tuple[ToolDefinition, ...] = (
         ToolDefinition(
             "inspect_workspace",
             "List current-project datasets, tasks, and artifacts plus shared database connections.",
@@ -834,23 +883,31 @@ def build_tool_registry(
         ),
     )
     if include_database_query:
-        definitions = definitions[:3] + (
-            ToolDefinition(
-                "query_database",
-                "Run a governed, read-only PostgreSQL query against a configured data source.",
-                QueryDatabaseInput,
-                query_database,
-            ),
-        ) + definitions[3:]
+        definitions = (
+            definitions[:3]
+            + (
+                ToolDefinition(
+                    "query_database",
+                    "Run a governed, read-only PostgreSQL query against a configured data source.",
+                    QueryDatabaseInput,
+                    query_database,
+                ),
+            )
+            + definitions[3:]
+        )
     if knowledge is not None and include_knowledge_search:
-        definitions = definitions[:2] + (
-            ToolDefinition(
-                "search_business_knowledge",
-                "Search the current project's governed metric definitions, business terms, formulas, dimensions, synonyms, and sources.",
-                SearchBusinessKnowledgeInput,
-                search_business_knowledge,
-            ),
-        ) + definitions[2:]
+        definitions = (
+            definitions[:2]
+            + (
+                ToolDefinition(
+                    "search_business_knowledge",
+                    "Search the current project's governed metric definitions, business terms, formulas, dimensions, synonyms, and sources.",
+                    SearchBusinessKnowledgeInput,
+                    search_business_knowledge,
+                ),
+            )
+            + definitions[2:]
+        )
     if not include_artifact_writes:
         definitions = tuple(
             definition
@@ -865,9 +922,24 @@ def build_tool_registry(
                 SpawnTeammateInput,
                 spawn_teammate,
             ),
-            ToolDefinition("list_teammates", "List teammates for this task.", ToolInput, list_teammates),
-            ToolDefinition("await_teammates", "Wait briefly for selected teammates.", AwaitTeammatesInput, await_teammates),
-            ToolDefinition("cancel_teammate", "Request cancellation of one teammate.", CancelTeammateInput, cancel_teammate),
+            ToolDefinition(
+                "list_teammates",
+                "List teammates for this task.",
+                ToolInput,
+                list_teammates,
+            ),
+            ToolDefinition(
+                "await_teammates",
+                "Wait briefly for selected teammates.",
+                AwaitTeammatesInput,
+                await_teammates,
+            ),
+            ToolDefinition(
+                "cancel_teammate",
+                "Request cancellation of one teammate.",
+                CancelTeammateInput,
+                cancel_teammate,
+            ),
         )
     registry = ToolRegistry(definitions, permission_policy, approvals, tasks, artifacts)
     registry._team_coordinator = coordinator

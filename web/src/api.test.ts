@@ -6,75 +6,106 @@ describe("HttpApiClient", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it("surfaces the message from a structured API error", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(
-      JSON.stringify({
-        detail: {
-          category: "model_not_configured",
-          message: "Configure a model before starting analysis",
-        },
-      }),
-      {
-        status: 409,
-        headers: { "Content-Type": "application/json" },
-      },
-    )));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              detail: {
+                category: "model_not_configured",
+                message: "Configure a model before starting analysis",
+              },
+            }),
+            {
+              status: 409,
+              headers: { "Content-Type": "application/json" },
+            },
+          ),
+      ),
+    );
     const api = new HttpApiClient();
 
-    await expect(api.createTask("project-1", "Diagnose profit")).rejects.toThrow(
-      "Configure a model before starting analysis",
-    );
+    await expect(
+      api.createTask("project-1", "Diagnose profit"),
+    ).rejects.toThrow("Configure a model before starting analysis");
   });
 
   it("lists teammate runs for a task", async () => {
-    const runs = [{
-      id: "agent-1",
-      task_id: "task-1",
-      role: "sql",
-      objective: "Aggregate profit",
-      status: "working",
-      result_summary: null,
-      error_category: null,
-      created_at: "2026-08-06T00:00:00+00:00",
-      started_at: "2026-08-06T00:00:00+00:00",
-      completed_at: null,
-    }];
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify(runs), {
-      headers: { "Content-Type": "application/json" },
-    }));
+    const runs = [
+      {
+        id: "agent-1",
+        task_id: "task-1",
+        role: "sql",
+        objective: "Aggregate profit",
+        status: "working",
+        result_summary: null,
+        error_category: null,
+        created_at: "2026-08-06T00:00:00+00:00",
+        started_at: "2026-08-06T00:00:00+00:00",
+        completed_at: null,
+      },
+    ];
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify(runs), {
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(new HttpApiClient().listAgents("task-1")).resolves.toEqual(runs);
-    expect(fetchMock).toHaveBeenCalledWith("/api/tasks/task-1/agents", undefined);
+    await expect(new HttpApiClient().listAgents("task-1")).resolves.toEqual(
+      runs,
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/tasks/task-1/agents",
+      undefined,
+    );
   });
 
   it("handles an empty successful delete response", async () => {
     const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(new HttpApiClient().deleteBusinessKnowledge("entry-1")).resolves.toBeUndefined();
-    expect(fetchMock).toHaveBeenCalledWith("/api/knowledge/entry-1", { method: "DELETE" });
+    await expect(
+      new HttpApiClient().deleteBusinessKnowledge("entry-1"),
+    ).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith("/api/knowledge/entry-1", {
+      method: "DELETE",
+    });
   });
 
   it("deletes a data source through the shared endpoint", async () => {
     const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(new HttpApiClient().deleteDataSource("source-1")).resolves.toBeUndefined();
-    expect(fetchMock).toHaveBeenCalledWith("/api/data-sources/source-1", { method: "DELETE" });
+    await expect(
+      new HttpApiClient().deleteDataSource("source-1"),
+    ).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith("/api/data-sources/source-1", {
+      method: "DELETE",
+    });
   });
 
   it("uploads a business document for automatic knowledge import", async () => {
     const result = {
-      file_name: "口径.md", created: [], skipped_names: [],
+      file_name: "口径.md",
+      created: [],
+      skipped_names: [],
       category_counts: { metric: 0, term: 0, rule: 0 },
     };
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify(result), {
-      headers: { "Content-Type": "application/json" },
-    }));
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify(result), {
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
     vi.stubGlobal("fetch", fetchMock);
     const file = new File(["# 利润"], "口径.md", { type: "text/markdown" });
 
-    await expect(new HttpApiClient().importBusinessKnowledge(file)).resolves.toEqual(result);
+    await expect(
+      new HttpApiClient().importBusinessKnowledge(file),
+    ).resolves.toEqual(result);
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/knowledge/import",
       expect.objectContaining({ method: "POST", body: expect.any(FormData) }),

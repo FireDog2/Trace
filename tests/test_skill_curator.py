@@ -10,28 +10,41 @@ from data_analysis_agent.skills import (
     SkillStaticValidator,
     WorkflowCurator,
 )
-from data_analysis_agent.team import AgentRunStatus, ROLE_TOOLS, TeamRepository
+from data_analysis_agent.team import ROLE_TOOLS, AgentRunStatus, TeamRepository
 from data_analysis_agent.team_types import AgentRole
 from data_analysis_agent.tracing import TraceContext, TraceRepository
 
 _SAFE = "---\nname: safe-sql-diagnostic\ndescription: Safe read-only SQL analysis.\n---\n## When to use\nFor read-only analysis.\n## Inputs\nA question and approved source.\n## Workflow\nValidate and execute safely.\n## Safety gates\nKeep approvals active.\n## Failure recovery\nReturn a safe error summary.\n"
 
+
 def test_curator_only_accepts_completed_evidenced_runs(db_connection, task) -> None:
-    traces = TraceRepository(db_connection); run = traces.start_run(task.id)
+    traces = TraceRepository(db_connection)
+    run = traces.start_run(task.id)
     provider = ScriptedProvider([ModelResponse(_SAFE, ())])
     curator = WorkflowCurator(traces, SkillCandidateRepository(db_connection), provider)
-    with pytest.raises(SkillEligibilityError): curator.create_candidate(run.id, "scripted")
-    traces.append(run.id, task.id, "tool.completed", "completed", {"tool": "query_database"}, attempt=2)
-    traces.finish_run(run.id, "completed"); traces.accept_run(run.id)
+    with pytest.raises(SkillEligibilityError):
+        curator.create_candidate(run.id, "scripted")
+    traces.append(
+        run.id,
+        task.id,
+        "tool.completed",
+        "completed",
+        {"tool": "query_database"},
+        attempt=2,
+    )
+    traces.finish_run(run.id, "completed")
+    traces.accept_run(run.id)
     candidate = curator.create_candidate(run.id, "scripted")
     assert candidate.status == "candidate" and candidate.enabled is False
     evidence = provider.requests[0].messages[0].content
     assert '"tool":"query_database"' in evidence
     assert '"attempt":2' in evidence
 
+
 @pytest.mark.parametrize("unsafe", ["TODO", "Use password secret", "Automatically bypass approval"])
 def test_static_validator_rejects_unsafe_text(unsafe: str) -> None:
-    with pytest.raises(Exception): SkillStaticValidator().validate(_SAFE + unsafe)
+    with pytest.raises(Exception):
+        SkillStaticValidator().validate(_SAFE + unsafe)
 
 
 def test_durable_curator_has_no_tools_and_creates_one_disabled_candidate(
@@ -66,14 +79,15 @@ def test_durable_curator_has_no_tools_and_creates_one_disabled_candidate(
     assert replayed.id == completed.id
     candidate = candidates.get_for_run(source.id)
     assert candidate.enabled is False and candidate.status == "candidate"
-    assert db_connection.execute(
-        "SELECT COUNT(*) FROM skill_candidates WHERE source_run_id=?", (source.id,)
-    ).fetchone()[0] == 1
+    assert (
+        db_connection.execute(
+            "SELECT COUNT(*) FROM skill_candidates WHERE source_run_id=?", (source.id,)
+        ).fetchone()[0]
+        == 1
+    )
 
 
-def test_curator_fails_safely_when_source_run_was_not_accepted(
-    db_connection, task
-) -> None:
+def test_curator_fails_safely_when_source_run_was_not_accepted(db_connection, task) -> None:
     traces = TraceRepository(db_connection)
     source = traces.start_run(task.id)
     traces.append(source.id, task.id, "tool.completed", "completed", {})
@@ -116,7 +130,9 @@ def test_curator_provider_and_validation_failures_are_durable_and_safe(
     traces.accept_run(source.id)
     teams = TeamRepository(db_connection)
     run = teams.create_run(
-        task.id, AgentRole.CURATOR, "Curate",
+        task.id,
+        AgentRole.CURATOR,
+        "Curate",
         trace_context=TraceContext(source.id, task.id),
     )
     provider = ScriptedProvider([] if response is None else [response])

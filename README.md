@@ -4,13 +4,33 @@
 
 > **Vibe Coding 让“做出一个能演示的 Agent”变得很快；Harness 决定它能否持续、稳定、可控地运行。**
 
+## 面试官 60 秒入口
+
+| 可验证信号 | 当前证据 |
+| --- | --- |
+| 确定性后端验证 | 320 个测试通过，核心路径无需模型 Key |
+| 前端验证 | 42 个 Vitest 测试、TypeScript 检查与生产构建 |
+| 覆盖率 | 后端语句与分支综合覆盖率 85%，CI 设置最低阈值 |
+| 工程门禁 | Ruff、mypy、pytest-cov、Prettier、真实 PostgreSQL CI |
+| 核心差异 | SQL 纵深防御、有界多 Agent、一次性审批、Trace/Replay、证据化报告 |
+
+不配置模型 Key，约数秒即可生成一个真实执行过 Lead → Report Agent、Python 分析、Artifact、报告和 Trace 的独立演示工作区：
+
+```powershell
+data-analysis-agent demo --reset
+data-analysis-agent serve --data-dir .data-analysis-agent-demo
+npm --prefix web run dev
+```
+
+![Golden Demo：完成态计划与证据工作区](docs/assets/workbench-demo.png)
+
+随后打开 `http://127.0.0.1:5173`。日常工作区与演示工作区物理隔离；重复演示不会污染真实数据。
+
 ## 为什么做这个项目
 
 今天，借助 AI Coder，开发者可以在很短时间内拼出一个能对话、会调用工具的 Agent 产品。但从“一次跑通”走向持续运行，系统仍然必须回答更困难的问题：模型能看到什么、能做什么，失败后如何恢复，如何避免循环与越权，以及如何证明最终结论来自真实证据。这些问题不能只靠 Prompt 解决，它们属于 Agent Harness 的工程责任。
 
 我选择**数据分析**作为这个命题的落地场景：分析需求广泛存在，同时天然包含业务口径、敏感数据访问、高成本 SQL、长上下文、多角色协作、人工审批和结果追溯。它不仅需要模型“会分析”，也足以暴露一个 Harness 是否真正具备权限边界、执行预算、恢复策略、持久化状态与可观测性。
-
-本项目约 **95% 的代码由 AI Coder 在我的指导下生成或修改**。这不是为了说明工程师不再重要，恰恰相反：AI Coder 会高效执行明确的方向，也会放大模糊的架构、错误的业务假设和缺失的验收标准。在这个项目中，我承担的是产品与业务定义、架构设计、能力边界、任务拆解、验收测试和失败闭环，并让 AI 参与具体实现。
 
 我想通过这个项目证明：在 AI-native 开发中，代码生成可以被大规模委托，但工程责任不能被委托。比单纯增加代码产量更稀缺的，是同时理解业务、具备 Harness 思维，并能持续为 AI 提供方向、约束和可验证反馈的工程师。
 
@@ -240,9 +260,15 @@ docker compose up -d postgres
 python -m pytest tests/test_portfolio_acceptance.py -v
 
 # 完整确定性后端测试
-python -m pytest -v
+python -m pytest --cov=data_analysis_agent --cov-report=term-missing -v
 
-# 前端单元测试与生产构建
+# 后端静态质量门禁
+ruff check src tests scripts
+ruff format --check src tests scripts
+mypy src
+
+# 前端格式、单元测试与生产构建
+npm --prefix web run format:check
 npm --prefix web test -- --run
 npm --prefix web run build
 ```
@@ -255,7 +281,7 @@ $env:TEST_POSTGRES_DSN = "postgresql://portfolio_reader:portfolio_reader@localho
 python -m pytest tests/test_postgres_integration.py -v
 ```
 
-重新生成确定性 Golden Trace：
+验证仓库内置的确定性 Golden Trace 未泄漏敏感信息且序列连续：
 
 ```powershell
 python scripts/export_golden_trace.py
@@ -278,6 +304,10 @@ python scripts/export_golden_trace.py
 | Artifact、报告与 PDF | [`reporting.py`](src/data_analysis_agent/reporting.py)、[`pdf_export.py`](src/data_analysis_agent/pdf_export.py) |
 | 元数据 Schema 与 Migration | [`db.py`](src/data_analysis_agent/db.py) |
 | React Workbench | [`App.tsx`](web/src/App.tsx)、[`components/`](web/src/components/) |
+
+## AI-native 开发方式
+
+本项目约 **95% 的代码由 AI Coder 在我的指导下生成或修改**。我的责任集中在产品与业务定义、架构设计、能力边界、任务拆解、验收测试和失败闭环。这个比例不是质量证明；仓库中的状态不变量、安全策略、确定性演示、静态门禁和回归测试才是可验证证据。
 
 ## 信任边界与刻意取舍
 

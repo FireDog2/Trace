@@ -3,6 +3,7 @@
 The normal demo is API-key-free and intentionally does not need a local PostgreSQL
 server. A supplied PORTFOLIO_POSTGRES_DSN is used only by opt-in live checks.
 """
+
 from __future__ import annotations
 
 import json

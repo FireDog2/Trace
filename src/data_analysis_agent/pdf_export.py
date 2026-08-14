@@ -26,10 +26,7 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-
-_INLINE = re.compile(
-    r"`([^`]+)`|\*\*([^*]+)\*\*|(?<!\*)\*([^*]+)\*(?!\*)|\[([^\]]+)\]\(([^)]+)\)"
-)
+_INLINE = re.compile(r"`([^`]+)`|\*\*([^*]+)\*\*|(?<!\*)\*([^*]+)\*(?!\*)|\[([^\]]+)\]\(([^)]+)\)")
 _HEADING = re.compile(r"^(#{1,6})\s+(.+)$")
 _LIST = re.compile(r"^\s*([-+*]|\d+[.)])\s+(.+)$")
 _TABLE_RULE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
@@ -143,57 +140,135 @@ def _styles(regular_font: str, bold_font: str) -> dict[str, ParagraphStyle]:
     sample = getSampleStyleSheet()
     return {
         "eyebrow": ParagraphStyle(
-            "TraceEyebrow", parent=sample["Normal"], fontName=bold_font, fontSize=7.5,
-            leading=9, textColor=_PRIMARY, tracking=1.1,
+            "TraceEyebrow",
+            parent=sample["Normal"],
+            fontName=bold_font,
+            fontSize=7.5,
+            leading=9,
+            textColor=_PRIMARY,
+            tracking=1.1,
         ),
         "title": ParagraphStyle(
-            "TraceTitle", parent=sample["Title"], fontName=bold_font, fontSize=23,
-            leading=29, textColor=_INK, alignment=TA_LEFT, spaceAfter=0,
+            "TraceTitle",
+            parent=sample["Title"],
+            fontName=bold_font,
+            fontSize=23,
+            leading=29,
+            textColor=_INK,
+            alignment=TA_LEFT,
+            spaceAfter=0,
         ),
         "subtitle": ParagraphStyle(
-            "TraceSubtitle", parent=sample["Normal"], fontName=regular_font, fontSize=9,
-            leading=14, textColor=_MUTED,
+            "TraceSubtitle",
+            parent=sample["Normal"],
+            fontName=regular_font,
+            fontSize=9,
+            leading=14,
+            textColor=_MUTED,
         ),
         "body": ParagraphStyle(
-            "TraceBody", parent=sample["BodyText"], fontName=regular_font, fontSize=9.5,
-            leading=16, textColor=_INK, spaceAfter=3.2 * mm, wordWrap="CJK",
+            "TraceBody",
+            parent=sample["BodyText"],
+            fontName=regular_font,
+            fontSize=9.5,
+            leading=16,
+            textColor=_INK,
+            spaceAfter=3.2 * mm,
+            wordWrap="CJK",
         ),
         "h1": ParagraphStyle(
-            "TraceH1", parent=sample["Heading1"], fontName=bold_font, fontSize=17,
-            leading=23, textColor=_INK, spaceBefore=7 * mm, spaceAfter=3 * mm,
+            "TraceH1",
+            parent=sample["Heading1"],
+            fontName=bold_font,
+            fontSize=17,
+            leading=23,
+            textColor=_INK,
+            spaceBefore=7 * mm,
+            spaceAfter=3 * mm,
         ),
         "h2": ParagraphStyle(
-            "TraceH2", parent=sample["Heading2"], fontName=bold_font, fontSize=13,
-            leading=19, textColor=_INK, spaceBefore=6 * mm, spaceAfter=2.5 * mm,
-            borderColor=_PRIMARY, borderWidth=0, borderPadding=0,
+            "TraceH2",
+            parent=sample["Heading2"],
+            fontName=bold_font,
+            fontSize=13,
+            leading=19,
+            textColor=_INK,
+            spaceBefore=6 * mm,
+            spaceAfter=2.5 * mm,
+            borderColor=_PRIMARY,
+            borderWidth=0,
+            borderPadding=0,
         ),
         "h3": ParagraphStyle(
-            "TraceH3", parent=sample["Heading3"], fontName=bold_font, fontSize=10.5,
-            leading=16, textColor=_PRIMARY, spaceBefore=4.5 * mm, spaceAfter=2 * mm,
+            "TraceH3",
+            parent=sample["Heading3"],
+            fontName=bold_font,
+            fontSize=10.5,
+            leading=16,
+            textColor=_PRIMARY,
+            spaceBefore=4.5 * mm,
+            spaceAfter=2 * mm,
         ),
         "quote": ParagraphStyle(
-            "TraceQuote", parent=sample["BodyText"], fontName=regular_font, fontSize=9,
-            leading=15, textColor=_MUTED, leftIndent=6 * mm, rightIndent=3 * mm,
-            borderColor=_PRIMARY, borderWidth=1.5, borderPadding=(2, 7, 2, 8),
-            backColor=_PANEL, spaceBefore=2 * mm, spaceAfter=4 * mm, wordWrap="CJK",
+            "TraceQuote",
+            parent=sample["BodyText"],
+            fontName=regular_font,
+            fontSize=9,
+            leading=15,
+            textColor=_MUTED,
+            leftIndent=6 * mm,
+            rightIndent=3 * mm,
+            borderColor=_PRIMARY,
+            borderWidth=1.5,
+            borderPadding=(2, 7, 2, 8),
+            backColor=_PANEL,
+            spaceBefore=2 * mm,
+            spaceAfter=4 * mm,
+            wordWrap="CJK",
         ),
         "code": ParagraphStyle(
-            "TraceCode", parent=sample["Code"], fontName=regular_font, fontSize=7.8,
-            leading=12, textColor=_INK, leftIndent=4 * mm, rightIndent=4 * mm,
-            borderColor=_BORDER, borderWidth=0.5, borderPadding=7, backColor=_CODE,
-            spaceBefore=2 * mm, spaceAfter=4 * mm, wordWrap="CJK",
+            "TraceCode",
+            parent=sample["Code"],
+            fontName=regular_font,
+            fontSize=7.8,
+            leading=12,
+            textColor=_INK,
+            leftIndent=4 * mm,
+            rightIndent=4 * mm,
+            borderColor=_BORDER,
+            borderWidth=0.5,
+            borderPadding=7,
+            backColor=_CODE,
+            spaceBefore=2 * mm,
+            spaceAfter=4 * mm,
+            wordWrap="CJK",
         ),
         "list": ParagraphStyle(
-            "TraceList", parent=sample["BodyText"], fontName=regular_font, fontSize=9.2,
-            leading=15, textColor=_INK, wordWrap="CJK",
+            "TraceList",
+            parent=sample["BodyText"],
+            fontName=regular_font,
+            fontSize=9.2,
+            leading=15,
+            textColor=_INK,
+            wordWrap="CJK",
         ),
         "table": ParagraphStyle(
-            "TraceTable", parent=sample["BodyText"], fontName=regular_font, fontSize=7.8,
-            leading=11, textColor=_INK, wordWrap="CJK",
+            "TraceTable",
+            parent=sample["BodyText"],
+            fontName=regular_font,
+            fontSize=7.8,
+            leading=11,
+            textColor=_INK,
+            wordWrap="CJK",
         ),
         "table_header": ParagraphStyle(
-            "TraceTableHeader", parent=sample["BodyText"], fontName=bold_font, fontSize=7.8,
-            leading=11, textColor=_INK, wordWrap="CJK",
+            "TraceTableHeader",
+            parent=sample["BodyText"],
+            fontName=bold_font,
+            fontSize=7.8,
+            leading=11,
+            textColor=_INK,
+            wordWrap="CJK",
         ),
         "page_break": ParagraphStyle("TracePageBreak", parent=sample["Normal"]),
     }
@@ -216,7 +291,13 @@ def _markdown_flowables(
             index += 1
             continue
         if stripped in {"---", "***", "___"}:
-            output.extend((Spacer(1, 2 * mm), HRFlowable(width="100%", thickness=0.6, color=_BORDER), Spacer(1, 3 * mm)))
+            output.extend(
+                (
+                    Spacer(1, 2 * mm),
+                    HRFlowable(width="100%", thickness=0.6, color=_BORDER),
+                    Spacer(1, 3 * mm),
+                )
+            )
             index += 1
             continue
         if stripped == "<!-- pagebreak -->":
@@ -259,18 +340,29 @@ def _markdown_flowables(
                 item_match = _LIST.match(lines[index])
                 if not item_match or item_match.group(1)[0].isdigit() != ordered:
                     break
-                item = re.sub(r"^\[[ xX]\]\s*", lambda m: "☑ " if "x" in m.group(0).lower() else "☐ ", item_match.group(2))
-                items.append(ListItem(Paragraph(_inline_markup(item), styles["list"]), leftIndent=3 * mm))
+                item = re.sub(
+                    r"^\[[ xX]\]\s*",
+                    lambda m: "☑ " if "x" in m.group(0).lower() else "☐ ",
+                    item_match.group(2),
+                )
+                items.append(
+                    ListItem(
+                        Paragraph(_inline_markup(item), styles["list"]),
+                        leftIndent=3 * mm,
+                    )
+                )
                 index += 1
-            output.append(ListFlowable(
-                items,
-                bulletType="1" if ordered else "bullet",
-                start="1" if ordered else "•",
-                leftIndent=6 * mm,
-                bulletFontName=styles["list"].fontName,
-                bulletFontSize=8,
-                spaceAfter=3.5 * mm,
-            ))
+            output.append(
+                ListFlowable(
+                    items,
+                    bulletType="1" if ordered else "bullet",
+                    start="1" if ordered else "•",
+                    leftIndent=6 * mm,
+                    bulletFontName=styles["list"].fontName,
+                    bulletFontSize=8,
+                    spaceAfter=3.5 * mm,
+                )
+            )
             continue
         if stripped.startswith(">"):
             quote: list[str] = []
@@ -308,22 +400,32 @@ def _markdown_table(rows: list[list[str]], styles: dict[str, ParagraphStyle]) ->
     width = max(len(row) for row in rows)
     normalized = [row + [""] * (width - len(row)) for row in rows]
     data = [
-        [Paragraph(_inline_markup(cell), styles["table_header" if row_index == 0 else "table"]) for cell in row]
+        [
+            Paragraph(
+                _inline_markup(cell),
+                styles["table_header" if row_index == 0 else "table"],
+            )
+            for cell in row
+        ]
         for row_index, row in enumerate(normalized)
     ]
     available_width = A4[0] - 38 * mm
     table = Table(data, colWidths=[available_width / width] * width, repeatRows=1, hAlign="LEFT")
-    table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), _CODE),
-        ("TEXTCOLOR", (0, 0), (-1, -1), _INK),
-        ("GRID", (0, 0), (-1, -1), 0.45, _BORDER),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 6),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-        ("TOPPADDING", (0, 0), (-1, -1), 5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, _PANEL]),
-    ]))
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), _CODE),
+                ("TEXTCOLOR", (0, 0), (-1, -1), _INK),
+                ("GRID", (0, 0), (-1, -1), 0.45, _BORDER),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, _PANEL]),
+            ]
+        )
+    )
     return table
 
 
@@ -331,7 +433,7 @@ def _inline_markup(text: str) -> str:
     output: list[str] = []
     cursor = 0
     for match in _INLINE.finditer(text):
-        output.append(html.escape(text[cursor:match.start()]).replace("\n", "<br/>"))
+        output.append(html.escape(text[cursor : match.start()]).replace("\n", "<br/>"))
         code, bold, italic, label, target = match.groups()
         if code is not None:
             output.append(f'<font color="#3D4C66"><b>{html.escape(code)}</b></font>')
@@ -342,7 +444,9 @@ def _inline_markup(text: str) -> str:
         elif label is not None and target is not None:
             safe_label = html.escape(label)
             if target.startswith(("https://", "http://", "artifact://")):
-                output.append(f'<link href="{html.escape(target, quote=True)}" color="#3D63DD">{safe_label}</link>')
+                output.append(
+                    f'<link href="{html.escape(target, quote=True)}" color="#3D63DD">{safe_label}</link>'
+                )
             else:
                 output.append(safe_label)
         cursor = match.end()

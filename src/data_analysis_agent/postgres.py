@@ -12,8 +12,7 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
-from uuid import uuid4
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg
 
@@ -98,8 +97,7 @@ class ExplainRiskPolicy:
         total_cost = float(root.get("Total Cost", 0.0) or 0.0)
         estimated_rows = int(root.get("Plan Rows", 0) or 0)
         sequential_scans = sum(
-            str(node.get("Node Type", "")).lower() == "seq scan"
-            for node in nodes
+            str(node.get("Node Type", "")).lower() == "seq scan" for node in nodes
         )
         join_count = sum(_is_join_node(node) for node in nodes)
         missing_filter = any(
@@ -126,7 +124,11 @@ class ExplainRiskPolicy:
             or estimated_rows >= 1_000_000
             or sequential_scans >= 4
             or join_count >= 6
-            or (missing_filter and missing_join_constraint and total_cost >= self._settings.postgres_high_cost / 10)
+            or (
+                missing_filter
+                and missing_join_constraint
+                and total_cost >= self._settings.postgres_high_cost / 10
+            )
         ):
             level = "high"
             reason = "The query plan requires one-time approval"
@@ -448,7 +450,9 @@ class SqlSafetyGateway:
                             row_limit=row_limit + 1,
                         )
                     except BaseException as exc:
-                        self._finish_attempt(attempt_id, "failed", _driver_error(exc).error_category)
+                        self._finish_attempt(
+                            attempt_id, "failed", _driver_error(exc).error_category
+                        )
                         return _driver_error(
                             exc,
                             query_hash=validated.sql_hash,
@@ -468,9 +472,7 @@ class SqlSafetyGateway:
                             query_hash=validated.sql_hash,
                             risk=risk,
                             error_category="result_serialization_error",
-                            message=(
-                                "The PostgreSQL result could not be serialized safely"
-                            ),
+                            message=("The PostgreSQL result could not be serialized safely"),
                             retryable=True,
                         )
                     if len(serialized) > byte_limit:
@@ -494,10 +496,7 @@ class SqlSafetyGateway:
                             query_hash=validated.sql_hash,
                             risk=risk,
                             error_category="artifact_write_error",
-                            message=(
-                                "The PostgreSQL result artifact could not be "
-                                "written safely"
-                            ),
+                            message=("The PostgreSQL result artifact could not be written safely"),
                             retryable=True,
                         )
 
@@ -529,8 +528,7 @@ class SqlSafetyGateway:
                             risk=risk,
                             error_category="artifact_registration_error",
                             message=(
-                                "The PostgreSQL result artifact could not be "
-                                "registered safely"
+                                "The PostgreSQL result artifact could not be registered safely"
                             ),
                             retryable=True,
                         )
@@ -599,7 +597,15 @@ class SqlSafetyGateway:
             "id, task_id, data_source_id, policy_version, sql_hash, approval_id, "
             "status, error_category, started_at, completed_at"
             ") VALUES (?, ?, ?, ?, ?, ?, 'in_flight', NULL, ?, NULL)",
-            (attempt_id, task_id, data_source_id, policy_version, sql_hash, approval_id, utc_now()),
+            (
+                attempt_id,
+                task_id,
+                data_source_id,
+                policy_version,
+                sql_hash,
+                approval_id,
+                utc_now(),
+            ),
         )
         return attempt_id
 
@@ -812,10 +818,7 @@ def _json_safe_value(value: Any, *, depth: int = 0) -> Any:
     if isinstance(value, bytes | bytearray | memoryview):
         return "base64:" + base64.b64encode(bytes(value)).decode("ascii")
     if isinstance(value, Mapping):
-        return {
-            str(key): _json_safe_value(item, depth=depth + 1)
-            for key, item in value.items()
-        }
+        return {str(key): _json_safe_value(item, depth=depth + 1) for key, item in value.items()}
     if isinstance(value, tuple | list):
         return [_json_safe_value(item, depth=depth + 1) for item in value]
     return str(value)

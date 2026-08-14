@@ -11,7 +11,6 @@ from data_analysis_agent.db import (
     sqlite_connection_lock,
     utc_now,
 )
-from data_analysis_agent.scope import GLOBAL_PROJECT_ID
 from data_analysis_agent.domain import (
     Artifact,
     ArtifactType,
@@ -26,8 +25,9 @@ from data_analysis_agent.domain import (
     TaskEvent,
     TaskStatus,
 )
-from data_analysis_agent.workspace import WorkspaceService
 from data_analysis_agent.model_config import SecretProtector
+from data_analysis_agent.scope import GLOBAL_PROJECT_ID
+from data_analysis_agent.workspace import WorkspaceService
 
 
 class RepositoryError(RuntimeError):
@@ -69,7 +69,8 @@ class ProtectedToolMessageRepository:
     @sqlite_connection_guarded
     def get(self, message_id: str) -> str | None:
         row = self._connection.execute(
-            "SELECT protected_content FROM protected_tool_message_payloads WHERE message_id = ?", (message_id,)
+            "SELECT protected_content FROM protected_tool_message_payloads WHERE message_id = ?",
+            (message_id,),
         ).fetchone()
         if row is None:
             return None
@@ -81,10 +82,20 @@ class ProtectedToolMessageRepository:
 
 TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
     TaskStatus.UNDERSTANDING: frozenset(
-        {TaskStatus.PLANNING, TaskStatus.NEEDS_INPUT, TaskStatus.FAILED, TaskStatus.CANCELLED}
+        {
+            TaskStatus.PLANNING,
+            TaskStatus.NEEDS_INPUT,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+        }
     ),
     TaskStatus.PLANNING: frozenset(
-        {TaskStatus.RUNNING, TaskStatus.NEEDS_INPUT, TaskStatus.FAILED, TaskStatus.CANCELLED}
+        {
+            TaskStatus.RUNNING,
+            TaskStatus.NEEDS_INPUT,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+        }
     ),
     TaskStatus.RUNNING: frozenset(
         {
@@ -95,7 +106,12 @@ TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
         }
     ),
     TaskStatus.SYNTHESIZING: frozenset(
-        {TaskStatus.COMPLETED, TaskStatus.NEEDS_INPUT, TaskStatus.FAILED, TaskStatus.CANCELLED}
+        {
+            TaskStatus.COMPLETED,
+            TaskStatus.NEEDS_INPUT,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+        }
     ),
     TaskStatus.NEEDS_INPUT: frozenset(
         {
@@ -126,8 +142,7 @@ class ProjectRepository:
         project_id = str(uuid4())
         now = utc_now()
         self._connection.execute(
-            "INSERT INTO projects(id, name, status, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO projects(id, name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
             (project_id, normalized_name, ProjectStatus.ACTIVE, now, now),
         )
         self._connection.commit()
@@ -142,8 +157,7 @@ class ProjectRepository:
     @sqlite_connection_guarded
     def get(self, project_id: str) -> Project:
         row = self._connection.execute(
-            "SELECT id, name, status, created_at, updated_at "
-            "FROM projects WHERE id = ?",
+            "SELECT id, name, status, created_at, updated_at FROM projects WHERE id = ?",
             (project_id,),
         ).fetchone()
         if row is None:
@@ -265,6 +279,8 @@ class TaskRepository:
             "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
             (target, updated_at, task_id),
         )
+        if target is TaskStatus.COMPLETED:
+            self._complete_latest_plan_in_transaction(task_id)
         return Task(
             id=current.id,
             project_id=current.project_id,
@@ -274,14 +290,32 @@ class TaskRepository:
             updated_at=updated_at,
         )
 
+    def _complete_latest_plan_in_transaction(self, task_id: str) -> None:
+        """Close the active plan as part of the task-completion transaction."""
+        if not self._connection.in_transaction:
+            raise RuntimeError("plan completion requires an active transaction")
+        latest = self._connection.execute(
+            "SELECT id FROM plan_revisions WHERE task_id = ? ORDER BY revision DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if latest is None:
+            return
+        self._connection.execute(
+            "UPDATE plan_steps SET status = ? WHERE plan_revision_id = ? AND status IN (?, ?)",
+            (
+                StepStatus.COMPLETED,
+                latest["id"],
+                StepStatus.PENDING,
+                StepStatus.RUNNING,
+            ),
+        )
+
     @sqlite_connection_guarded
     def reopen_completed(self, task_id: str) -> Task:
         """Start a persisted follow-up cycle without weakening terminal transitions."""
         current = self.get(task_id)
         if current.status is not TaskStatus.COMPLETED:
-            raise InvalidTaskTransition(
-                f"Only a completed task can be reopened: {current.status}"
-            )
+            raise InvalidTaskTransition(f"Only a completed task can be reopened: {current.status}")
         updated_at = utc_now()
         self._connection.execute(
             "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
@@ -313,8 +347,7 @@ class TaskRepository:
             created_at=utc_now(),
         )
         self._connection.execute(
-            "INSERT INTO messages(id, task_id, role, content, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO messages(id, task_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
             (
                 message.id,
                 message.task_id,
@@ -345,7 +378,13 @@ class TaskRepository:
             self.get(task_id)
             self._connection.execute(
                 "INSERT INTO messages(id, task_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
-                (message.id, message.task_id, message.role, message.content, message.created_at),
+                (
+                    message.id,
+                    message.task_id,
+                    message.role,
+                    message.content,
+                    message.created_at,
+                ),
             )
             self._connection.execute(
                 "INSERT INTO protected_tool_message_payloads(message_id, protected_content, created_at) VALUES (?, ?, ?)",
@@ -444,8 +483,7 @@ class TaskRepository:
     @sqlite_connection_guarded
     def get_plan_revision(self, revision_id: str) -> PlanRevision:
         revision_row = self._connection.execute(
-            "SELECT id, task_id, revision, reason, created_at "
-            "FROM plan_revisions WHERE id = ?",
+            "SELECT id, task_id, revision, reason, created_at FROM plan_revisions WHERE id = ?",
             (revision_id,),
         ).fetchone()
         if revision_row is None:
@@ -467,8 +505,7 @@ class TaskRepository:
     @sqlite_connection_guarded
     def latest_plan(self, task_id: str) -> PlanRevision | None:
         row = self._connection.execute(
-            "SELECT id FROM plan_revisions WHERE task_id = ? "
-            "ORDER BY revision DESC LIMIT 1",
+            "SELECT id FROM plan_revisions WHERE task_id = ? ORDER BY revision DESC LIMIT 1",
             (task_id,),
         ).fetchone()
         return self.get_plan_revision(row["id"]) if row is not None else None
@@ -668,9 +705,7 @@ class ArtifactRepository:
             if len(rows) != len(unique_inputs) or any(
                 row["project_id"] != project_id for row in rows
             ):
-                raise ArtifactOwnershipError(
-                    "All input artifacts must exist in the same project"
-                )
+                raise ArtifactOwnershipError("All input artifacts must exist in the same project")
 
         artifact_id = str(uuid4())
         created_at = utc_now()
@@ -695,8 +730,7 @@ class ArtifactRepository:
                 ),
             )
             self._connection.executemany(
-                "INSERT INTO artifact_inputs(artifact_id, input_artifact_id) "
-                "VALUES (?, ?)",
+                "INSERT INTO artifact_inputs(artifact_id, input_artifact_id) VALUES (?, ?)",
                 ((artifact_id, input_id) for input_id in unique_inputs),
             )
         except sqlite3.IntegrityError as exc:
@@ -725,8 +759,7 @@ class ArtifactRepository:
         if row is None:
             raise RecordNotFoundError(f"Artifact not found: {artifact_id}")
         input_rows = self._connection.execute(
-            "SELECT input_artifact_id FROM artifact_inputs "
-            "WHERE artifact_id = ? ORDER BY rowid",
+            "SELECT input_artifact_id FROM artifact_inputs WHERE artifact_id = ? ORDER BY rowid",
             (artifact_id,),
         ).fetchall()
         return Artifact(
@@ -788,12 +821,9 @@ class ArtifactRepository:
         for evidence_id in unique_evidence:
             evidence = self.get(evidence_id)
             if evidence.project_id != report.project_id:
-                raise ArtifactOwnershipError(
-                    "Report evidence must belong to the same project"
-                )
+                raise ArtifactOwnershipError("Report evidence must belong to the same project")
         self._connection.executemany(
-            "INSERT INTO evidence_links(report_artifact_id, evidence_artifact_id) "
-            "VALUES (?, ?)",
+            "INSERT INTO evidence_links(report_artifact_id, evidence_artifact_id) VALUES (?, ?)",
             ((report_artifact_id, evidence_id) for evidence_id in unique_evidence),
         )
         self._connection.commit()

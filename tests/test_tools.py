@@ -5,11 +5,14 @@ import json
 
 from pydantic import field_validator
 from pydantic_core import PydanticCustomError
-from data_analysis_agent.domain import TaskStatus
-from data_analysis_agent.permissions import ApprovalRepository, PermissionPolicy
+
 from data_analysis_agent.data_sources import AccessLevel, DataSourceRepository
+from data_analysis_agent.domain import TaskStatus
+from data_analysis_agent.execution import QueryTimeoutError
+from data_analysis_agent.permissions import ApprovalRepository, PermissionPolicy, ToolAction
 from data_analysis_agent.postgres import SqlSafetyGateway
 from data_analysis_agent.sql_safety import SqlAstValidator
+from data_analysis_agent.team import AgentRole, TeamRepository
 from data_analysis_agent.tools import (
     ToolCall,
     ToolContext,
@@ -19,8 +22,6 @@ from data_analysis_agent.tools import (
     ToolRegistry,
     build_tool_registry,
 )
-from data_analysis_agent.execution import QueryTimeoutError
-from data_analysis_agent.team import AgentRole, TeamRepository
 from data_analysis_agent.tracing import TraceRecorder, TraceRepository
 
 
@@ -39,35 +40,59 @@ def test_registry_exposes_exact_mvp_tool_set(tool_registry) -> None:
 
 
 def test_lead_coordination_tools_execute_with_real_registry_and_enforce_ownership(
-    tool_context, db_connection, task_repository, project_repository, dataset_service,
-    duckdb_executor, python_executor, workspace, artifact_repository, report_service
+    tool_context,
+    db_connection,
+    task_repository,
+    project_repository,
+    dataset_service,
+    duckdb_executor,
+    python_executor,
+    workspace,
+    artifact_repository,
+    report_service,
 ) -> None:
     repository = TeamRepository(db_connection)
     tool_registry = build_tool_registry(
-        datasets=dataset_service, duckdb_executor=duckdb_executor,
-        python_executor=python_executor, workspace=workspace,
-        artifacts=artifact_repository, reports=report_service, tasks=task_repository,
-        permission_policy=PermissionPolicy(), approvals=ApprovalRepository(db_connection),
+        datasets=dataset_service,
+        duckdb_executor=duckdb_executor,
+        python_executor=python_executor,
+        workspace=workspace,
+        artifacts=artifact_repository,
+        reports=report_service,
+        tasks=task_repository,
+        permission_policy=PermissionPolicy(),
+        approvals=ApprovalRepository(db_connection),
         include_coordination_tools=True,
     )
 
     class Coordinator:
         def spawn(self, task_id, role, objective):
             return repository.create_run(task_id, role, objective)
+
         def list(self, task_id):
             return repository.list_runs(task_id)
+
         def await_runs(self, run_ids, timeout_seconds):
             return tuple(repository.get_run(run_id) for run_id in run_ids)
+
         def cancel(self, run_id):
             return repository.request_cancel(run_id)
 
     tool_registry.configure_team(Coordinator(), repository)
-    spawn = tool_registry.execute(ToolCall("spawn", "spawn_teammate", {"role": "sql", "objective": "Bounded query"}), tool_context)
+    spawn = tool_registry.execute(
+        ToolCall("spawn", "spawn_teammate", {"role": "sql", "objective": "Bounded query"}),
+        tool_context,
+    )
     assert spawn.success and spawn.output["agent_id"]
     run_id = spawn.output["agent_id"]
     listed = tool_registry.execute(ToolCall("list", "list_teammates", {}), tool_context)
-    awaited = tool_registry.execute(ToolCall("await", "await_teammates", {"agent_ids": [run_id], "timeout_seconds": 1}), tool_context)
-    cancelled = tool_registry.execute(ToolCall("cancel", "cancel_teammate", {"agent_id": run_id}), tool_context)
+    awaited = tool_registry.execute(
+        ToolCall("await", "await_teammates", {"agent_ids": [run_id], "timeout_seconds": 1}),
+        tool_context,
+    )
+    cancelled = tool_registry.execute(
+        ToolCall("cancel", "cancel_teammate", {"agent_id": run_id}), tool_context
+    )
     assert listed.success and listed.output["agents"][0]["agent_id"] == run_id
     assert awaited.success and awaited.output["agents"][0]["agent_id"] == run_id
     assert cancelled.success and cancelled.output["status"] == "created"
@@ -75,15 +100,25 @@ def test_lead_coordination_tools_execute_with_real_registry_and_enforce_ownershi
     other_project = project_repository.create("Other")
     other_task = task_repository.create(other_project.id, "Other task")
     foreign = repository.create_run(other_task.id, AgentRole.SQL, "Foreign")
-    rejected = tool_registry.execute(ToolCall("foreign", "cancel_teammate", {"agent_id": foreign.id}), tool_context)
+    rejected = tool_registry.execute(
+        ToolCall("foreign", "cancel_teammate", {"agent_id": foreign.id}), tool_context
+    )
     assert rejected.error_category == "permission_denied"
 
     mixed = tool_registry.execute(
-        ToolCall("mixed", "await_teammates", {"agent_ids": [run_id, foreign.id], "timeout_seconds": 1}),
+        ToolCall(
+            "mixed",
+            "await_teammates",
+            {"agent_ids": [run_id, foreign.id], "timeout_seconds": 1},
+        ),
         tool_context,
     )
     unknown_id = tool_registry.execute(
-        ToolCall("missing", "await_teammates", {"agent_ids": ["does-not-exist"], "timeout_seconds": 1}),
+        ToolCall(
+            "missing",
+            "await_teammates",
+            {"agent_ids": ["does-not-exist"], "timeout_seconds": 1},
+        ),
         tool_context,
     )
     too_many = tool_registry.execute(
@@ -99,6 +134,68 @@ def test_lead_coordination_tools_execute_with_real_registry_and_enforce_ownershi
     unknown = restricted.execute(ToolCall("no-op", "spawn_teammate", {}), tool_context)
     assert unknown.error_category == "unknown_tool"
     assert repository.get_run(foreign.id).cancel_requested is False
+
+
+def test_await_teammates_pauses_lead_and_exposes_pending_approval(
+    tool_context,
+    db_connection,
+    task_repository,
+    dataset_service,
+    duckdb_executor,
+    python_executor,
+    workspace,
+    artifact_repository,
+    report_service,
+) -> None:
+    approvals = ApprovalRepository(db_connection)
+    repository = TeamRepository(db_connection)
+    registry = build_tool_registry(
+        datasets=dataset_service,
+        duckdb_executor=duckdb_executor,
+        python_executor=python_executor,
+        workspace=workspace,
+        artifacts=artifact_repository,
+        reports=report_service,
+        tasks=task_repository,
+        permission_policy=PermissionPolicy(),
+        approvals=approvals,
+        include_coordination_tools=True,
+    )
+    run = repository.create_run(tool_context.task_id, AgentRole.SQL, "Governed query")
+    repository.transition_run(run.id, "working")
+    repository.transition_run(run.id, "waiting")
+    task_repository.transition(tool_context.task_id, TaskStatus.NEEDS_INPUT)
+    approval = approvals.request(
+        tool_context.task_id,
+        ToolAction("query_database", {"sql_hash": "hash", "policy_version": 3}),
+        "Restricted fields require one-time approval",
+    )
+
+    class Coordinator:
+        def await_runs(self, run_ids, timeout_seconds):
+            del timeout_seconds
+            return tuple(repository.get_run(run_id) for run_id in run_ids)
+
+    registry.configure_team(Coordinator(), repository)
+    result = registry.execute(
+        ToolCall(
+            "await",
+            "await_teammates",
+            {"agent_ids": [run.id], "timeout_seconds": 120},
+        ),
+        tool_context,
+    )
+
+    assert result.success is True
+    assert result.pauses_task is True
+    assert result.output["wait_reason"] == "approval_required"
+    assert result.output["approvals"] == [
+        {
+            "approval_id": approval.id,
+            "tool_name": "query_database",
+            "reason": "Restricted fields require one-time approval",
+        }
+    ]
 
 
 def test_registry_exposes_database_query_tool(tool_registry) -> None:
@@ -185,7 +282,9 @@ def test_query_database_returns_structured_gateway_outcome(
     }
     sql_events = TraceRepository(db_connection).events_for_run(analysis_run.id)
     assert [event.event_type for event in sql_events] == [
-        "sql.validated", "sql.explained", "sql.executed"
+        "sql.validated",
+        "sql.explained",
+        "sql.executed",
     ]
     assert sql_events[-1].artifact_ids == (result.output["artifact_id"],)
 
@@ -233,7 +332,11 @@ def test_tool_validation_never_reflects_sensitive_input(tool_registry, tool_cont
         ToolCall(
             id="validation-secret",
             name="query_database",
-            arguments={"data_source_id": "source-1", "sql": secret * 2_000, "dsn": secret},
+            arguments={
+                "data_source_id": "source-1",
+                "sql": secret * 2_000,
+                "dsn": secret,
+            },
         ),
         tool_context,
     )
@@ -244,13 +347,19 @@ def test_tool_validation_never_reflects_sensitive_input(tool_registry, tool_cont
     assert result.diagnostics == {"error_count": 2, "types": ["validation_error"]}
 
 
-def test_tool_validation_never_reflects_sensitive_argument_name(tool_registry, tool_context) -> None:
+def test_tool_validation_never_reflects_sensitive_argument_name(
+    tool_registry, tool_context
+) -> None:
     secret_key = "postgresql://analyst:password@host/ciphertext"
     result = tool_registry.execute(
         ToolCall(
             id="validation-secret-key",
             name="query_database",
-            arguments={"data_source_id": "source-1", "sql": "SELECT 1", secret_key: "x"},
+            arguments={
+                "data_source_id": "source-1",
+                "sql": "SELECT 1",
+                secret_key: "x",
+            },
         ),
         tool_context,
     )
@@ -318,15 +427,24 @@ def test_tool_handler_error_never_reflects_or_persists_secret_diagnostics(
     assert result.message == "Tool failed"
     assert result.diagnostics is None
     stored = db_connection.execute(
-        "SELECT error_message FROM tool_executions WHERE task_id = ?", (tool_context.task_id,)
+        "SELECT error_message FROM tool_executions WHERE task_id = ?",
+        (tool_context.task_id,),
     ).fetchone()[0]
     assert stored == "Tool failed"
-    assert db_connection.execute(
-        "SELECT error_category FROM tool_executions WHERE task_id = ?", (tool_context.task_id,)
-    ).fetchone()[0] == "internal_tool_error"
-    assert "unsafe_category" not in db_connection.execute(
-        "SELECT payload_json FROM task_events WHERE task_id = ?", (tool_context.task_id,)
-    ).fetchone()[0]
+    assert (
+        db_connection.execute(
+            "SELECT error_category FROM tool_executions WHERE task_id = ?",
+            (tool_context.task_id,),
+        ).fetchone()[0]
+        == "internal_tool_error"
+    )
+    assert (
+        "unsafe_category"
+        not in db_connection.execute(
+            "SELECT payload_json FROM task_events WHERE task_id = ?",
+            (tool_context.task_id,),
+        ).fetchone()[0]
+    )
 
 
 def test_tool_rejects_cross_project_context_before_execution(
@@ -345,9 +463,12 @@ def test_tool_rejects_cross_project_context_before_execution(
 
     assert result.error_category == "project_scope_denied"
     assert result.retryable is False
-    assert db_connection.execute(
-        "SELECT COUNT(*) FROM tool_executions WHERE task_id = ?", (other_task.id,)
-    ).fetchone()[0] == 0
+    assert (
+        db_connection.execute(
+            "SELECT COUNT(*) FROM tool_executions WHERE task_id = ?", (other_task.id,)
+        ).fetchone()[0]
+        == 0
+    )
 
 
 def test_query_database_credential_failure_is_never_persisted_or_reflected(
@@ -443,6 +564,8 @@ def test_approved_tool_action_is_allowed_once(
     assert allowed.success is True
     repeated = tool_registry.execute(call, tool_context)
     assert repeated.error_category == "approval_required"
+
+
 def test_duckdb_timeout_is_returned_as_retryable_query_timeout(
     monkeypatch, tool_registry, duckdb_executor, task
 ) -> None:

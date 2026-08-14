@@ -6,7 +6,11 @@ from dataclasses import dataclass, replace
 from typing import Iterable
 from uuid import uuid4
 
-from data_analysis_agent.db import sqlite_connection_guarded, sqlite_connection_lock, utc_now
+from data_analysis_agent.db import (
+    sqlite_connection_guarded,
+    sqlite_connection_lock,
+    utc_now,
+)
 from data_analysis_agent.prompts import estimate_text_tokens
 from data_analysis_agent.providers import ModelMessage
 from data_analysis_agent.tools import ToolSchema
@@ -255,9 +259,16 @@ def _validate_owner(owner_type: str, owner_id: str) -> None:
 
 def _checkpoint(row: sqlite3.Row) -> ContextCheckpoint:
     return ContextCheckpoint(
-        row["id"], row["owner_type"], row["owner_id"], row["through_message_id"],
-        row["summary"], row["source_message_count"], row["before_tokens"],
-        row["after_tokens"], row["reason"], row["created_at"],
+        row["id"],
+        row["owner_type"],
+        row["owner_id"],
+        row["through_message_id"],
+        row["summary"],
+        row["source_message_count"],
+        row["before_tokens"],
+        row["after_tokens"],
+        row["reason"],
+        row["created_at"],
     )
 
 
@@ -303,18 +314,14 @@ def _recent_boundary(
     return start
 
 
-def _budget_tool_results(
-    messages: list[ContextMessage], max_chars: int
-) -> list[ContextMessage]:
+def _budget_tool_results(messages: list[ContextMessage], max_chars: int) -> list[ContextMessage]:
     output: list[ContextMessage] = []
     for message in messages:
         if message.role != "tool" or len(message.content) <= max_chars:
             output.append(message)
             continue
         compacted = _compact_tool_result(message.safe_content, max_chars)
-        output.append(
-            ContextMessage(message.id, message.role, compacted, compacted)
-        )
+        output.append(ContextMessage(message.id, message.role, compacted, compacted))
     return output
 
 
@@ -323,8 +330,12 @@ def _compact_tool_result(content: str, max_chars: int) -> str:
         value = json.loads(content)
     except (TypeError, ValueError, json.JSONDecodeError):
         return json.dumps(
-            {"call_id": "unknown", "success": False, "output": {"compacted": True},
-             "message": content[: max(64, max_chars // 2)]},
+            {
+                "call_id": "unknown",
+                "success": False,
+                "output": {"compacted": True},
+                "message": content[: max(64, max_chars // 2)],
+            },
             ensure_ascii=False,
             separators=(",", ":"),
         )
@@ -332,8 +343,15 @@ def _compact_tool_result(content: str, max_chars: int) -> str:
     kept: dict[str, object] = {"compacted": True}
     if isinstance(output, dict):
         for key in (
-            "status", "artifact_id", "artifact_ids", "query_hash", "row_count", "risk",
-            "path", "report_id", "result_summary",
+            "status",
+            "artifact_id",
+            "artifact_ids",
+            "query_hash",
+            "row_count",
+            "risk",
+            "path",
+            "report_id",
+            "result_summary",
         ):
             if key in output:
                 kept[key] = output[key]
@@ -348,9 +366,7 @@ def _compact_tool_result(content: str, max_chars: int) -> str:
     return json.dumps(bounded, ensure_ascii=False, separators=(",", ":"))
 
 
-def _summarize(
-    *, previous: str, messages: tuple[ContextMessage, ...], max_chars: int
-) -> str:
+def _summarize(*, previous: str, messages: tuple[ContextMessage, ...], max_chars: int) -> str:
     lines = [
         "This checkpoint is a bounded projection of the durable transcript. The transcript remains authoritative.",
     ]
@@ -374,7 +390,8 @@ def _tool_call_summary(content: str) -> str:
         calls = json.loads(content).get("tool_calls", [])
         labels = [
             f"{item.get('name', 'unknown')}#{item.get('id', 'unknown')}"
-            for item in calls if isinstance(item, dict)
+            for item in calls
+            if isinstance(item, dict)
         ]
         return "assistant tool calls: " + ", ".join(labels)
     except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
@@ -387,7 +404,14 @@ def _tool_result_summary(content: str) -> str:
         output = value.get("output") if isinstance(value, dict) else {}
         evidence = []
         if isinstance(output, dict):
-            for key in ("artifact_id", "artifact_ids", "query_hash", "row_count", "status", "result_summary"):
+            for key in (
+                "artifact_id",
+                "artifact_ids",
+                "query_hash",
+                "row_count",
+                "status",
+                "result_summary",
+            ):
                 if key in output:
                     evidence.append(f"{key}={str(output[key])[:500]}")
         return (
@@ -413,7 +437,11 @@ def _request_tokens(
     total += estimate_text_tokens(
         json.dumps(
             [
-                {"name": tool.name, "description": tool.description, "input_schema": tool.input_schema}
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.input_schema,
+                }
                 for tool in tools
             ],
             ensure_ascii=False,

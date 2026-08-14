@@ -9,11 +9,11 @@ import subprocess
 import sys
 import tempfile
 import time
-from threading import Event, Timer
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
+from threading import Event, Timer
 from typing import Any, Mapping
 from uuid import uuid4
 
@@ -26,7 +26,6 @@ from data_analysis_agent.repositories import ArtifactRepository, TaskRepository
 from data_analysis_agent.settings import Settings
 from data_analysis_agent.workspace import WorkspaceBoundaryError, WorkspaceService
 
-
 READ_ONLY_PREFIXES = frozenset({"select", "with", "describe", "summarize", "explain"})
 MUTATING_SQL = re.compile(
     r"\b(insert|update|delete|drop|alter|create|copy|attach|detach|install|load|"
@@ -34,12 +33,8 @@ MUTATING_SQL = re.compile(
     flags=re.IGNORECASE,
 )
 SAFE_TABLE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-BANNED_IMPORT_ROOTS = frozenset(
-    {"ftplib", "httpx", "requests", "socket", "subprocess", "urllib"}
-)
-BANNED_CALLS = frozenset(
-    {"__import__", "eval", "exec", "os.popen", "os.system", "shutil.rmtree"}
-)
+BANNED_IMPORT_ROOTS = frozenset({"ftplib", "httpx", "requests", "socket", "subprocess", "urllib"})
+BANNED_CALLS = frozenset({"__import__", "eval", "exec", "os.popen", "os.system", "shutil.rmtree"})
 OUTPUT_LIMIT = 65_536
 
 
@@ -142,13 +137,10 @@ class DuckDBExecutor:
             finally:
                 watchdog.cancel()
             preview = tuple(
-                {
-                    column: _json_scalar(value)
-                    for column, value in zip(columns, row, strict=True)
-                }
+                {column: _json_scalar(value) for column, value in zip(columns, row, strict=True)}
                 for row in rows[:200]
             )
-            artifact = None
+            materialized_artifact: Artifact | None = None
             if len(rows) > 200:
                 path = self._workspace.resolve_inside(
                     project_id,
@@ -156,7 +148,7 @@ class DuckDBExecutor:
                 )
                 frame = pl.DataFrame(rows, schema=list(columns), orient="row")
                 frame.write_parquet(path)
-                artifact = self._artifacts.register(
+                materialized_artifact = self._artifacts.register(
                     project_id=project_id,
                     task_id=None,
                     artifact_type=ArtifactType.DERIVED_DATASET,
@@ -170,7 +162,7 @@ class DuckDBExecutor:
                 columns=columns,
                 preview=preview,
                 row_count=len(rows),
-                artifact=artifact,
+                artifact=materialized_artifact,
             )
         finally:
             connection.close()
@@ -270,10 +262,7 @@ class PythonExecutor:
             for relative_path, fingerprint in after.items()
             if before.get(relative_path) != fingerprint
         }
-        allowed_files = {
-            path.relative_to(root).as_posix()
-            for path in declared_paths
-        }
+        allowed_files = {path.relative_to(root).as_posix() for path in declared_paths}
         undeclared = sorted(
             relative_path
             for relative_path in changed_files

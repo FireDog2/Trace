@@ -18,7 +18,10 @@ export function ModelSettings({
   onClose,
   onSave,
 }: ModelSettingsProps) {
-  const initialProvider = configuration.provider ?? configuration.providers[0]?.provider ?? "deepseek";
+  const initialProvider =
+    configuration.provider ??
+    configuration.providers[0]?.provider ??
+    "deepseek";
   const [provider, setProvider] = useState(initialProvider);
   const [baseUrl, setBaseUrl] = useState(configuration.base_url);
   const [model, setModel] = useState(configuration.model);
@@ -33,11 +36,24 @@ export function ModelSettings({
 
   useEffect(() => {
     if (!open) return;
-    const nextProvider = configuration.provider ?? configuration.providers[0]?.provider ?? "deepseek";
-    const nextDefinition = configuration.providers.find((item) => item.provider === nextProvider);
+    const nextProvider =
+      configuration.provider ??
+      configuration.providers[0]?.provider ??
+      "deepseek";
+    const nextDefinition = configuration.providers.find(
+      (item) => item.provider === nextProvider,
+    );
     setProvider(nextProvider);
-    setBaseUrl(configuration.configured ? configuration.base_url : (nextDefinition?.base_url ?? ""));
-    setModel(configuration.configured ? configuration.model : (nextDefinition?.default_model ?? ""));
+    setBaseUrl(
+      configuration.configured
+        ? configuration.base_url
+        : (nextDefinition?.base_url ?? ""),
+    );
+    setModel(
+      configuration.configured
+        ? configuration.model
+        : (nextDefinition?.default_model ?? ""),
+    );
     setApiKey("");
     setError(null);
   }, [configuration, open]);
@@ -54,7 +70,9 @@ export function ModelSettings({
   if (!open || !definition) return null;
 
   function chooseProvider(nextProvider: string) {
-    const nextDefinition = configuration.providers.find((item) => item.provider === nextProvider);
+    const nextDefinition = configuration.providers.find(
+      (item) => item.provider === nextProvider,
+    );
     if (!nextDefinition) return;
     setProvider(nextProvider);
     setBaseUrl(nextDefinition.base_url ?? "");
@@ -81,31 +99,53 @@ export function ModelSettings({
     }
   }
 
-  const preservesKey = configuration.has_api_key && configuration.provider === provider;
+  const preservesKey =
+    configuration.has_api_key && configuration.provider === provider;
 
   return (
-    <div className="model-settings-backdrop" onMouseDown={(event) => {
-      if (event.currentTarget === event.target) onClose();
-    }}>
-      <section className="model-settings" role="dialog" aria-modal="true" aria-labelledby="model-settings-title">
+    <div
+      className="model-settings-backdrop"
+      onMouseDown={(event) => {
+        if (event.currentTarget === event.target) onClose();
+      }}
+    >
+      <section
+        className="model-settings"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="model-settings-title"
+      >
         <header className="model-settings-header">
           <div>
             <span className="settings-index">MODEL ROUTE / RUNTIME</span>
             <h2 id="model-settings-title">模型配置</h2>
             <p>保存后立即用于新分析任务，不需要重启服务。</p>
           </div>
-          <button type="button" className="settings-close" aria-label="关闭模型配置" onClick={onClose}>×</button>
+          <button
+            type="button"
+            className="settings-close"
+            aria-label="关闭模型配置"
+            onClick={onClose}
+          >
+            ×
+          </button>
         </header>
 
         <form onSubmit={submit}>
           <div className="model-settings-layout">
-            <section className="settings-provider-panel" aria-labelledby="provider-heading">
+            <section
+              className="settings-provider-panel"
+              aria-labelledby="provider-heading"
+            >
               <h3 id="provider-heading">模型供应商</h3>
               <p>选择分析任务使用的推理服务。</p>
               <fieldset className="provider-selector">
                 <legend className="sr-only">选择厂商</legend>
                 {configuration.providers.map((item, index) => (
-                  <label key={item.provider} className={provider === item.provider ? "selected" : ""}>
+                  <label
+                    key={item.provider}
+                    className={provider === item.provider ? "selected" : ""}
+                  >
                     <input
                       type="radio"
                       aria-label={item.label}
@@ -117,14 +157,19 @@ export function ModelSettings({
                     <span className="provider-number">0{index + 1}</span>
                     <span>
                       <strong>{item.label}</strong>
-                      <small>{item.custom_url ? "OpenAI 兼容接口" : "官方接口"}</small>
+                      <small>
+                        {item.custom_url ? "OpenAI 兼容接口" : "官方接口"}
+                      </small>
                     </span>
                   </label>
                 ))}
               </fieldset>
             </section>
 
-            <section className="settings-config-panel" aria-labelledby="configuration-heading">
+            <section
+              className="settings-config-panel"
+              aria-labelledby="configuration-heading"
+            >
               <h3 id="configuration-heading">连接配置</h3>
               <p>设置当前供应商的服务地址、模型和访问密钥。</p>
               <div className="settings-fields">
@@ -138,14 +183,24 @@ export function ModelSettings({
                     required
                     onChange={(event) => setBaseUrl(event.target.value)}
                   />
-                  {!definition.custom_url && <small>官方地址已锁定，避免误配。</small>}
+                  {!definition.custom_url && (
+                    <small>官方地址已锁定，避免误配。</small>
+                  )}
                 </label>
 
                 <label>
                   <span>模型</span>
                   {definition.models.length > 0 ? (
-                    <select aria-label="模型" value={model} onChange={(event) => setModel(event.target.value)}>
-                      {definition.models.map((item) => <option key={item} value={item}>{item}</option>)}
+                    <select
+                      aria-label="模型"
+                      value={model}
+                      onChange={(event) => setModel(event.target.value)}
+                    >
+                      {definition.models.map((item) => (
+                        <option key={item} value={item}>
+                          {item}
+                        </option>
+                      ))}
                     </select>
                   ) : (
                     <input
@@ -166,21 +221,41 @@ export function ModelSettings({
                     value={apiKey}
                     required={!preservesKey}
                     autoComplete="new-password"
-                    placeholder={preservesKey ? "留空则继续使用已保存的密钥" : "输入厂商 API Key"}
+                    placeholder={
+                      preservesKey
+                        ? "留空则继续使用已保存的密钥"
+                        : "输入厂商 API Key"
+                    }
                     onChange={(event) => setApiKey(event.target.value)}
                   />
-                  <small>{preservesKey ? "已安全保存；此处不会回显。" : "密钥仅保存在当前 Windows 用户的加密存储中。"}</small>
+                  <small>
+                    {preservesKey
+                      ? "已安全保存；此处不会回显。"
+                      : "密钥仅保存在当前 Windows 用户的加密存储中。"}
+                  </small>
                 </label>
               </div>
             </section>
           </div>
 
-          {error && <p className="settings-error" role="alert">{error}</p>}
+          {error && (
+            <p className="settings-error" role="alert">
+              {error}
+            </p>
+          )}
 
           <footer className="settings-actions">
-            <span>{configuration.configured ? "更新将作用于下一次执行" : "完成配置后即可开始分析"}</span>
-            <button type="button" onClick={onClose}>取消</button>
-            <button type="submit" disabled={saving}>{saving ? "保存中…" : "保存模型配置"}</button>
+            <span>
+              {configuration.configured
+                ? "更新将作用于下一次执行"
+                : "完成配置后即可开始分析"}
+            </span>
+            <button type="button" onClick={onClose}>
+              取消
+            </button>
+            <button type="submit" disabled={saving}>
+              {saving ? "保存中…" : "保存模型配置"}
+            </button>
           </footer>
         </form>
       </section>

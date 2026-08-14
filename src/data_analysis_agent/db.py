@@ -6,9 +6,8 @@ from functools import wraps
 from threading import Lock, RLock
 from typing import Any, Callable, TypeVar
 
-from data_analysis_agent.settings import Settings
 from data_analysis_agent.scope import GLOBAL_PROJECT_ID, GLOBAL_PROJECT_NAME
-
+from data_analysis_agent.settings import Settings
 
 _CONNECTION_LOCKS_GUARD = Lock()
 _CONNECTION_LOCKS: dict[int, RLock] = {}
@@ -400,6 +399,7 @@ AFTER DELETE ON agent_runs BEGIN
 END;
 """
 
+
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -428,10 +428,7 @@ def migrate(connection: sqlite3.Connection) -> None:
         "CREATE TABLE IF NOT EXISTS schema_migrations "
         "(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
     )
-    applied = {
-        row[0]
-        for row in connection.execute("SELECT version FROM schema_migrations")
-    }
+    applied = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
     if 1 not in applied:
         connection.executescript(MIGRATION_1_SQL)
         connection.execute(
@@ -458,7 +455,10 @@ def migrate(connection: sqlite3.Connection) -> None:
         )
     if 5 not in applied:
         connection.executescript(MIGRATION_5_SQL)
-        connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (5, utc_now()))
+        connection.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+            (5, utc_now()),
+        )
     if 6 not in applied:
         connection.commit()
         _recover_migration_6_intermediates(connection)
@@ -491,17 +491,25 @@ def migrate(connection: sqlite3.Connection) -> None:
             raise
     if 8 not in applied:
         connection.executescript(MIGRATION_8_SQL)
-        connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (8, utc_now()))
+        connection.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+            (8, utc_now()),
+        )
     if 9 not in applied:
         try:
             connection.commit()
             connection.execute("BEGIN IMMEDIATE")
             columns = {row[1] for row in connection.execute("PRAGMA table_info(agent_runs)")}
             if "turns_used" not in columns:
-                connection.execute("ALTER TABLE agent_runs ADD COLUMN turns_used INTEGER NOT NULL DEFAULT 0 CHECK(turns_used >= 0)")
+                connection.execute(
+                    "ALTER TABLE agent_runs ADD COLUMN turns_used INTEGER NOT NULL DEFAULT 0 CHECK(turns_used >= 0)"
+                )
             if "deadline_at" not in columns:
                 connection.execute("ALTER TABLE agent_runs ADD COLUMN deadline_at TEXT")
-            connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (9, utc_now()))
+            connection.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                (9, utc_now()),
+            )
             connection.commit()
         except Exception:
             connection.rollback()
@@ -515,17 +523,26 @@ def migrate(connection: sqlite3.Connection) -> None:
                 connection.execute("ALTER TABLE agent_runs ADD COLUMN worker_token TEXT")
             if "worker_claimed_at" not in columns:
                 connection.execute("ALTER TABLE agent_runs ADD COLUMN worker_claimed_at TEXT")
-            connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (10, utc_now()))
+            connection.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                (10, utc_now()),
+            )
             connection.commit()
         except Exception:
             connection.rollback()
             raise
     if 11 not in applied:
         connection.executescript(MIGRATION_11_SQL)
-        connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (11, utc_now()))
+        connection.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+            (11, utc_now()),
+        )
     if 12 not in applied:
         connection.executescript(MIGRATION_12_SQL)
-        connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (12, utc_now()))
+        connection.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+            (12, utc_now()),
+        )
     if 13 not in applied:
         connection.commit()
         columns = {row[1] for row in connection.execute("PRAGMA table_info(agent_runs)")}
@@ -539,7 +556,10 @@ def migrate(connection: sqlite3.Connection) -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_one_curator_per_trace "
             "ON agent_runs(trace_run_id) WHERE role = 'curator'"
         )
-        connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (13, utc_now()))
+        connection.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+            (13, utc_now()),
+        )
     if 14 not in applied:
         connection.executescript(MIGRATION_14_SQL)
         connection.execute(
@@ -564,9 +584,7 @@ def migrate(connection: sqlite3.Connection) -> None:
             (16, now),
         )
     if 17 not in applied:
-        columns = {
-            row[1] for row in connection.execute("PRAGMA table_info(data_sources)")
-        }
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(data_sources)")}
         if "deleted_at" not in columns:
             connection.execute("ALTER TABLE data_sources ADD COLUMN deleted_at TEXT")
         connection.execute(
@@ -583,12 +601,20 @@ def _recover_migration_6_intermediates(connection: sqlite3.Connection) -> None:
         ("data_access_policies", "data_access_policies_repaired"),
         ("database_query_attempts", "database_query_attempts_repaired"),
     ):
-        has_original = connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (original,)
-        ).fetchone() is not None
-        has_repaired = connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (repaired,)
-        ).fetchone() is not None
+        has_original = (
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (original,),
+            ).fetchone()
+            is not None
+        )
+        has_repaired = (
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (repaired,),
+            ).fetchone()
+            is not None
+        )
         if has_repaired and has_original:
             connection.execute(f"DROP TABLE {repaired}")
         elif has_repaired:

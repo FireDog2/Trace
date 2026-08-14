@@ -18,10 +18,7 @@ def test_publish_records_valid_evidence_link(
     chart_artifact,
     artifact_repository,
 ) -> None:
-    markdown = (
-        "## Key Findings\n"
-        f"Costs increased. [evidence](artifact://{chart_artifact.id})"
-    )
+    markdown = f"## Key Findings\nCosts increased. [evidence](artifact://{chart_artifact.id})"
 
     report = report_service.publish(task.id, markdown)
 

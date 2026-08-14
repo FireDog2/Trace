@@ -209,9 +209,7 @@ class ModelConfigurationRepository:
             assert definition.base_url is not None
             requested_base_url = (base_url or "").strip().rstrip("/")
             if requested_base_url and requested_base_url != definition.base_url:
-                raise ModelConfigurationError(
-                    f"{definition.label} must use its official Base URL"
-                )
+                raise ModelConfigurationError(f"{definition.label} must use its official Base URL")
             normalized_base_url = definition.base_url
 
         existing = self._get_row()

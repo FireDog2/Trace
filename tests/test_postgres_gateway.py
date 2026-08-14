@@ -1,15 +1,15 @@
 from __future__ import annotations
 
+import json
+import sqlite3
+import threading
 from contextlib import nullcontext
 from dataclasses import replace
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from pathlib import Path
-import sqlite3
-import threading
-from uuid import UUID
-import json
 from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 
@@ -98,12 +98,8 @@ def test_restricted_query_uses_exact_one_time_approval_and_persists_csv(
     artifact = artifact_repository.get(second.artifact_id)
     assert artifact.artifact_type is ArtifactType.DERIVED_DATASET
     assert artifact.path.name == f"postgres-query-{second.query_hash[:12]}.csv"
-    assert artifact.path.read_text(encoding="utf-8") == (
-        "region,amount\nEast,10\n"
-    )
-    assert fake_driver.explained_sql[-1][0] == (
-        "SELECT region, customer_email FROM orders"
-    )
+    assert artifact.path.read_text(encoding="utf-8") == ("region,amount\nEast,10\n")
+    assert fake_driver.explained_sql[-1][0] == ("SELECT region, customer_email FROM orders")
     assert fake_driver.queried_sql[-1] == (
         "SELECT region, customer_email FROM orders",
         4_000,
@@ -170,9 +166,7 @@ def test_changed_policy_version_cannot_consume_an_existing_approval(
     changed = sql_gateway.execute(task.id, task.project_id, source.id, sql)
 
     assert changed.status == "approval_required"
-    assert approval_repository.get(changed.approval_id).action.arguments[
-        "policy_version"
-    ] == 3
+    assert approval_repository.get(changed.approval_id).action.arguments["policy_version"] == 3
     assert approval_repository.get(first.approval_id).status == "approved"
 
 
@@ -320,11 +314,19 @@ def test_postgres_preview_recursively_normalizes_json_unsafe_values(
 ) -> None:
     source = _create_source(source_repository, task.project_id)
     fake_driver.columns = ("value",)
-    fake_driver.rows = (({
-        "decimal": Decimal("2.50"), "date": date(2026, 8, 6),
-        "time": time(12, 30), "datetime": datetime(2026, 8, 6, tzinfo=timezone.utc),
-        "uuid": UUID(int=1), "bytes": bytes((0, 255)), "nested": (Decimal("1"),),
-    },),)
+    fake_driver.rows = (
+        (
+            {
+                "decimal": Decimal("2.50"),
+                "date": date(2026, 8, 6),
+                "time": time(12, 30),
+                "datetime": datetime(2026, 8, 6, tzinfo=timezone.utc),
+                "uuid": UUID(int=1),
+                "bytes": bytes((0, 255)),
+                "nested": (Decimal("1"),),
+            },
+        ),
+    )
 
     outcome = sql_gateway.execute(task.id, task.project_id, source.id, "SELECT region FROM orders")
 
@@ -424,9 +426,7 @@ def test_query_budget_stops_before_an_extra_database_query(
         driver=fake_driver,
     )
 
-    first = limited.execute(
-        task.id, task.project_id, source.id, "SELECT region FROM orders"
-    )
+    first = limited.execute(task.id, task.project_id, source.id, "SELECT region FROM orders")
     second = limited.execute(
         task.id,
         task.project_id,
@@ -445,13 +445,13 @@ def test_query_budget_stops_before_an_extra_database_query(
     assert exhausted.status == "denied"
     assert exhausted.error_category == "query_budget_exhausted"
     assert exhausted.retryable is False
-    assert db_connection.execute(
-        "SELECT attempts FROM task_query_budget WHERE task_id = ?", (task.id,)
-    ).fetchone()[0] == 2
-    assert all(
-        sql != "SELECT region, amount FROM orders"
-        for sql, _, _ in fake_driver.queried_sql
+    assert (
+        db_connection.execute(
+            "SELECT attempts FROM task_query_budget WHERE task_id = ?", (task.id,)
+        ).fetchone()[0]
+        == 2
     )
+    assert all(sql != "SELECT region, amount FROM orders" for sql, _, _ in fake_driver.queried_sql)
 
 
 class StaticSourceRepository:
@@ -1127,9 +1127,12 @@ def test_concurrent_gateway_calls_cannot_exceed_shared_connection_budget(
     assert sorted(outcome.status for outcome in outcomes) == ["denied", "succeeded"]
     denied = next(outcome for outcome in outcomes if outcome.status == "denied")
     assert denied.error_category == "query_budget_exhausted"
-    assert connection.execute(
-        "SELECT attempts FROM task_query_budget WHERE task_id = ?", (task.id,)
-    ).fetchone()[0] == 1
+    assert (
+        connection.execute(
+            "SELECT attempts FROM task_query_budget WHERE task_id = ?", (task.id,)
+        ).fetchone()[0]
+        == 1
+    )
     connection.close()
 
 
@@ -1194,9 +1197,7 @@ def test_concurrent_restricted_queries_share_one_pending_approval(
         except BaseException as exc:
             errors.append(exc)
 
-    threads = tuple(
-        threading.Thread(target=execute, args=(gateway,)) for gateway in gateways
-    )
+    threads = tuple(threading.Thread(target=execute, args=(gateway,)) for gateway in gateways)
     for thread in threads:
         thread.start()
     for thread in threads:
@@ -1300,9 +1301,7 @@ def test_concurrent_registration_failure_never_deletes_successful_artifact(
     registered = artifacts.list_for_task(task.id)
     assert len(registered) == 1
     assert registered[0].path.is_file()
-    assert registered[0].path.read_text(encoding="utf-8") == (
-        "region,amount\nEast,10\n"
-    )
+    assert registered[0].path.read_text(encoding="utf-8") == ("region,amount\nEast,10\n")
     connection.close()
 
 
@@ -1311,7 +1310,7 @@ def test_concurrent_registration_failure_never_deletes_successful_artifact(
     [
         (
             {"Plan": {"Total Cost": 42, "Plan Rows": 12, "Node Type": "Index Scan"}},
-                "medium",
+            "medium",
         ),
         (
             {
@@ -1367,13 +1366,9 @@ def test_high_risk_requires_approval_while_extreme_risk_is_denied(
     task,
 ) -> None:
     source = _create_source(source_repository, task.project_id)
-    fake_driver.plan = {
-        "Plan": {"Total Cost": 100_000, "Plan Rows": 12, "Node Type": "Index Scan"}
-    }
+    fake_driver.plan = {"Plan": {"Total Cost": 100_000, "Plan Rows": 12, "Node Type": "Index Scan"}}
 
-    high = sql_gateway.execute(
-        task.id, task.project_id, source.id, "SELECT region FROM orders"
-    )
+    high = sql_gateway.execute(task.id, task.project_id, source.id, "SELECT region FROM orders")
 
     assert high.status == "approval_required"
     assert high.risk.level == "high"
@@ -1386,9 +1381,7 @@ def test_high_risk_requires_approval_while_extreme_risk_is_denied(
             "Node Type": "Index Scan",
         }
     }
-    extreme = sql_gateway.execute(
-        task.id, task.project_id, source.id, "SELECT amount FROM orders"
-    )
+    extreme = sql_gateway.execute(task.id, task.project_id, source.id, "SELECT amount FROM orders")
 
     assert extreme.status == "denied"
     assert extreme.error_category == "extreme_query_risk"
@@ -1517,5 +1510,8 @@ def test_psycopg_driver_catalog_contains_unqualified_names_only() -> None:
     }
     assert all("." not in table for table in catalog)
     assert connect.connections[0].schema_query is not None
-    assert "n.nspname NOT IN ('pg_catalog', 'information_schema')" in connect.connections[0].schema_query
+    assert (
+        "n.nspname NOT IN ('pg_catalog', 'information_schema')"
+        in connect.connections[0].schema_query
+    )
     assert "pg_catalog.has_table_privilege(c.oid, 'SELECT')" in connect.connections[0].schema_query

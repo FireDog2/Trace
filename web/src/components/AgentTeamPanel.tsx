@@ -1,3 +1,38 @@
 import type { AgentRun } from "../types";
-const roles = { knowledge: "Knowledge Agent", sql: "SQL Agent", report: "Report Agent", curator: "Curator Agent" };
-export function AgentTeamPanel({ agents }: { agents: AgentRun[] }) { return <section aria-label="Agent 团队"><div className="panel-heading"><h2>Agent 团队</h2><span>{agents.length} ACTIVE RECORDS</span></div>{agents.length ? <ul className="agent-team-list">{agents.map((agent) => <li key={agent.id}><div><span className="agent-role">{roles[agent.role]}</span><span className={`agent-status ${agent.status}`}>{agent.status}</span></div><strong>{agent.objective}</strong>{agent.result_summary && <p>{agent.result_summary}</p>}{agent.error_category && <code>{agent.error_category}</code>}</li>)}</ul> : <p className="empty-note">Lead Agent 尚未派发队友。执行 SQL、查找口径或生成报告时会在这里出现。</p>}</section>; }
+const roles = {
+  knowledge: "Knowledge Agent",
+  sql: "SQL Agent",
+  report: "Report Agent",
+  curator: "Curator Agent",
+};
+export function AgentTeamPanel({ agents }: { agents: AgentRun[] }) {
+  return (
+    <section aria-label="Agent 团队">
+      <div className="panel-heading">
+        <h2>Agent 团队</h2>
+        <span>{agents.length} ACTIVE RECORDS</span>
+      </div>
+      {agents.length ? (
+        <ul className="agent-team-list">
+          {agents.map((agent) => (
+            <li key={agent.id}>
+              <div>
+                <span className="agent-role">{roles[agent.role]}</span>
+                <span className={`agent-status ${agent.status}`}>
+                  {agent.status}
+                </span>
+              </div>
+              <strong>{agent.objective}</strong>
+              {agent.result_summary && <p>{agent.result_summary}</p>}
+              {agent.error_category && <code>{agent.error_category}</code>}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="empty-note">
+          Lead Agent 尚未派发队友。执行 SQL、查找口径或生成报告时会在这里出现。
+        </p>
+      )}
+    </section>
+  );
+}

@@ -13,7 +13,6 @@ from sqlglot.optimizer.scope import Scope, traverse_scope
 
 from data_analysis_agent.data_sources import AccessLevel, PolicySnapshot
 
-
 SchemaCatalog: TypeAlias = Mapping[str, Sequence[str]]
 
 
@@ -233,23 +232,17 @@ def _parse_one_statement(sql: str) -> exp.Query:
     except ParseError as exc:
         raise SqlValidationError("parse_error", "SQL could not be parsed") from exc
     if len(statements) != 1 or statements[0] is None:
-        raise SqlValidationError(
-            "exactly_one_statement", "Exactly one SQL statement is required"
-        )
+        raise SqlValidationError("exactly_one_statement", "Exactly one SQL statement is required")
     statement = statements[0]
     if not isinstance(statement, exp.Query):
-        raise SqlValidationError(
-            "read_only_required", "Only query expressions are allowed"
-        )
+        raise SqlValidationError("read_only_required", "Only query expressions are allowed")
     return statement
 
 
 def _deny_nested_writes(statement: exp.Query) -> None:
     for denied_type in _DENIED_NODE_TYPES:
         if next(statement.find_all(denied_type), None) is not None:
-            raise SqlValidationError(
-                "unsafe_statement", f"{denied_type.__name__} is denied"
-            )
+            raise SqlValidationError("unsafe_statement", f"{denied_type.__name__} is denied")
 
 
 def _deny_locking_clauses(statement: exp.Query) -> None:
@@ -303,8 +296,7 @@ def _catalog_index(
     for table, columns in catalog.items():
         table_name = _catalog_identifier(table)
         column_index = {
-            _catalog_identifier(column): _catalog_identifier(column)
-            for column in columns
+            _catalog_identifier(column): _catalog_identifier(column) for column in columns
         }
         index[table_name] = (table_name, column_index)
     return index
@@ -392,9 +384,7 @@ def _base_references(
             continue
         if isinstance(star.parent, exp.Count) and star.parent.this is star:
             continue
-        raise SqlValidationError(
-            "unresolved_star", "Star reference could not be resolved safely"
-        )
+        raise SqlValidationError("unresolved_star", "Star reference could not be resolved safely")
 
     return tuple(tables), tuple(references)
 
@@ -427,11 +417,7 @@ def _column_resolution_error(
     reference = match.group(1) if match else ""
     if "." in reference:
         qualifier = reference.rsplit(".", 1)[0]
-        aliases = {
-            alias
-            for scope in traverse_scope(statement)
-            for alias in scope.sources
-        }
+        aliases = {alias for scope in traverse_scope(statement) for alias in scope.sources}
         code = "unresolved_column" if qualifier in aliases else "unresolved_table"
     else:
         column = _catalog_identifier(reference)

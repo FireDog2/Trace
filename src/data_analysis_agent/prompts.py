@@ -135,9 +135,7 @@ def _assemble_prompt_cached(context: PromptContext) -> PromptAssembly:
     if context.enabled_tools:
         runtime_lines.append("Enabled tools: " + ", ".join(sorted(context.enabled_tools)))
     if runtime_lines:
-        sections.append(
-            PromptSection("runtime", 1, "dynamic", "\n".join(runtime_lines))
-        )
+        sections.append(PromptSection("runtime", 1, "dynamic", "\n".join(runtime_lines)))
 
     text = "\n\n".join(
         f"[{section.id}@v{section.version}]\n{section.content}" for section in sections

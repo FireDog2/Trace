@@ -3,8 +3,9 @@ from __future__ import annotations
 import io
 import zipfile
 
-from data_analysis_agent.knowledge_import import extract_knowledge_candidates
 from reportlab.pdfgen.canvas import Canvas
+
+from data_analysis_agent.knowledge_import import extract_knowledge_candidates
 
 
 def test_markdown_document_is_split_and_classified() -> None:
@@ -24,18 +25,22 @@ def test_markdown_document_is_split_and_classified() -> None:
 
     candidates = extract_knowledge_candidates("财务口径.md", content)
 
-    assert [candidate.name for candidate in candidates] == ["经营利润", "活跃客户", "数据使用边界"]
+    assert [candidate.name for candidate in candidates] == [
+        "经营利润",
+        "活跃客户",
+        "数据使用边界",
+    ]
     assert [candidate.kind for candidate in candidates] == ["metric", "term", "rule"]
     assert candidates[0].dimensions == ("月份", "地区")
     assert candidates[1].synonyms == ("Active customer",)
 
 
 def test_docx_document_text_is_read_without_external_word_dependency() -> None:
-    document_xml = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    document_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
 <w:p><w:r><w:t>经营利润</w:t></w:r></w:p>
 <w:p><w:r><w:t>定义：收入减去全部经营成本。</w:t></w:r></w:p>
-</w:body></w:document>'''.encode()
+</w:body></w:document>""".encode()
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("word/document.xml", document_xml)

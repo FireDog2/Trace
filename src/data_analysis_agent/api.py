@@ -27,7 +27,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from data_analysis_agent.agent import AgentRunner
 from data_analysis_agent.context import ContextCheckpointRepository
-from data_analysis_agent.datasets import DatasetError, DatasetService
 from data_analysis_agent.data_sources import (
     AccessLevel,
     CredentialError,
@@ -36,6 +35,7 @@ from data_analysis_agent.data_sources import (
     PolicySnapshot,
     PolicyVersionConflict,
 )
+from data_analysis_agent.datasets import DatasetError, DatasetService
 from data_analysis_agent.db import connect_database
 from data_analysis_agent.domain import Artifact, ArtifactType, Project, Task, TaskStatus
 from data_analysis_agent.execution import DuckDBExecutor, PythonExecutor
@@ -47,10 +47,6 @@ from data_analysis_agent.knowledge_import import (
     KnowledgeDocumentError,
     extract_knowledge_candidates,
 )
-from data_analysis_agent.permissions import ApprovalRepository, PermissionPolicy
-from data_analysis_agent.pdf_export import render_markdown_pdf
-from data_analysis_agent.postgres import SqlSafetyGateway
-from data_analysis_agent.sql_safety import SqlAstValidator
 from data_analysis_agent.model_config import (
     MODEL_PROVIDER_CATALOG,
     ModelConfigurationError,
@@ -60,6 +56,9 @@ from data_analysis_agent.model_config import (
     SecretStorageUnavailable,
     WindowsDpapiProtector,
 )
+from data_analysis_agent.pdf_export import render_markdown_pdf
+from data_analysis_agent.permissions import ApprovalRepository, PermissionPolicy
+from data_analysis_agent.postgres import SqlSafetyGateway
 from data_analysis_agent.providers import (
     ModelProvider,
     provider_from_credentials,
@@ -72,10 +71,22 @@ from data_analysis_agent.repositories import (
     RepositoryError,
     TaskRepository,
 )
-from data_analysis_agent.settings import Settings
 from data_analysis_agent.scope import GLOBAL_PROJECT_ID
+from data_analysis_agent.settings import Settings
+from data_analysis_agent.skills import (
+    CuratorAgent,
+    SkillCandidate,
+    SkillCandidateRepository,
+    WorkflowCurator,
+)
+from data_analysis_agent.sql_safety import SqlAstValidator
+from data_analysis_agent.team import (
+    AgentRole,
+    TeamManager,
+    TeammateRunner,
+    TeamRepository,
+)
 from data_analysis_agent.tools import ToolRegistry, build_tool_registry
-from data_analysis_agent.team import AgentRole, TeamManager, TeamRepository, TeammateRunner
 from data_analysis_agent.tracing import (
     AnalysisRun,
     TraceContext,
@@ -83,12 +94,6 @@ from data_analysis_agent.tracing import (
     TraceRecorder,
     TraceRepository,
     redact_payload,
-)
-from data_analysis_agent.skills import (
-    CuratorAgent,
-    SkillCandidate,
-    SkillCandidateRepository,
-    WorkflowCurator,
 )
 from data_analysis_agent.workspace import WorkspaceError, WorkspaceService
 
@@ -128,8 +133,12 @@ class SaveBusinessKnowledgeRequest(ApiModel):
     name: str = Field(min_length=1, max_length=160)
     definition: str = Field(min_length=1, max_length=4_000)
     formula: str | None = Field(default=None, max_length=4_000)
-    dimensions: list[Annotated[str, Field(min_length=1, max_length=120)]] = Field(default_factory=list, max_length=30)
-    synonyms: list[Annotated[str, Field(min_length=1, max_length=120)]] = Field(default_factory=list, max_length=30)
+    dimensions: list[Annotated[str, Field(min_length=1, max_length=120)]] = Field(
+        default_factory=list, max_length=30
+    )
+    synonyms: list[Annotated[str, Field(min_length=1, max_length=120)]] = Field(
+        default_factory=list, max_length=30
+    )
     source: str | None = Field(default=None, max_length=1_000)
 
 
@@ -246,11 +255,32 @@ class AgentRunResponse(ApiModel):
     started_at: str | None
     completed_at: str | None
 
+
 class AnalysisRunResponse(ApiModel):
-    id: str; task_id: str; status: str; accepted: bool; started_at: str; completed_at: str | None; error_category: str | None
+    id: str
+    task_id: str
+    status: str
+    accepted: bool
+    started_at: str
+    completed_at: str | None
+    error_category: str | None
+
 
 class TraceEventResponse(ApiModel):
-    id: str; run_id: str; task_id: str; agent_id: str | None; parent_event_id: str | None; sequence: int; event_type: str; status: str; payload: dict[str, object]; duration_ms: int | None; attempt: int; error_category: str | None; artifact_ids: list[str]
+    id: str
+    run_id: str
+    task_id: str
+    agent_id: str | None
+    parent_event_id: str | None
+    sequence: int
+    event_type: str
+    status: str
+    payload: dict[str, object]
+    duration_ms: int | None
+    attempt: int
+    error_category: str | None
+    artifact_ids: list[str]
+
 
 class SkillCandidateDecision(ApiModel):
     approved: bool
@@ -351,7 +381,12 @@ def build_services(
     connection = connect_database(settings)
     try:
         return _build_services(
-            settings, connection, provider, secret_protector, provider_factory, with_team_manager,
+            settings,
+            connection,
+            provider,
+            secret_protector,
+            provider_factory,
+            with_team_manager,
             teammate_provider_factory,
         )
     except BaseException:
@@ -492,13 +527,18 @@ def _build_services(
             finally:
                 if worker is not None:
                     worker.connection.close()
+
         class ClosingRunner:
             run = staticmethod(run_and_close)
+
         return ClosingRunner()
+
     def worker_failure_handler(run_id: str):
         worker_connection = connect_database(settings)
         try:
-            worker_repository = TeamRepository(worker_connection, TaskRepository(worker_connection).append_event)
+            worker_repository = TeamRepository(
+                worker_connection, TaskRepository(worker_connection).append_event
+            )
             current = worker_repository.get_run(run_id)
             return (
                 worker_repository.fail_run(run_id, "provider_error")
@@ -507,6 +547,7 @@ def _build_services(
             )
         finally:
             worker_connection.close()
+
     services.team_manager = TeamManager(
         team_repository, settings, runner_factory, worker_failure_handler
     )
@@ -707,8 +748,7 @@ def create_app(
             file.file.close()
 
         known_names = {
-            entry.name.casefold()
-            for entry in services.knowledge.list_for_project(project_id)
+            entry.name.casefold() for entry in services.knowledge.list_for_project(project_id)
         }
         created: list[BusinessKnowledgeEntry] = []
         skipped_names: list[str] = []
@@ -748,10 +788,7 @@ def create_app(
         response_model=list[BusinessKnowledgeResponse],
     )
     def list_global_business_knowledge() -> list[BusinessKnowledgeResponse]:
-        return [
-            _business_knowledge_response(entry)
-            for entry in services.knowledge.list_all()
-        ]
+        return [_business_knowledge_response(entry) for entry in services.knowledge.list_all()]
 
     @app.post(
         "/api/knowledge",
@@ -862,10 +899,7 @@ def create_app(
         response_model=list[DataSourceResponse],
     )
     def list_global_data_sources() -> list[DataSourceResponse]:
-        return [
-            _data_source_response(source)
-            for source in services.data_sources.list_all()
-        ]
+        return [_data_source_response(source) for source in services.data_sources.list_all()]
 
     @app.post(
         "/api/data-sources",
@@ -1111,8 +1145,13 @@ def create_app(
         resolved_provider = _configured_provider_or_409(services)
         task = services.tasks.create(project_id, request.objective)
         background_tasks.add_task(
-            _run_task, settings, resolved_provider, task.id, services.secret_protector,
-            services.provider_factory, teammate_provider_factory,
+            _run_task,
+            settings,
+            resolved_provider,
+            task.id,
+            services.secret_protector,
+            services.provider_factory,
+            teammate_provider_factory,
         )
         return _task_response(task)
 
@@ -1177,7 +1216,8 @@ def create_app(
         task = services.tasks.get(run.task_id)
         events = services.traces.events_for_run(run_id)
         agents = tuple(
-            agent for agent in services.team_repository.list_runs(task.id)
+            agent
+            for agent in services.team_repository.list_runs(task.id)
             if agent.trace_run_id == run_id
         )
         approvals = services.approvals.list_for_task(task.id)
@@ -1203,28 +1243,34 @@ def create_app(
             "task": _task_response(task),
             "trace": [_trace_event_response(event) for event in events],
             "agents": [_agent_run_response(agent) for agent in agents],
-            "approvals": [{
-                "id": approval.id,
-                "tool_name": approval.action.tool_name,
-                "arguments": redact_payload(approval.action.arguments),
-                "reason": approval.reason,
-                "status": approval.status,
-                "created_at": approval.created_at,
-                "decided_at": approval.decided_at,
-            } for approval in approvals],
+            "approvals": [
+                {
+                    "id": approval.id,
+                    "tool_name": approval.action.tool_name,
+                    "arguments": redact_payload(approval.action.arguments),
+                    "reason": approval.reason,
+                    "status": approval.status,
+                    "created_at": approval.created_at,
+                    "decided_at": approval.decided_at,
+                }
+                for approval in approvals
+            ],
             "artifacts": [_artifact_response(artifact) for artifact in artifacts],
-            "context_checkpoints": [{
-                "id": checkpoint.id,
-                "owner_type": checkpoint.owner_type,
-                "owner_id": checkpoint.owner_id,
-                "through_message_id": checkpoint.through_message_id,
-                "source_message_count": checkpoint.source_message_count,
-                "before_tokens": checkpoint.before_tokens,
-                "after_tokens": checkpoint.after_tokens,
-                "reason": checkpoint.reason,
-                "summary_hash": sha256(checkpoint.summary.encode("utf-8")).hexdigest(),
-                "created_at": checkpoint.created_at,
-            } for checkpoint in checkpoints],
+            "context_checkpoints": [
+                {
+                    "id": checkpoint.id,
+                    "owner_type": checkpoint.owner_type,
+                    "owner_id": checkpoint.owner_id,
+                    "through_message_id": checkpoint.through_message_id,
+                    "source_message_count": checkpoint.source_message_count,
+                    "before_tokens": checkpoint.before_tokens,
+                    "after_tokens": checkpoint.after_tokens,
+                    "reason": checkpoint.reason,
+                    "summary_hash": sha256(checkpoint.summary.encode("utf-8")).hexdigest(),
+                    "created_at": checkpoint.created_at,
+                }
+                for checkpoint in checkpoints
+            ],
             "skill_candidate": candidate,
             "integrity": {
                 "event_count": len(events),
@@ -1245,23 +1291,27 @@ def create_app(
             if services.team_manager is not None:
                 services.team_manager.ensure_curator(accepted.task_id, accepted.id)
             return _analysis_run_response(accepted)
-        except ValueError as exc: raise HTTPException(status_code=409, detail="Run cannot be accepted") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail="Run cannot be accepted") from exc
 
     @app.post("/api/runs/{run_id}/skill-candidates", status_code=status.HTTP_201_CREATED)
     def create_skill_candidate(run_id: str):
         try:
             model_name = services.model_configs.get_public().model or "runtime-provider"
-            candidate = WorkflowCurator(services.traces, services.skill_candidates, services.resolve_provider()).create_candidate(run_id, model_name)
+            candidate = WorkflowCurator(
+                services.traces, services.skill_candidates, services.resolve_provider()
+            ).create_candidate(run_id, model_name)
             return _skill_candidate_response(candidate)
-        except ValueError as exc: raise HTTPException(status_code=409, detail="Run cannot produce a skill candidate") from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=409, detail="Run cannot produce a skill candidate"
+            ) from exc
 
     @app.get("/api/runs/{run_id}/skill-candidate")
     def get_skill_candidate_for_run(run_id: str):
         services.traces.get_run(run_id)
         try:
-            return _skill_candidate_response(
-                services.skill_candidates.get_for_run(run_id)
-            )
+            return _skill_candidate_response(services.skill_candidates.get_for_run(run_id))
         except ValueError as exc:
             raise HTTPException(
                 status_code=404,
@@ -1269,12 +1319,19 @@ def create_app(
             ) from exc
 
     @app.get("/api/skill-candidates/{candidate_id}")
-    def get_skill_candidate(candidate_id: str): return _skill_candidate_response(services.skill_candidates.get(candidate_id))
+    def get_skill_candidate(candidate_id: str):
+        return _skill_candidate_response(services.skill_candidates.get(candidate_id))
 
     @app.post("/api/skill-candidates/{candidate_id}/decision")
     def decide_skill_candidate(candidate_id: str, request: SkillCandidateDecision):
-        try: return _skill_candidate_response(services.skill_candidates.decide(candidate_id, request.approved))
-        except ValueError as exc: raise HTTPException(status_code=409, detail="Skill candidate cannot be decided") from exc
+        try:
+            return _skill_candidate_response(
+                services.skill_candidates.decide(candidate_id, request.approved)
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=409, detail="Skill candidate cannot be decided"
+            ) from exc
 
     @app.post("/api/tasks/{task_id}/messages", response_model=TaskResponse)
     def send_message(
@@ -1316,9 +1373,7 @@ def create_app(
         request: ApprovalDecisionRequest,
         background_tasks: BackgroundTasks,
     ) -> dict[str, str | None]:
-        resolved_provider = (
-            _configured_provider_or_409(services) if request.approved else None
-        )
+        resolved_provider = _configured_provider_or_409(services) if request.approved else None
         approval = services.approvals.decide(approval_id, request.approved)
         services.tasks.append_event(
             approval.task_id,
@@ -1412,13 +1467,18 @@ def _configured_provider_or_409(services: AppServices) -> ModelProvider:
 
 
 def _run_task(
-    settings: Settings, provider: ModelProvider, task_id: str,
+    settings: Settings,
+    provider: ModelProvider,
+    task_id: str,
     secret_protector: SecretProtector | None = None,
     provider_factory: ProviderFactory = provider_from_credentials,
     teammate_provider_factory: TeammateProviderFactory | None = None,
 ) -> None:
     services = build_services(
-        settings, provider, secret_protector, provider_factory,
+        settings,
+        provider,
+        secret_protector,
+        provider_factory,
         teammate_provider_factory=teammate_provider_factory,
     )
     try:
@@ -1442,7 +1502,10 @@ def _continue_task(
     teammate_provider_factory: TeammateProviderFactory | None = None,
 ) -> None:
     services = build_services(
-        settings, provider, secret_protector, provider_factory,
+        settings,
+        provider,
+        secret_protector,
+        provider_factory,
         teammate_provider_factory=teammate_provider_factory,
     )
     try:
@@ -1469,11 +1532,18 @@ def _resume_approved_task(
     teammate_provider_factory: TeammateProviderFactory | None = None,
 ) -> None:
     services = build_services(
-        settings, provider, secret_protector, provider_factory,
+        settings,
+        provider,
+        secret_protector,
+        provider_factory,
         teammate_provider_factory=teammate_provider_factory,
     )
     try:
-        services.agent().resume_approval(task_id)
+        manager = services.team_manager
+        services.agent().resume_approval(
+            task_id,
+            (lambda: manager.resume_waiting(task_id)) if manager is not None else None,
+        )
     finally:
         try:
             if services.team_manager is not None:
@@ -1559,14 +1629,50 @@ def _agent_run_response(run) -> AgentRunResponse:
         completed_at=run.completed_at,
     )
 
+
 def _analysis_run_response(run: AnalysisRun) -> AnalysisRunResponse:
-    return AnalysisRunResponse(id=run.id, task_id=run.task_id, status=run.status, accepted=run.accepted, started_at=run.started_at, completed_at=run.completed_at, error_category=run.error_category)
+    return AnalysisRunResponse(
+        id=run.id,
+        task_id=run.task_id,
+        status=run.status,
+        accepted=run.accepted,
+        started_at=run.started_at,
+        completed_at=run.completed_at,
+        error_category=run.error_category,
+    )
+
 
 def _trace_event_response(event: TraceEvent) -> TraceEventResponse:
-    return TraceEventResponse(id=event.id, run_id=event.run_id, task_id=event.task_id, agent_id=event.agent_id, parent_event_id=event.parent_event_id, sequence=event.sequence, event_type=event.event_type, status=event.status, payload=event.payload, duration_ms=event.duration_ms, attempt=event.attempt, error_category=event.error_category, artifact_ids=list(event.artifact_ids))
+    return TraceEventResponse(
+        id=event.id,
+        run_id=event.run_id,
+        task_id=event.task_id,
+        agent_id=event.agent_id,
+        parent_event_id=event.parent_event_id,
+        sequence=event.sequence,
+        event_type=event.event_type,
+        status=event.status,
+        payload=event.payload,
+        duration_ms=event.duration_ms,
+        attempt=event.attempt,
+        error_category=event.error_category,
+        artifact_ids=list(event.artifact_ids),
+    )
+
 
 def _skill_candidate_response(candidate: SkillCandidate) -> dict[str, object]:
-    return {"id": candidate.id, "source_run_id": candidate.source_run_id, "name": candidate.name, "version": candidate.version, "markdown": candidate.markdown, "status": candidate.status, "enabled": candidate.enabled, "generated_by_model": candidate.generated_by_model, "reviewed_at": candidate.reviewed_at, "created_at": candidate.created_at}
+    return {
+        "id": candidate.id,
+        "source_run_id": candidate.source_run_id,
+        "name": candidate.name,
+        "version": candidate.version,
+        "markdown": candidate.markdown,
+        "status": candidate.status,
+        "enabled": candidate.enabled,
+        "generated_by_model": candidate.generated_by_model,
+        "reviewed_at": candidate.reviewed_at,
+        "created_at": candidate.created_at,
+    }
 
 
 def _result_summary(result_json: str | None) -> str | None:

@@ -134,7 +134,7 @@ class LeadDiagnosisProvider:
         )
 
 
-ANALYSIS_CODE = '''from pathlib import Path
+ANALYSIS_CODE = """from pathlib import Path
 import csv
 
 source_path = next(Path("source").glob("*.csv"))
@@ -171,7 +171,7 @@ Path("charts/east-logistics-cost-trend.html").write_text(
     + "</table></body></html>",
     encoding="utf-8",
 )
-'''
+"""
 
 
 def _tool_response(call_id: str, name: str, arguments: dict) -> ModelResponse:

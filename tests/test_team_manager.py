@@ -1,11 +1,12 @@
-from concurrent.futures import Future
-from threading import Barrier, Event, RLock, Thread, current_thread
 import sqlite3
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
+from threading import Barrier, Event, RLock, Thread, current_thread
 
 import pytest
 
+from data_analysis_agent.db import migrate
+from data_analysis_agent.repositories import ProjectRepository, TaskRepository
 from data_analysis_agent.team import (
     AgentRole,
     AgentRunStatus,
@@ -14,8 +15,6 @@ from data_analysis_agent.team import (
     TeamManagerClosed,
     TeamRepository,
 )
-from data_analysis_agent.db import migrate
-from data_analysis_agent.repositories import ProjectRepository, TaskRepository
 
 
 def test_manager_persists_run_before_submitting(task, db_connection, settings) -> None:
@@ -51,12 +50,15 @@ def test_spawn_shutdown_are_linearized_before_repository_create(tmp_path, settin
     task = TaskRepository(connection).create(project.id, "Race")
     repository = TeamRepository(connection)
     from data_analysis_agent.team import AgentRunStatus
+
     class CooperativeRunner:
         def __init__(self, event):
             self.event = event
+
         def run(self, run_id):
             assert self.event.wait(2)
             return repository.transition_run(run_id, AgentRunStatus.CANCELLED)
+
     manager = TeamManager(repository, settings, lambda role, event: CooperativeRunner(event))
     entered, release = Event(), Event()
     original = repository.create_run_if_capacity
@@ -183,6 +185,45 @@ def test_await_returns_active_row_at_timeout_then_observes_later_completion(
     connection.close()
 
 
+def test_manager_resumes_existing_waiting_run(tmp_path, settings) -> None:
+    connection = sqlite3.connect(tmp_path / "resume-waiting.sqlite", check_same_thread=False)
+    migrate(connection)
+    project = ProjectRepository(connection).create("Resume waiting")
+    task = TaskRepository(connection).create(project.id, "Resume waiting")
+    repository = TeamRepository(connection)
+    run = repository.create_run(task.id, AgentRole.SQL, "Resume after approval")
+    repository.transition_run(run.id, AgentRunStatus.WORKING)
+    repository.transition_run(run.id, AgentRunStatus.WAITING)
+
+    class Runner:
+        def run(self, run_id):
+            repository.transition_run(run_id, AgentRunStatus.WORKING)
+            return repository.complete_run(run_id, '{"summary":"approved"}')
+
+    manager = TeamManager(repository, settings, lambda role, event: Runner())
+    resumed = manager.resume_waiting(task.id)
+    completed = manager.await_runs((run.id,), 1)[0]
+
+    assert [item.id for item in resumed] == [run.id]
+    assert completed.status is AgentRunStatus.COMPLETED
+    manager.shutdown()
+    connection.close()
+
+
+def test_manager_cancels_waiting_run_without_live_future(task, db_connection, settings) -> None:
+    repository = TeamRepository(db_connection)
+    run = repository.create_run(task.id, AgentRole.SQL, "Cancel approval wait")
+    repository.transition_run(run.id, AgentRunStatus.WORKING)
+    repository.transition_run(run.id, AgentRunStatus.WAITING)
+    manager = TeamManager(repository, settings, lambda role, event: None)
+
+    cancelled = manager.cancel(run.id)
+
+    assert cancelled.status is AgentRunStatus.CANCELLED
+    assert cancelled.cancel_requested is True
+    manager.shutdown()
+
+
 def test_two_managers_preserve_database_active_capacity_under_concurrent_spawns(
     tmp_path, settings
 ) -> None:
@@ -209,6 +250,7 @@ def test_two_managers_preserve_database_active_capacity_under_concurrent_spawns(
                     repository.transition_run(run_id, AgentRunStatus.WORKING)
                     assert release.wait(2)
                     return repository.transition_run(run_id, AgentRunStatus.CANCELLED)
+
             return TeamManager(repository, settings, lambda role, event: Runner())
 
         managers = (manager_for(left_repository), manager_for(right_repository))
@@ -280,10 +322,12 @@ def test_manager_converts_worker_construction_and_run_failures_to_terminal_rows(
         del role, event
         if failure == "factory":
             raise RuntimeError("factory failure")
+
         class Runner:
             def run(self, run_id):
                 del run_id
                 raise RuntimeError("runner failure")
+
         return Runner()
 
     manager = TeamManager(repository, settings, factory)
@@ -307,6 +351,7 @@ def test_shutdown_cancels_queued_work_and_running_work_cooperates(tmp_path, sett
     class Runner:
         def __init__(self, event):
             self.event = event
+
         def run(self, run_id):
             started.set()
             assert release.wait(2)

@@ -5,6 +5,7 @@ import json
 import httpx
 import pytest
 
+from data_analysis_agent.model_config import ModelProviderKind, ProviderCredentials
 from data_analysis_agent.providers import (
     ModelMessage,
     ModelRequest,
@@ -12,7 +13,6 @@ from data_analysis_agent.providers import (
     ProviderError,
     provider_from_credentials,
 )
-from data_analysis_agent.model_config import ModelProviderKind, ProviderCredentials
 from data_analysis_agent.tools import ToolSchema
 
 
@@ -37,9 +37,7 @@ def sample_model_request() -> ModelRequest:
             ),
             ModelMessage(
                 role="tool",
-                content=json.dumps(
-                    {"call_id": "prior-call", "success": True, "output": {}}
-                ),
+                content=json.dumps({"call_id": "prior-call", "success": True, "output": {}}),
             ),
         ),
         tools=(
@@ -139,7 +137,12 @@ def test_openai_adapter_classifies_context_length_without_reflecting_provider_bo
         transport=httpx.MockTransport(
             lambda _: httpx.Response(
                 400,
-                json={"error": {"code": "context_length_exceeded", "message": "secret prompt is too long"}},
+                json={
+                    "error": {
+                        "code": "context_length_exceeded",
+                        "message": "secret prompt is too long",
+                    }
+                },
             )
         ),
     )
