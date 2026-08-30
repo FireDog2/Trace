@@ -105,6 +105,7 @@ export function App({ api: suppliedApi }: AppProps) {
       setCandidate(null);
       return;
     }
+    setEvents([]);
     let active = true;
     const refresh = async () => {
       const [detail, nextAgents, nextRuns] = await Promise.all([
@@ -206,6 +207,45 @@ export function App({ api: suppliedApi }: AppProps) {
       setError(null);
     } catch (cause) {
       setError((cause as Error).message);
+    }
+  }
+
+  async function setTaskPinned(taskId: string, pinned: boolean) {
+    try {
+      const updated = await api.setTaskPinned(taskId, pinned);
+      setTasks((current) =>
+        orderTasks(
+          current.map((item) => (item.id === updated.id ? updated : item)),
+        ),
+      );
+      setTask((current) =>
+        current?.id === updated.id
+          ? {
+              ...current,
+              pinned: updated.pinned,
+              updated_at: updated.updated_at,
+            }
+          : current,
+      );
+      setError(null);
+    } catch (cause) {
+      setError((cause as Error).message);
+      throw cause;
+    }
+  }
+
+  async function deleteTask(taskId: string) {
+    try {
+      await api.deleteTask(taskId);
+      const remaining = tasks.filter((item) => item.id !== taskId);
+      setTasks(remaining);
+      if (selectedTaskId === taskId) {
+        setSelectedTaskId(remaining[0]?.id ?? null);
+      }
+      setError(null);
+    } catch (cause) {
+      setError((cause as Error).message);
+      throw cause;
     }
   }
 
@@ -321,6 +361,8 @@ export function App({ api: suppliedApi }: AppProps) {
           }}
           onCreateProject={createProject}
           onRenameProject={renameProject}
+          onPinTask={setTaskPinned}
+          onDeleteTask={deleteTask}
           modelConfiguration={modelConfiguration}
           onOpenModelSettings={() => setModelSettingsOpen(true)}
           onOpenDataSources={() => setDataSourceSettingsOpen(true)}
@@ -467,4 +509,16 @@ export function App({ api: suppliedApi }: AppProps) {
       />
     </div>
   );
+}
+
+function orderTasks(tasks: Task[]): Task[] {
+  return [...tasks].sort((left, right) => {
+    const pinDifference =
+      Number(Boolean(right.pinned)) - Number(Boolean(left.pinned));
+    if (pinDifference !== 0) return pinDifference;
+    if (left.pinned && right.pinned) {
+      return right.updated_at.localeCompare(left.updated_at);
+    }
+    return left.created_at.localeCompare(right.created_at);
+  });
 }

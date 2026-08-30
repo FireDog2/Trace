@@ -26,6 +26,7 @@ def approval_repository(db_connection) -> ApprovalRepository:
     [
         "inspect_workspace",
         "inspect_dataset",
+        "inspect_database_schema",
         "query_data",
         "query_database",
         "run_python",
@@ -104,3 +105,74 @@ def test_approved_action_can_be_consumed_only_once(
 
     assert approval_repository.consume_approved(task.id, action) is True
     assert approval_repository.consume_approved(task.id, action) is False
+
+
+def test_restricted_field_grant_is_reusable_for_an_approved_subset(
+    approval_repository: ApprovalRepository,
+    task,
+) -> None:
+    granted_action = ToolAction(
+        "query_database",
+        {
+            "approval_scope": "restricted_fields",
+            "data_source_id": "source-1",
+            "policy_version": 7,
+            "restricted_fields": [
+                {"table": "region_operations", "column": "logistics_cost"},
+                {"table": "region_operations", "column": "region"},
+            ],
+        },
+    )
+    requested_action = ToolAction(
+        "query_database",
+        {
+            "approval_scope": "restricted_fields",
+            "data_source_id": "source-1",
+            "policy_version": 7,
+            "restricted_fields": [
+                {"table": "region_operations", "column": "logistics_cost"},
+            ],
+        },
+    )
+    pending = approval_repository.resolve_reusable(
+        task.id,
+        granted_action,
+        "Restricted fields require one-time approval for this task",
+    )
+    approval_repository.decide(pending.approval.id, approved=True)
+
+    authorized = approval_repository.resolve_reusable(
+        task.id,
+        requested_action,
+        "Restricted fields require one-time approval for this task",
+    )
+
+    assert authorized.status == "authorized"
+    assert authorized.approval.id == pending.approval.id
+    assert approval_repository.get(pending.approval.id).status == "approved"
+
+
+def test_restricted_field_grant_does_not_cross_policy_versions(
+    approval_repository: ApprovalRepository,
+    task,
+) -> None:
+    def action(version: int) -> ToolAction:
+        return ToolAction(
+            "query_database",
+            {
+                "approval_scope": "restricted_fields",
+                "data_source_id": "source-1",
+                "policy_version": version,
+                "restricted_fields": [
+                    {"table": "region_operations", "column": "logistics_cost"},
+                ],
+            },
+        )
+
+    first = approval_repository.resolve_reusable(task.id, action(7), "Restricted")
+    approval_repository.decide(first.approval.id, approved=True)
+
+    changed = approval_repository.resolve_reusable(task.id, action(8), "Restricted")
+
+    assert changed.status == "pending"
+    assert changed.approval.id != first.approval.id

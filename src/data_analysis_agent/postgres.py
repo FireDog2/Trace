@@ -20,6 +20,7 @@ from data_analysis_agent.data_sources import (
     AccessLevel,
     CredentialError,
     DataSourceRepository,
+    PolicySnapshot,
 )
 from data_analysis_agent.db import sqlite_connection_lock, utc_now
 from data_analysis_agent.domain import ArtifactType, TaskStatus
@@ -357,8 +358,15 @@ class SqlSafetyGateway:
                 risk=risk,
             )
 
-        approval_reason = _approval_reason(validated, risk)
+        approval_requirements = _approval_requirements(
+            data_source_id,
+            validated,
+            policy,
+            risk,
+        )
         pending_resolution = None
+        pending_reason = None
+        authorized_approval_id = None
         path = None
         with self._metadata_lock:
             try:
@@ -370,17 +378,19 @@ class SqlSafetyGateway:
                     self._connection.rollback()
                     return _policy_changed(validated.sql_hash, risk)
 
-                if approval_reason is not None:
-                    action = _approval_action(
-                        data_source_id,
-                        validated,
-                        policy.version,
-                    )
-                    resolution = self.approvals.resolve_once_in_transaction(
-                        task_id,
-                        action,
-                        approval_reason,
-                    )
+                for action, approval_reason, reusable in approval_requirements:
+                    if reusable:
+                        resolution = self.approvals.resolve_reusable_in_transaction(
+                            task_id,
+                            action,
+                            approval_reason,
+                        )
+                    else:
+                        resolution = self.approvals.resolve_once_in_transaction(
+                            task_id,
+                            action,
+                            approval_reason,
+                        )
                     if not self._policy_version_matches_in_transaction(
                         data_source_id,
                         policy.version,
@@ -391,12 +401,17 @@ class SqlSafetyGateway:
                         self._connection.commit()
                         return _denied(
                             "approval_rejected",
-                            "The exact PostgreSQL query was rejected",
+                            (
+                                "The restricted field access was rejected"
+                                if reusable
+                                else "The exact PostgreSQL query was rejected"
+                            ),
                             query_hash=validated.sql_hash,
                             risk=risk,
                         )
                     if resolution.status == "pending":
                         pending_resolution = resolution
+                        pending_reason = approval_reason
                         if resolution.created:
                             current_task = self.tasks.get(task_id)
                             if current_task.status is not TaskStatus.NEEDS_INPUT:
@@ -409,12 +424,15 @@ class SqlSafetyGateway:
                                 "approval.requested",
                                 {
                                     "approval_id": resolution.approval.id,
+                                    "tool_name": action.tool_name,
                                     "sql_hash": validated.sql_hash,
                                     "policy_version": policy.version,
                                     "reason": approval_reason,
                                 },
                             )
                         self._connection.commit()
+                        break
+                    authorized_approval_id = resolution.approval.id
 
                 if pending_resolution is None:
                     if not self._consume_budget_in_transaction(task_id):
@@ -430,13 +448,9 @@ class SqlSafetyGateway:
                         data_source_id=data_source_id,
                         policy_version=policy.version,
                         sql_hash=validated.sql_hash,
-                        approval_id=(
-                            resolution.approval.id
-                            if approval_reason is not None and resolution.status == "authorized"
-                            else None
-                        ),
+                        approval_id=authorized_approval_id,
                     )
-                    # The policy check, approval consumption, budget increment, and
+                    # The policy check, approval resolution, budget increment, and
                     # in-flight record must survive every post-dispatch outcome.
                     self._connection.commit()
                     try:
@@ -565,7 +579,7 @@ class SqlSafetyGateway:
                 query_hash=validated.sql_hash,
                 risk=risk,
                 approval_id=approval.id,
-                message=approval_reason,
+                message=pending_reason,
             )
 
     def _consume_budget(self, task_id: str) -> bool:
@@ -732,7 +746,27 @@ def _is_join_node(node: Mapping[str, Any]) -> bool:
     return "join" in node_type or node_type == "nested loop"
 
 
-def _approval_action(
+def _restricted_approval_action(
+    data_source_id: str,
+    validated: ValidatedSql,
+    policy: PolicySnapshot,
+    policy_version: int,
+) -> ToolAction:
+    restricted_fields = _restricted_policy_fields(validated, policy)
+    return ToolAction(
+        "query_database",
+        {
+            "approval_scope": "restricted_fields",
+            "data_source_id": data_source_id,
+            "policy_version": policy_version,
+            "restricted_fields": [
+                {"table": table, "column": column} for table, column in restricted_fields
+            ],
+        },
+    )
+
+
+def _high_risk_approval_action(
     data_source_id: str,
     validated: ValidatedSql,
     policy_version: int,
@@ -740,6 +774,7 @@ def _approval_action(
     return ToolAction(
         "query_database",
         {
+            "approval_scope": "exact_query",
             "data_source_id": data_source_id,
             "sql_hash": validated.sql_hash,
             "policy_version": policy_version,
@@ -747,12 +782,59 @@ def _approval_action(
     )
 
 
-def _approval_reason(validated: ValidatedSql, risk: ExplainRisk) -> str | None:
+def _restricted_policy_fields(
+    validated: ValidatedSql,
+    policy: PolicySnapshot,
+) -> tuple[tuple[str, str | None], ...]:
+    fields: set[tuple[str, str | None]] = set()
+    referenced_tables: set[str] = set()
+    for reference in validated.references:
+        referenced_tables.add(reference.table)
+        exact = (reference.table, reference.column)
+        table_wide = (reference.table, None)
+        if policy.rules.get(exact) is AccessLevel.APPROVAL_REQUIRED:
+            fields.add(exact)
+        elif policy.rules.get(table_wide) is AccessLevel.APPROVAL_REQUIRED:
+            fields.add(table_wide)
+    for table in validated.tables:
+        table_wide = (table, None)
+        if (
+            table not in referenced_tables
+            and policy.rules.get(table_wide) is AccessLevel.APPROVAL_REQUIRED
+        ):
+            fields.add(table_wide)
+    return tuple(sorted(fields, key=lambda item: (item[0], item[1] or "")))
+
+
+def _approval_requirements(
+    data_source_id: str,
+    validated: ValidatedSql,
+    policy: PolicySnapshot,
+    risk: ExplainRisk,
+) -> tuple[tuple[ToolAction, str, bool], ...]:
+    requirements: list[tuple[ToolAction, str, bool]] = []
     if validated.access_level is AccessLevel.APPROVAL_REQUIRED:
-        return "Restricted fields require one-time approval"
+        requirements.append(
+            (
+                _restricted_approval_action(
+                    data_source_id,
+                    validated,
+                    policy,
+                    policy.version,
+                ),
+                "Restricted fields require one-time approval for this task",
+                True,
+            )
+        )
     if risk.level == "high":
-        return "High-risk query plan requires one-time approval"
-    return None
+        requirements.append(
+            (
+                _high_risk_approval_action(data_source_id, validated, policy.version),
+                "High-risk query plan requires one-time approval",
+                False,
+            )
+        )
+    return tuple(requirements)
 
 
 def _execution_limits(settings: Settings, risk: str) -> tuple[int, int, int]:

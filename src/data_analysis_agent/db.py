@@ -399,6 +399,11 @@ AFTER DELETE ON agent_runs BEGIN
 END;
 """
 
+MIGRATION_18_SQL = """
+CREATE INDEX IF NOT EXISTS idx_tasks_project_visible_pinned
+ON tasks(project_id, pinned, updated_at) WHERE deleted_at IS NULL;
+"""
+
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
@@ -590,6 +595,20 @@ def migrate(connection: sqlite3.Connection) -> None:
         connection.execute(
             "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
             (17, utc_now()),
+        )
+    if 18 not in applied:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(tasks)")}
+        if "pinned" not in columns:
+            connection.execute(
+                "ALTER TABLE tasks ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0 "
+                "CHECK(pinned IN (0, 1))"
+            )
+        if "deleted_at" not in columns:
+            connection.execute("ALTER TABLE tasks ADD COLUMN deleted_at TEXT")
+        connection.executescript(MIGRATION_18_SQL)
+        connection.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+            (18, utc_now()),
         )
     connection.execute("PRAGMA foreign_keys = ON")
     connection.commit()

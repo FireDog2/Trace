@@ -54,7 +54,7 @@ def _create_source(source_repository, project_id: str):
     return source
 
 
-def test_restricted_query_uses_exact_one_time_approval_and_persists_csv(
+def test_restricted_query_uses_task_scoped_field_approval_and_persists_csv(
     sql_gateway,
     source_repository,
     approval_repository,
@@ -74,9 +74,12 @@ def test_restricted_query_uses_exact_one_time_approval_and_persists_csv(
     assert approval.action == ToolAction(
         "query_database",
         {
+            "approval_scope": "restricted_fields",
             "data_source_id": source.id,
-            "sql_hash": first.query_hash,
             "policy_version": 2,
+            "restricted_fields": [
+                {"table": "orders", "column": "customer_email"},
+            ],
         },
     )
     assert task_repository.get(task.id).status is TaskStatus.NEEDS_INPUT
@@ -84,9 +87,10 @@ def test_restricted_query_uses_exact_one_time_approval_and_persists_csv(
     assert event.event_type == "approval.requested"
     assert event.payload == {
         "approval_id": first.approval_id,
+        "tool_name": "query_database",
         "sql_hash": first.query_hash,
         "policy_version": 2,
-        "reason": "Restricted fields require one-time approval",
+        "reason": "Restricted fields require one-time approval for this task",
     }
 
     approval_repository.decide(first.approval_id, approved=True)
@@ -108,17 +112,13 @@ def test_restricted_query_uses_exact_one_time_approval_and_persists_csv(
 
     third = sql_gateway.execute(task.id, task.project_id, source.id, sql)
 
-    assert third.status == "approval_required"
-    assert third.approval_id != first.approval_id
+    assert third.status == "succeeded"
     listed = approval_repository.list_for_task(task.id)
-    assert tuple(item.status for item in listed) == ("consumed", "pending")
-    assert tuple(item.id for item in listed) == (
-        first.approval_id,
-        third.approval_id,
-    )
+    assert tuple(item.status for item in listed) == ("approved",)
+    assert tuple(item.id for item in listed) == (first.approval_id,)
 
 
-def test_changed_sql_hash_cannot_consume_an_existing_approval(
+def test_changed_sql_reuses_approved_restricted_field_scope(
     sql_gateway,
     source_repository,
     approval_repository,
@@ -140,9 +140,90 @@ def test_changed_sql_hash_cannot_consume_an_existing_approval(
         "SELECT customer_email FROM orders",
     )
 
-    assert changed.status == "approval_required"
+    assert changed.status == "succeeded"
     assert changed.query_hash != first.query_hash
     assert approval_repository.get(first.approval_id).status == "approved"
+
+
+def test_new_restricted_field_requires_an_additional_task_scoped_approval(
+    sql_gateway,
+    source_repository,
+    approval_repository,
+    task,
+) -> None:
+    source = _create_source(source_repository, task.project_id)
+    source_repository.replace_policies(
+        source.id,
+        {
+            ("orders", None): AccessLevel.ALLOWED,
+            ("orders", "customer_email"): AccessLevel.APPROVAL_REQUIRED,
+            ("orders", "amount"): AccessLevel.APPROVAL_REQUIRED,
+        },
+    )
+    first = sql_gateway.execute(
+        task.id,
+        task.project_id,
+        source.id,
+        "SELECT customer_email FROM orders",
+    )
+    approval_repository.decide(first.approval_id, approved=True)
+
+    changed = sql_gateway.execute(
+        task.id,
+        task.project_id,
+        source.id,
+        "SELECT customer_email, amount FROM orders",
+    )
+
+    assert changed.status == "approval_required"
+    assert changed.approval_id != first.approval_id
+    assert approval_repository.get(changed.approval_id).action.arguments["restricted_fields"] == [
+        {"table": "orders", "column": "amount"},
+        {"table": "orders", "column": "customer_email"},
+    ]
+
+
+def test_all_restricted_project_fields_reuse_superset_grant_for_later_summary(
+    sql_gateway,
+    source_repository,
+    approval_repository,
+    task,
+) -> None:
+    source = _create_source(source_repository, task.project_id)
+    source_repository.replace_policies(
+        source.id,
+        {
+            ("orders", "region"): AccessLevel.APPROVAL_REQUIRED,
+            ("orders", "amount"): AccessLevel.APPROVAL_REQUIRED,
+            ("orders", "customer_email"): AccessLevel.APPROVAL_REQUIRED,
+        },
+    )
+    detail = sql_gateway.execute(
+        task.id,
+        task.project_id,
+        source.id,
+        "SELECT region, amount, customer_email FROM orders",
+    )
+    approval_repository.decide(detail.approval_id, approved=True)
+
+    detail_result = sql_gateway.execute(
+        task.id,
+        task.project_id,
+        source.id,
+        "SELECT region, amount, customer_email FROM orders",
+    )
+    summary_result = sql_gateway.execute(
+        task.id,
+        task.project_id,
+        source.id,
+        "SELECT MIN(amount), MAX(amount), AVG(amount) FROM orders",
+    )
+
+    assert detail_result.status == "succeeded"
+    assert summary_result.status == "succeeded"
+    assert approval_repository.list_for_task(task.id) == (
+        approval_repository.get(detail.approval_id),
+    )
 
 
 def test_changed_policy_version_cannot_consume_an_existing_approval(
@@ -360,7 +441,7 @@ def test_result_byte_limit_returns_structured_error_without_artifact(
     assert outcome.status == "retryable_error"
     assert outcome.error_category == "result_limit"
     assert outcome.retryable is True
-    assert approval_repository.get(first.approval_id).status == "consumed"
+    assert approval_repository.get(first.approval_id).status == "approved"
     assert _budget_attempts(db_connection, task.id) == before_attempts + 1
     assert artifact_repository.list_for_task(task.id) == ()
 
@@ -395,7 +476,7 @@ def test_artifact_write_error_is_structured_and_removes_reserved_path(
     assert outcome.status == "retryable_error"
     assert outcome.error_category == "artifact_write_error"
     assert outcome.retryable is True
-    assert approval_repository.get(first.approval_id).status == "consumed"
+    assert approval_repository.get(first.approval_id).status == "approved"
     assert _budget_attempts(db_connection, task.id) == before_attempts + 1
     assert artifact_repository.list_for_task(task.id) == ()
     derived = workspace.resolve_inside(task.project_id, "derived")
@@ -487,6 +568,14 @@ class CoordinatedApprovalRepository:
     def resolve_once(self, task_id: str, action: ToolAction, reason: str):
         self.barrier.wait(timeout=5)
         return self.repository.resolve_once(task_id, action, reason)
+
+    def resolve_reusable_in_transaction(
+        self,
+        task_id: str,
+        action: ToolAction,
+        reason: str,
+    ):
+        return self.repository.resolve_reusable_in_transaction(task_id, action, reason)
 
     def __getattr__(self, name: str):
         return getattr(self.repository, name)
@@ -638,6 +727,11 @@ class PolicyChangingApprovalRepository:
         self._change_policy_version()
         return resolution
 
+    def resolve_reusable_in_transaction(self, *args, **kwargs):
+        resolution = self.repository.resolve_reusable_in_transaction(*args, **kwargs)
+        self._change_policy_version()
+        return resolution
+
     def __getattr__(self, name: str):
         return getattr(self.repository, name)
 
@@ -747,7 +841,7 @@ def test_result_row_limit_rolls_back_budget_and_approved_grant(
 
     assert outcome.status == "retryable_error"
     assert outcome.error_category == "result_limit"
-    assert state.approvals.get(first.approval_id).status == "consumed"
+    assert state.approvals.get(first.approval_id).status == "approved"
     assert _budget_attempts(state.connection, state.task.id) == before_attempts + 1
     assert state.artifacts.list_for_task(state.task.id) == ()
     state.connection.close()
@@ -779,7 +873,7 @@ def test_result_serialization_error_rolls_back_budget_and_approved_grant(
 
     assert outcome.status == "retryable_error"
     assert outcome.error_category == "result_serialization_error"
-    assert state.approvals.get(first.approval_id).status == "consumed"
+    assert state.approvals.get(first.approval_id).status == "approved"
     assert _budget_attempts(state.connection, state.task.id) == before_attempts + 1
     assert state.artifacts.list_for_task(state.task.id) == ()
     state.connection.close()
@@ -811,7 +905,7 @@ def test_artifact_registration_error_rolls_back_metadata_and_removes_file(
     assert outcome.status == "retryable_error"
     assert outcome.error_category == "artifact_registration_error"
     assert outcome.retryable is True
-    assert state.approvals.get(first.approval_id).status == "consumed"
+    assert state.approvals.get(first.approval_id).status == "approved"
     assert _budget_attempts(state.connection, state.task.id) == before_attempts + 1
     assert state.artifacts.list_for_task(state.task.id) == ()
     derived = state.workspace.resolve_inside(state.project.id, "derived")
@@ -887,7 +981,7 @@ def test_query_failure_rolls_back_budget_and_approved_grant(
     assert outcome.status == "retryable_error"
     assert outcome.error_category == expected_category
     assert _budget_attempts(state.connection, state.task.id) == before_attempts + 1
-    assert state.approvals.get(first.approval_id).status == "consumed"
+    assert state.approvals.get(first.approval_id).status == "approved"
     state.connection.close()
 
 
@@ -1232,7 +1326,7 @@ def test_existing_approved_action_is_not_shadowed_by_newer_pending_record(
     outcome = sql_gateway.execute(task.id, task.project_id, source.id, sql)
 
     assert outcome.status == "succeeded"
-    assert approval_repository.get(first.approval_id).status == "consumed"
+    assert approval_repository.get(first.approval_id).status == "approved"
     assert approval_repository.get(shadow.id).status == "pending"
 
 
@@ -1373,6 +1467,22 @@ def test_high_risk_requires_approval_while_extreme_risk_is_denied(
     assert high.status == "approval_required"
     assert high.risk.level == "high"
     assert len(approval_repository.list_for_task(task.id)) == 1
+    high_approval = approval_repository.get(high.approval_id)
+    assert high_approval.action.arguments == {
+        "approval_scope": "exact_query",
+        "data_source_id": source.id,
+        "sql_hash": high.query_hash,
+        "policy_version": 2,
+    }
+    approval_repository.decide(high.approval_id, approved=True)
+    approved_high = sql_gateway.execute(
+        task.id,
+        task.project_id,
+        source.id,
+        "SELECT region FROM orders",
+    )
+    assert approved_high.status == "succeeded"
+    assert approval_repository.get(high.approval_id).status == "consumed"
 
     fake_driver.plan = {
         "Plan": {

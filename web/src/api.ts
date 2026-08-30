@@ -23,6 +23,8 @@ export interface ApiClient {
   listTasks(projectId: string): Promise<Task[]>;
   createTask(projectId: string, objective: string): Promise<Task>;
   getTask(taskId: string): Promise<TaskDetail>;
+  setTaskPinned(taskId: string, pinned: boolean): Promise<Task>;
+  deleteTask(taskId: string): Promise<void>;
   listDataSources(): Promise<import("./types").DataSource[]>;
   createDataSource(input: {
     name: string;
@@ -151,6 +153,16 @@ export class HttpApiClient implements ApiClient {
 
   getTask(taskId: string): Promise<TaskDetail> {
     return this.request(`/api/tasks/${taskId}`);
+  }
+  setTaskPinned(taskId: string, pinned: boolean): Promise<Task> {
+    return this.request(`/api/tasks/${taskId}/pin`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pinned }),
+    });
+  }
+  deleteTask(taskId: string): Promise<void> {
+    return this.request(`/api/tasks/${taskId}`, { method: "DELETE" });
   }
   listDataSources(): Promise<import("./types").DataSource[]> {
     return this.request("/api/data-sources");

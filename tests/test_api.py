@@ -444,8 +444,16 @@ def test_background_helpers_shutdown_teammates_before_closing_connection(
             events.append("connection.close")
 
     class Manager:
+        class Run:
+            id = "waiting-agent"
+
         def resume_waiting(self, task_id):
             events.append(f"manager.resume_waiting:{task_id}")
+            return (self.Run(),)
+
+        def await_runs(self, run_ids, timeout_seconds):
+            events.append(f"manager.await_runs:{run_ids}:{timeout_seconds}")
+            return ()
 
         def shutdown(self):
             events.append("manager.shutdown")
@@ -475,6 +483,7 @@ def test_background_helpers_shutdown_teammates_before_closing_connection(
     expected = [f"agent.{method}", "manager.shutdown", "connection.close"]
     if helper == "_resume_approved_task":
         expected.insert(0, "manager.resume_waiting:task-1")
+        expected.insert(1, "manager.await_runs:('waiting-agent',):120")
     assert events == expected
 
 
@@ -649,11 +658,48 @@ def test_project_dataset_task_lifecycle(api_client, operations_csv) -> None:
         == "operations.csv"
     )
     assert task["status"] == "understanding"
+    assert task["pinned"] is False
     assert api_client.get(f"/api/tasks/{task['id']}").status_code == 200
     assert (
         api_client.get(f"/api/artifacts/{dataset['id']}/dataset-inspection").json()["row_count"]
         == 12
     )
+
+
+def test_task_can_be_pinned_and_completed_task_can_be_deleted(api_client) -> None:
+    project = api_client.post("/api/projects", json={"name": "Operations"}).json()
+    repository = api_client.app.state.services.tasks
+    task = repository.create(project["id"], "Keep this conversation handy")
+
+    pinned = api_client.put(
+        f"/api/tasks/{task.id}/pin",
+        json={"pinned": True},
+    )
+
+    assert pinned.status_code == 200
+    assert pinned.json()["pinned"] is True
+    for target in (
+        TaskStatus.PLANNING,
+        TaskStatus.RUNNING,
+        TaskStatus.SYNTHESIZING,
+        TaskStatus.COMPLETED,
+    ):
+        repository.transition(task.id, target)
+
+    deleted = api_client.delete(f"/api/tasks/{task.id}")
+
+    assert deleted.status_code == 204
+    assert api_client.get(f"/api/tasks/{task.id}").status_code == 404
+    assert api_client.get(f"/api/projects/{project['id']}/tasks").json() == []
+
+
+def test_active_task_delete_requires_waiting_for_completion(api_client) -> None:
+    project = api_client.post("/api/projects", json={"name": "Operations"}).json()
+    task = api_client.app.state.services.tasks.create(project["id"], "Still running")
+
+    response = api_client.delete(f"/api/tasks/{task.id}")
+
+    assert response.status_code == 409
 
 
 def test_events_endpoint_replays_after_sequence(api_client) -> None:

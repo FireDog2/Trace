@@ -3,7 +3,11 @@ from __future__ import annotations
 import pytest
 
 from data_analysis_agent.domain import PlanStepDraft, StepStatus, TaskStatus
-from data_analysis_agent.repositories import InvalidTaskTransition
+from data_analysis_agent.repositories import (
+    InvalidTaskTransition,
+    RecordNotFoundError,
+    TaskDeletionConflict,
+)
 
 
 def test_task_rejects_invalid_transition(task_repository, project) -> None:
@@ -94,3 +98,46 @@ def test_messages_are_restored_in_creation_order(task_repository, task) -> None:
     second = task_repository.add_message(task.id, "assistant", "I will inspect the data.")
 
     assert task_repository.list_messages(task.id) == (first, second)
+
+
+def test_pinned_tasks_sort_first_and_can_be_unpinned(task_repository, project) -> None:
+    first = task_repository.create(project.id, "First conversation")
+    second = task_repository.create(project.id, "Pinned conversation")
+
+    pinned = task_repository.set_pinned(second.id, True)
+
+    assert pinned.pinned is True
+    assert task_repository.list_for_project(project.id) == (pinned, first)
+    assert task_repository.set_pinned(second.id, False).pinned is False
+
+
+def test_completed_task_is_soft_deleted_without_removing_history(
+    task_repository,
+    db_connection,
+    task,
+) -> None:
+    task_repository.add_message(task.id, "assistant", "Preserve this audit message")
+    for status in (
+        TaskStatus.PLANNING,
+        TaskStatus.RUNNING,
+        TaskStatus.SYNTHESIZING,
+        TaskStatus.COMPLETED,
+    ):
+        task_repository.transition(task.id, status)
+
+    task_repository.soft_delete(task.id)
+
+    assert task_repository.list_for_project(task.project_id) == ()
+    with pytest.raises(RecordNotFoundError):
+        task_repository.get(task.id)
+    assert (
+        db_connection.execute(
+            "SELECT COUNT(*) FROM messages WHERE task_id = ?", (task.id,)
+        ).fetchone()[0]
+        == 1
+    )
+
+
+def test_active_task_cannot_be_deleted(task_repository, task) -> None:
+    with pytest.raises(TaskDeletionConflict):
+        task_repository.soft_delete(task.id)

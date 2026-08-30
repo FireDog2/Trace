@@ -14,6 +14,7 @@ AUTOMATIC_TOOLS = frozenset(
     {
         "inspect_workspace",
         "inspect_dataset",
+        "inspect_database_schema",
         "search_business_knowledge",
         "query_data",
         "query_database",
@@ -212,6 +213,73 @@ class ApprovalRepository:
             _insert_approval(self._connection, approval)
             return ApprovalResolution("pending", approval, created=True)
 
+    def resolve_reusable(
+        self,
+        task_id: str,
+        action: ToolAction,
+        reason: str,
+    ) -> ApprovalResolution:
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                resolution = self.resolve_reusable_in_transaction(task_id, action, reason)
+                self._connection.commit()
+                return resolution
+            except Exception:
+                self._connection.rollback()
+                raise
+
+    def resolve_reusable_in_transaction(
+        self,
+        task_id: str,
+        action: ToolAction,
+        reason: str,
+    ) -> ApprovalResolution:
+        """Resolve a task-scoped field grant without consuming it.
+
+        Restricted-field approvals are intentionally reusable for the lifetime of
+        one task and policy version. A grant for a set of fields also covers later
+        queries that use only a subset of that set.
+        """
+        with self._lock:
+            if not self._connection.in_transaction:
+                raise RuntimeError("approval resolution requires an active transaction")
+            requested_fields = _restricted_field_set(action)
+            if requested_fields is None:
+                raise ValueError("reusable approvals require a restricted-fields action")
+            rows = self._connection.execute(
+                "SELECT * FROM approvals WHERE task_id = ? ORDER BY created_at, rowid",
+                (task_id,),
+            ).fetchall()
+            compatible = [
+                row
+                for row in rows
+                if _same_restricted_field_context(_approval_from_row(row).action, action)
+            ]
+
+            approved = [row for row in compatible if row["status"] == "approved"]
+            approved_fields: set[tuple[str, str | None]] = set()
+            for row in approved:
+                approved_fields.update(_restricted_field_set(_approval_from_row(row).action) or ())
+            if requested_fields <= approved_fields:
+                return ApprovalResolution("authorized", _approval_from_row(approved[-1]))
+
+            rejected = [row for row in compatible if row["status"] == "rejected"]
+            for row in reversed(rejected):
+                rejected_fields = _restricted_field_set(_approval_from_row(row).action) or set()
+                if requested_fields & rejected_fields:
+                    return ApprovalResolution("rejected", _approval_from_row(row))
+
+            pending = [row for row in compatible if row["status"] == "pending"]
+            for row in pending:
+                pending_fields = _restricted_field_set(_approval_from_row(row).action) or set()
+                if requested_fields <= pending_fields:
+                    return ApprovalResolution("pending", _approval_from_row(row))
+
+            approval = _pending_approval(task_id, action, reason)
+            _insert_approval(self._connection, approval)
+            return ApprovalResolution("pending", approval, created=True)
+
     def decide(self, approval_id: str, approved: bool) -> Approval:
         with self._lock:
             decided_at = utc_now()
@@ -248,6 +316,41 @@ class ApprovalRepository:
             )
             self._connection.commit()
             return cursor.rowcount == 1
+
+
+def _restricted_field_set(action: ToolAction) -> set[tuple[str, str | None]] | None:
+    if action.arguments.get("approval_scope") != "restricted_fields":
+        return None
+    raw_fields = action.arguments.get("restricted_fields")
+    if not isinstance(raw_fields, list):
+        return None
+    fields: set[tuple[str, str | None]] = set()
+    for item in raw_fields:
+        if not isinstance(item, dict):
+            return None
+        table = item.get("table")
+        column = item.get("column")
+        if (
+            not isinstance(table, str)
+            or not table
+            or not (column is None or isinstance(column, str) and column)
+        ):
+            return None
+        fields.add((table, column))
+    return fields or None
+
+
+def _same_restricted_field_context(left: ToolAction, right: ToolAction) -> bool:
+    if left.tool_name != right.tool_name:
+        return False
+    left_fields = _restricted_field_set(left)
+    right_fields = _restricted_field_set(right)
+    if left_fields is None or right_fields is None:
+        return False
+    return all(
+        left.arguments.get(key) == right.arguments.get(key)
+        for key in ("approval_scope", "data_source_id", "policy_version")
+    )
 
 
 def _declares_source_mutation(arguments: dict[str, Any]) -> bool:

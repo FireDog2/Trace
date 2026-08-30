@@ -131,7 +131,13 @@ ROLE_TOOLS: dict[AgentRole, frozenset[str]] = {
         {"inspect_workspace", "inspect_dataset", "search_business_knowledge"}
     ),
     AgentRole.SQL: frozenset(
-        {"inspect_workspace", "inspect_dataset", "query_data", "query_database"}
+        {
+            "inspect_workspace",
+            "inspect_dataset",
+            "inspect_database_schema",
+            "query_data",
+            "query_database",
+        }
     ),
     AgentRole.REPORT: frozenset(
         {
@@ -813,11 +819,21 @@ class TeammateRunner:
     def _run_owned(self, run: AgentRun, token: str) -> AgentRun:
         if self._cancelled(run.id):
             return self._repository.transition_run(run.id, AgentRunStatus.CANCELLED)
+        resumed_from_wait = run.status is AgentRunStatus.WAITING
         if run.status in {AgentRunStatus.CREATED, AgentRunStatus.WAITING}:
             run = self._repository.transition_run(run.id, AgentRunStatus.WORKING)
         self._trace(run, "teammate.started", "running", {"role": run.role.value})
         tools = self._tools.restrict(ROLE_TOOLS[run.role])
         recovery = RecoveryState(RecoveryPolicy(max_attempts=self._settings.max_tool_attempts))
+        if resumed_from_wait:
+            try:
+                replay_call = self._approval_replay_call(run.id)
+            except ProtectedMessageError:
+                return self._repository.fail_run(run.id, "message_persistence_error")
+            if replay_call is not None:
+                failure = self._record_and_execute_calls(run, tools, (replay_call,), recovery)
+                if failure is not None:
+                    return failure
         while True:
             terminal = self._terminal_before_action(run)
             if terminal is not None:
@@ -1039,6 +1055,51 @@ class TeammateRunner:
             return safe_content
         return self._protected_messages.get(message_id) or safe_content
 
+    def _approval_replay_call(self, run_id: str) -> ToolCall | None:
+        """Recover the exact call paused by an approval boundary for deterministic replay."""
+        messages = self._repository.list_messages(run_id)
+        paused_call_id: str | None = None
+        paused_index: int | None = None
+        for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            if message.role != "tool":
+                continue
+            try:
+                result = json.loads(message.content)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(result, dict) or result.get("error_category") != "approval_required":
+                continue
+            call_id = result.get("call_id")
+            if isinstance(call_id, str) and call_id:
+                paused_call_id = call_id
+                paused_index = index
+            break
+        if paused_call_id is None or paused_index is None:
+            return None
+
+        for message in reversed(messages[:paused_index]):
+            if message.role != "assistant_tool_call":
+                continue
+            try:
+                payload = json.loads(self._provider_content(message.id, message.content))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            calls = payload.get("tool_calls") if isinstance(payload, dict) else None
+            if not isinstance(calls, list):
+                continue
+            for value in calls:
+                if not isinstance(value, dict) or value.get("id") != paused_call_id:
+                    continue
+                name = value.get("name")
+                arguments = value.get("arguments")
+                if not isinstance(name, str) or not isinstance(arguments, dict):
+                    return None
+                # A fresh call ID keeps the provider transcript well-formed while the
+                # approval repository still binds authorization to the exact SQL hash.
+                return ToolCall(str(uuid4()), name, arguments)
+        return None
+
     def _record_and_execute_calls(
         self,
         run: AgentRun,
@@ -1073,6 +1134,12 @@ class TeammateRunner:
                 if not self._try_record_cancelled(run.id, calls[index:], category):
                     return self._repository.fail_run(run.id, "message_persistence_error")
                 return self._finish_boundary(run.id, boundary)
+            try:
+                duplicate_success = call.name == "query_database" and self._call_already_succeeded(
+                    run.id, call
+                )
+            except ProtectedMessageError:
+                return self._repository.fail_run(run.id, "message_persistence_error")
             if recovery.exhausted(signature):
                 result = ToolResult(
                     call.id,
@@ -1102,6 +1169,27 @@ class TeammateRunner:
                         "remaining": 0,
                     },
                     error_category="tool_retry_exhausted",
+                )
+            elif duplicate_success:
+                result = ToolResult(
+                    call.id,
+                    False,
+                    {},
+                    "duplicate_successful_call",
+                    "This exact database query already succeeded; use its existing result.",
+                    retryable=False,
+                )
+                self._trace(
+                    run,
+                    "tool.fallback",
+                    "completed",
+                    {
+                        "tool": call.name,
+                        "category": "duplicate_successful_call",
+                        "attempt": 0,
+                        "remaining": recovery.policy.max_attempts,
+                    },
+                    error_category="duplicate_successful_call",
                 )
             else:
                 try:
@@ -1167,6 +1255,53 @@ class TeammateRunner:
                     return self._repository.fail_run(run.id, "message_persistence_error")
                 return self._repository.transition_run(run.id, AgentRunStatus.WAITING)
         return None
+
+    def _call_already_succeeded(self, run_id: str, call: ToolCall) -> bool:
+        target = json.dumps(
+            {"name": call.name, "arguments": call.arguments},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        call_signatures: dict[str, str] = {}
+        successful: set[str] = set()
+        for message in self._repository.list_messages(run_id):
+            if message.role == "assistant_tool_call":
+                try:
+                    payload = json.loads(self._provider_content(message.id, message.content))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                values = payload.get("tool_calls") if isinstance(payload, dict) else None
+                if not isinstance(values, list):
+                    continue
+                for value in values:
+                    if not isinstance(value, dict):
+                        continue
+                    call_id = value.get("id")
+                    name = value.get("name")
+                    arguments = value.get("arguments")
+                    if (
+                        isinstance(call_id, str)
+                        and isinstance(name, str)
+                        and isinstance(arguments, dict)
+                    ):
+                        call_signatures[call_id] = json.dumps(
+                            {"name": name, "arguments": arguments},
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+            elif message.role == "tool":
+                try:
+                    value = json.loads(message.content)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if not isinstance(value, dict) or value.get("success") is not True:
+                    continue
+                call_id = value.get("call_id")
+                if isinstance(call_id, str) and call_id in call_signatures:
+                    successful.add(call_signatures[call_id])
+        return target in successful
 
     def _record_tool_calls(self, run: AgentRun, calls: tuple[ToolCall, ...]) -> None:
         raw = json.dumps(

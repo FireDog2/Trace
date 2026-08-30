@@ -29,6 +29,7 @@ def test_registry_exposes_exact_mvp_tool_set(tool_registry) -> None:
     assert {schema.name for schema in tool_registry.schemas()} == {
         "inspect_workspace",
         "inspect_dataset",
+        "inspect_database_schema",
         "query_data",
         "query_database",
         "run_python",
@@ -199,7 +200,56 @@ def test_await_teammates_pauses_lead_and_exposes_pending_approval(
 
 
 def test_registry_exposes_database_query_tool(tool_registry) -> None:
-    assert "query_database" in {schema.name for schema in tool_registry.schemas()}
+    names = {schema.name for schema in tool_registry.schemas()}
+    assert {"inspect_database_schema", "query_database"} <= names
+
+
+def test_inspect_database_schema_returns_visible_columns_without_query_approval(
+    tool_context,
+    source_repository,
+    sql_gateway,
+    dataset_service,
+    duckdb_executor,
+    python_executor,
+    workspace,
+    artifact_repository,
+    report_service,
+    task_repository,
+    approval_repository,
+) -> None:
+    source = source_repository.create(
+        tool_context.project_id,
+        "Warehouse",
+        "postgresql://analyst:secret@localhost/portfolio",
+    )
+
+    registry = build_tool_registry(
+        datasets=dataset_service,
+        duckdb_executor=duckdb_executor,
+        python_executor=python_executor,
+        workspace=workspace,
+        artifacts=artifact_repository,
+        reports=report_service,
+        tasks=task_repository,
+        permission_policy=PermissionPolicy(),
+        approvals=approval_repository,
+        sql_gateway=sql_gateway,
+    )
+
+    result = registry.execute(
+        ToolCall(
+            id="inspect-database",
+            name="inspect_database_schema",
+            arguments={"data_source_id": source.id},
+        ),
+        tool_context,
+    )
+
+    assert result.success is True
+    assert result.output["data_source_id"] == source.id
+    assert result.output["tables"] == [
+        {"name": "orders", "columns": ["region", "amount", "customer_email"]}
+    ]
 
 
 def test_query_database_returns_structured_gateway_outcome(

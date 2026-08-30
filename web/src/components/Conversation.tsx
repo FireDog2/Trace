@@ -1,6 +1,6 @@
 import { FormEvent, useState } from "react";
 
-import type { TaskDetail, TaskEvent } from "../types";
+import type { Message, TaskDetail, TaskEvent } from "../types";
 import { Markdown } from "./Markdown";
 
 interface ConversationProps {
@@ -34,7 +34,17 @@ interface ApprovalView {
   toolName: string;
   reason: string;
   status: string;
+  sequence: number;
 }
+
+type ConversationItem =
+  | { kind: "message"; message: Message; sequence: number; order: number }
+  | {
+      kind: "approval";
+      approval: ApprovalView;
+      sequence: number;
+      order: number;
+    };
 
 export function Conversation({
   task,
@@ -48,7 +58,16 @@ export function Conversation({
   const [deciding, setDeciding] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadedFileName, setUploadedFileName] = useState("");
-  const approvals = approvalViews(events);
+  const firstMessage = task.messages[0];
+  const persistedObjectiveId =
+    firstMessage?.role === "user" &&
+    firstMessage.content.trim() === task.objective.trim()
+      ? firstMessage.id
+      : null;
+  const items = conversationItems(
+    task.messages.filter((message) => message.id !== persistedObjectiveId),
+    events,
+  );
   const failed = task.status === "failed";
   const active = ACTIVE_STATUSES.has(task.status);
   const composerLocked = active || task.status === "cancelled";
@@ -105,6 +124,12 @@ export function Conversation({
       </header>
 
       <div className="conversation-scroll">
+        <div className="message-list conversation-opening">
+          <article className="message user">
+            <span>你</span>
+            <p>{task.objective}</p>
+          </article>
+        </div>
         {failed && (
           <section className="task-retry-guide" role="alert">
             <span>RETRY AVAILABLE</span>
@@ -147,12 +172,58 @@ export function Conversation({
         </section>
 
         <div className="message-list" aria-live="polite">
-          {task.messages.length === 0 && (
+          {items.length === 0 && (
             <p className="empty-note">
               对话负责表达意图，正式工作会沉淀到左侧任务中。
             </p>
           )}
-          {task.messages.map((message) => {
+          {items.map((item) => {
+            if (item.kind === "approval") {
+              const approval = item.approval;
+              return (
+                <article
+                  className={`approval-card ${approval.status}`}
+                  key={`approval-${approval.id}`}
+                >
+                  <span className="approval-kicker">
+                    PERMISSION · {approval.toolName}
+                  </span>
+                  <strong>
+                    {approval.status === "pending"
+                      ? "需要你的批准"
+                      : "审批已处理"}
+                  </strong>
+                  <p>{approval.reason}</p>
+                  {approval.status === "pending" ? (
+                    <div className="approval-actions">
+                      <button
+                        type="button"
+                        disabled={deciding === approval.id}
+                        aria-label="拒绝操作"
+                        onClick={() => void decide(approval.id, false)}
+                      >
+                        拒绝
+                      </button>
+                      <button
+                        type="button"
+                        disabled={deciding === approval.id}
+                        aria-label="批准操作"
+                        onClick={() => void decide(approval.id, true)}
+                      >
+                        批准一次
+                      </button>
+                    </div>
+                  ) : (
+                    <small>
+                      {approval.status === "approved"
+                        ? "已批准，任务将继续"
+                        : "已拒绝"}
+                    </small>
+                  )}
+                </article>
+              );
+            }
+            const message = item.message;
             const roleLabel =
               message.role === "user"
                 ? "你"
@@ -182,53 +253,6 @@ export function Conversation({
             );
           })}
         </div>
-
-        {approvals.length > 0 && (
-          <section className="approval-stack" aria-label="待审批操作">
-            {approvals.map((approval) => (
-              <article
-                className={`approval-card ${approval.status}`}
-                key={approval.id}
-              >
-                <span className="approval-kicker">
-                  PERMISSION · {approval.toolName}
-                </span>
-                <strong>
-                  {approval.status === "pending"
-                    ? "需要你的批准"
-                    : "审批已处理"}
-                </strong>
-                <p>{approval.reason}</p>
-                {approval.status === "pending" ? (
-                  <div className="approval-actions">
-                    <button
-                      type="button"
-                      disabled={deciding === approval.id}
-                      aria-label="拒绝操作"
-                      onClick={() => void decide(approval.id, false)}
-                    >
-                      拒绝
-                    </button>
-                    <button
-                      type="button"
-                      disabled={deciding === approval.id}
-                      aria-label="批准操作"
-                      onClick={() => void decide(approval.id, true)}
-                    >
-                      批准一次
-                    </button>
-                  </div>
-                ) : (
-                  <small>
-                    {approval.status === "approved"
-                      ? "已批准，任务将继续"
-                      : "已拒绝"}
-                  </small>
-                )}
-              </article>
-            ))}
-          </section>
-        )}
       </div>
 
       <form className="message-composer" onSubmit={submit}>
@@ -311,7 +335,10 @@ export function Conversation({
 
 function approvalViews(events: TaskEvent[]): ApprovalView[] {
   const approvals = new Map<string, ApprovalView>();
-  for (const event of events) {
+  const orderedEvents = [...events].sort(
+    (left, right) => left.sequence - right.sequence,
+  );
+  for (const event of orderedEvents) {
     const approvalId = String(event.payload.approval_id ?? "");
     if (!approvalId) continue;
     if (event.type === "approval.requested") {
@@ -320,6 +347,7 @@ function approvalViews(events: TaskEvent[]): ApprovalView[] {
         toolName: String(event.payload.tool_name ?? "unknown action"),
         reason: String(event.payload.reason ?? "该操作超出自动权限边界"),
         status: "pending",
+        sequence: event.sequence,
       });
     } else if (event.type === "approval.decided") {
       const current = approvals.get(approvalId);
@@ -332,4 +360,35 @@ function approvalViews(events: TaskEvent[]): ApprovalView[] {
     }
   }
   return [...approvals.values()];
+}
+
+function conversationItems(
+  messages: Message[],
+  events: TaskEvent[],
+): ConversationItem[] {
+  const messageSequences = new Map<string, number>();
+  for (const event of events) {
+    if (event.type !== "message.created") continue;
+    const messageId = String(event.payload.message_id ?? "");
+    if (messageId) messageSequences.set(messageId, event.sequence);
+  }
+  const fallbackSequence =
+    events.reduce((latest, event) => Math.max(latest, event.sequence), 0) + 1;
+  const items: ConversationItem[] = messages.map((message, order) => ({
+    kind: "message",
+    message,
+    sequence: messageSequences.get(message.id) ?? fallbackSequence + order,
+    order,
+  }));
+  items.push(
+    ...approvalViews(events).map((approval, order) => ({
+      kind: "approval" as const,
+      approval,
+      sequence: approval.sequence,
+      order: messages.length + order,
+    })),
+  );
+  return items.sort(
+    (left, right) => left.sequence - right.sequence || left.order - right.order,
+  );
 }

@@ -12,6 +12,8 @@ interface ProjectNavProps {
   onStartNewTask(): void;
   onCreateProject(name: string): Promise<void>;
   onRenameProject(id: string, name: string): Promise<void>;
+  onPinTask(id: string, pinned: boolean): Promise<void>;
+  onDeleteTask(id: string): Promise<void>;
   modelConfiguration: ModelConfigurationStatus | null;
   onOpenModelSettings(): void;
   onOpenDataSources(): void;
@@ -31,6 +33,8 @@ export function ProjectNav({
   onStartNewTask,
   onCreateProject,
   onRenameProject,
+  onPinTask,
+  onDeleteTask,
   modelConfiguration,
   onOpenModelSettings,
   onOpenDataSources,
@@ -48,6 +52,9 @@ export function ProjectNav({
     null,
   );
   const [renameValue, setRenameValue] = useState("");
+  const [openTaskMenuId, setOpenTaskMenuId] = useState<string | null>(null);
+  const [deleteCandidate, setDeleteCandidate] = useState<Task | null>(null);
+  const [deletingTask, setDeletingTask] = useState(false);
 
   useEffect(() => {
     if (
@@ -57,6 +64,12 @@ export function ProjectNav({
       setExpandedProjectId(null);
     }
   }, [expandedProjectId, projects]);
+
+  useEffect(() => {
+    if (openTaskMenuId && !tasks.some((task) => task.id === openTaskMenuId)) {
+      setOpenTaskMenuId(null);
+    }
+  }, [openTaskMenuId, tasks]);
 
   async function submitProject(event: FormEvent) {
     event.preventDefault();
@@ -96,6 +109,28 @@ export function ProjectNav({
     if (event.key === "Escape") {
       setRenamingProjectId(null);
       setRenameValue("");
+    }
+  }
+
+  async function togglePinned(task: Task) {
+    try {
+      await onPinTask(task.id, !task.pinned);
+      setOpenTaskMenuId(null);
+    } catch {
+      // The parent displays the API error without losing the current menu context.
+    }
+  }
+
+  async function confirmDelete() {
+    if (!deleteCandidate) return;
+    setDeletingTask(true);
+    try {
+      await onDeleteTask(deleteCandidate.id);
+      setDeleteCandidate(null);
+    } catch {
+      // Keep the confirmation open so the user can retry after the parent reports the error.
+    } finally {
+      setDeletingTask(false);
     }
   }
 
@@ -311,22 +346,100 @@ export function ProjectNav({
                         <span aria-hidden="true">＋</span> 新对话
                       </button>
                       <ul>
-                        {tasks.map((task) => (
-                          <li key={task.id}>
-                            <button
-                              type="button"
+                        {tasks.map((task) => {
+                          const deleteAllowed = [
+                            "completed",
+                            "failed",
+                            "cancelled",
+                          ].includes(task.status);
+                          return (
+                            <li
+                              key={task.id}
                               className={
-                                selectedTaskId === task.id
-                                  ? "task-link active"
-                                  : "task-link"
+                                task.pinned ? "task-node pinned" : "task-node"
                               }
-                              onClick={() => onSelectTask(task.id)}
                             >
-                              <span className={`status-pip ${task.status}`} />
-                              <span>{task.objective}</span>
-                            </button>
-                          </li>
-                        ))}
+                              <button
+                                type="button"
+                                className={
+                                  selectedTaskId === task.id
+                                    ? "task-link active"
+                                    : "task-link"
+                                }
+                                onClick={() => onSelectTask(task.id)}
+                              >
+                                <span className={`status-pip ${task.status}`} />
+                                <span className="task-objective">
+                                  {task.objective}
+                                </span>
+                                {task.pinned && (
+                                  <span
+                                    className="task-pin"
+                                    aria-label="已置顶"
+                                  >
+                                    ◆
+                                  </span>
+                                )}
+                              </button>
+                              <div
+                                className="task-menu-anchor"
+                                onBlur={(event) => {
+                                  if (
+                                    !event.currentTarget.contains(
+                                      event.relatedTarget,
+                                    )
+                                  ) {
+                                    setOpenTaskMenuId(null);
+                                  }
+                                }}
+                              >
+                                <button
+                                  type="button"
+                                  className="task-more"
+                                  aria-label={`对话操作 ${task.objective}`}
+                                  aria-haspopup="menu"
+                                  aria-expanded={openTaskMenuId === task.id}
+                                  onClick={() =>
+                                    setOpenTaskMenuId((current) =>
+                                      current === task.id ? null : task.id,
+                                    )
+                                  }
+                                >
+                                  •••
+                                </button>
+                                {openTaskMenuId === task.id && (
+                                  <div className="task-menu" role="menu">
+                                    <button
+                                      type="button"
+                                      role="menuitem"
+                                      onClick={() => void togglePinned(task)}
+                                    >
+                                      <span aria-hidden="true">◆</span>
+                                      {task.pinned ? "取消置顶" : "置顶"}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      role="menuitem"
+                                      className="danger"
+                                      disabled={!deleteAllowed}
+                                      title={
+                                        deleteAllowed
+                                          ? undefined
+                                          : "请等待分析完成后再删除"
+                                      }
+                                      onClick={() => {
+                                        setOpenTaskMenuId(null);
+                                        setDeleteCandidate(task);
+                                      }}
+                                    >
+                                      <span aria-hidden="true">×</span>删除
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            </li>
+                          );
+                        })}
                         {tasks.length === 0 && (
                           <li className="rail-empty">还没有对话</li>
                         )}
@@ -341,6 +454,51 @@ export function ProjectNav({
           <p className="rail-empty">还没有项目，先建立一个分析空间。</p>
         )}
       </section>
+      {deleteCandidate && (
+        <div
+          className="task-delete-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !deletingTask) {
+              setDeleteCandidate(null);
+            }
+          }}
+        >
+          <section
+            className="task-delete-confirmation"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="delete-task-title"
+            onKeyDown={(event) => {
+              if (event.key === "Escape" && !deletingTask) {
+                setDeleteCandidate(null);
+              }
+            }}
+          >
+            <span>DELETE CONVERSATION</span>
+            <h2 id="delete-task-title">删除这条对话？</h2>
+            <p>{deleteCandidate.objective}</p>
+            <small>对话将从任务列表移除；源数据和审计记录会保留。</small>
+            <div>
+              <button
+                type="button"
+                autoFocus
+                disabled={deletingTask}
+                onClick={() => setDeleteCandidate(null)}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="danger"
+                disabled={deletingTask}
+                onClick={() => void confirmDelete()}
+              >
+                {deletingTask ? "删除中…" : "确认删除"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </nav>
   );
 }

@@ -50,6 +50,10 @@ class InvalidTaskTransition(RepositoryError):
     """Raised when a task state change violates the lifecycle."""
 
 
+class TaskDeletionConflict(RepositoryError):
+    """Raised when an active task cannot be safely deleted."""
+
+
 class ProtectedMessageError(RepositoryError):
     """Protected agent message content cannot be stored or recovered safely."""
 
@@ -243,13 +247,44 @@ class TaskRepository:
     @sqlite_connection_guarded
     def get(self, task_id: str) -> Task:
         row = self._connection.execute(
-            "SELECT id, project_id, objective, status, created_at, updated_at "
-            "FROM tasks WHERE id = ?",
+            "SELECT id, project_id, objective, status, created_at, updated_at, pinned "
+            "FROM tasks WHERE id = ? AND deleted_at IS NULL",
             (task_id,),
         ).fetchone()
         if row is None:
             raise RecordNotFoundError(f"Task not found: {task_id}")
         return _task_from_row(row)
+
+    @sqlite_connection_guarded
+    def set_pinned(self, task_id: str, pinned: bool) -> Task:
+        self.get(task_id)
+        cursor = self._connection.execute(
+            "UPDATE tasks SET pinned = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+            (int(pinned), utc_now(), task_id),
+        )
+        self._connection.commit()
+        if cursor.rowcount == 0:
+            raise RecordNotFoundError(f"Task not found: {task_id}")
+        return self.get(task_id)
+
+    @sqlite_connection_guarded
+    def soft_delete(self, task_id: str) -> None:
+        task = self.get(task_id)
+        if task.status not in {
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+        }:
+            raise TaskDeletionConflict("Active tasks cannot be deleted")
+        deleted_at = utc_now()
+        cursor = self._connection.execute(
+            "UPDATE tasks SET deleted_at = ?, pinned = 0, updated_at = ? "
+            "WHERE id = ? AND deleted_at IS NULL",
+            (deleted_at, deleted_at, task_id),
+        )
+        self._connection.commit()
+        if cursor.rowcount == 0:
+            raise RecordNotFoundError(f"Task not found: {task_id}")
 
     @sqlite_connection_guarded
     def transition(self, task_id: str, target: TaskStatus) -> Task:
@@ -288,6 +323,7 @@ class TaskRepository:
             status=target,
             created_at=current.created_at,
             updated_at=updated_at,
+            pinned=current.pinned,
         )
 
     def _complete_latest_plan_in_transaction(self, task_id: str) -> None:
@@ -329,6 +365,7 @@ class TaskRepository:
             status=TaskStatus.UNDERSTANDING,
             created_at=current.created_at,
             updated_at=updated_at,
+            pinned=current.pinned,
         )
 
     @sqlite_connection_guarded
@@ -578,8 +615,10 @@ class TaskRepository:
     @sqlite_connection_guarded
     def list_for_project(self, project_id: str) -> tuple[Task, ...]:
         rows = self._connection.execute(
-            "SELECT id, project_id, objective, status, created_at, updated_at "
-            "FROM tasks WHERE project_id = ? ORDER BY created_at, rowid",
+            "SELECT id, project_id, objective, status, created_at, updated_at, pinned "
+            "FROM tasks WHERE project_id = ? AND deleted_at IS NULL "
+            "ORDER BY pinned DESC, "
+            "CASE WHEN pinned = 1 THEN updated_at END DESC, created_at, rowid",
             (project_id,),
         ).fetchall()
         return tuple(_task_from_row(row) for row in rows)
@@ -846,6 +885,7 @@ def _task_from_row(row: sqlite3.Row) -> Task:
         status=TaskStatus(row["status"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        pinned=bool(row["pinned"]),
     )
 
 

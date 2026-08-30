@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from data_analysis_agent.data_sources import CredentialError
 from data_analysis_agent.datasets import DatasetService
 from data_analysis_agent.domain import ArtifactType, PlanStepDraft, TaskStatus
 from data_analysis_agent.execution import (
@@ -117,6 +118,10 @@ class QueryDataInput(ToolInput):
 class QueryDatabaseInput(ToolInput):
     data_source_id: str
     sql: str = Field(min_length=1, max_length=50_000)
+
+
+class InspectDatabaseSchemaInput(ToolInput):
+    data_source_id: str
 
 
 class SearchBusinessKnowledgeInput(ToolInput):
@@ -609,6 +614,42 @@ def build_tool_registry(
             retryable=outcome.retryable,
         )
 
+    def inspect_database_schema(
+        arguments: ToolInput,
+        context: ToolContext,
+    ) -> HandlerResult:
+        del context
+        assert isinstance(arguments, InspectDatabaseSchemaInput)
+        if sql_gateway is None:
+            raise ToolHandlerError(
+                "PostgreSQL analysis is not configured",
+                category="database_unavailable",
+                retryable=False,
+            )
+        try:
+            catalog = sql_gateway.inspect_schema(arguments.data_source_id)
+        except CredentialError as exc:
+            raise ToolHandlerError(
+                "Data source credentials are unavailable",
+                category="credential_error",
+                retryable=False,
+            ) from exc
+        except Exception as exc:
+            raise ToolHandlerError(
+                "Database schema could not be inspected",
+                category="connection_error",
+                retryable=True,
+            ) from exc
+        return HandlerResult(
+            {
+                "data_source_id": arguments.data_source_id,
+                "tables": [
+                    {"name": table, "columns": list(columns)}
+                    for table, columns in sorted(catalog.items())
+                ],
+            }
+        )
+
     def search_business_knowledge(arguments: ToolInput, context: ToolContext) -> HandlerResult:
         assert isinstance(arguments, SearchBusinessKnowledgeInput)
         if knowledge is None:
@@ -886,6 +927,12 @@ def build_tool_registry(
         definitions = (
             definitions[:3]
             + (
+                ToolDefinition(
+                    "inspect_database_schema",
+                    "Inspect visible PostgreSQL tables and columns without reading row data.",
+                    InspectDatabaseSchemaInput,
+                    inspect_database_schema,
+                ),
                 ToolDefinition(
                     "query_database",
                     "Run a governed, read-only PostgreSQL query against a configured data source.",

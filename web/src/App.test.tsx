@@ -148,6 +148,16 @@ function fakeApiWithCompletedTask(
         },
       ],
     }),
+    setTaskPinned: async (taskId, pinned) => ({
+      id: taskId,
+      project_id: "project-1",
+      objective: "华东利润诊断",
+      status: "completed",
+      created_at: "2026-08-05T00:00:00Z",
+      updated_at: "2026-08-05T00:06:00Z",
+      pinned,
+    }),
+    deleteTask: async () => undefined,
     listDataSources: async () => [],
     createDataSource: async () => {
       throw new Error("Not used in this test");
@@ -373,6 +383,50 @@ describe("analysis workbench", () => {
 
     expect(await screen.findByRole("button", { name: "新对话" })).toBeVisible();
     expect(screen.getByRole("button", { name: "华东利润诊断" })).toBeVisible();
+  });
+
+  it("pins a conversation from its overflow menu", async () => {
+    const api = fakeApiWithCompletedTask();
+    const pin = vi.fn(api.setTaskPinned);
+    api.setTaskPinned = pin;
+    render(<App api={api} />);
+
+    fireEvent.doubleClick(
+      await screen.findByRole("button", { name: "2026 Business Review" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "对话操作 华东利润诊断" }),
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "置顶" }));
+
+    await waitFor(() => expect(pin).toHaveBeenCalledWith("task-1", true));
+    expect(await screen.findByLabelText("已置顶")).toBeVisible();
+  });
+
+  it("requires confirmation before deleting a conversation", async () => {
+    const api = fakeApiWithCompletedTask();
+    const remove = vi.fn(api.deleteTask);
+    api.deleteTask = remove;
+    render(<App api={api} />);
+
+    fireEvent.doubleClick(
+      await screen.findByRole("button", { name: "2026 Business Review" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "对话操作 华东利润诊断" }),
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
+
+    expect(
+      screen.getByRole("alertdialog", { name: "删除这条对话？" }),
+    ).toBeVisible();
+    expect(remove).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+
+    await waitFor(() => expect(remove).toHaveBeenCalledWith("task-1"));
+    expect(
+      screen.queryByRole("button", { name: "对话操作 华东利润诊断" }),
+    ).not.toBeInTheDocument();
   });
 
   it("opens a visibly selected and focused new conversation draft", async () => {

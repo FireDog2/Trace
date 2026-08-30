@@ -17,6 +17,7 @@ from fastapi import (
     File,
     HTTPException,
     Query,
+    Response,
     UploadFile,
     status,
 )
@@ -69,6 +70,7 @@ from data_analysis_agent.repositories import (
     ProjectRepository,
     RecordNotFoundError,
     RepositoryError,
+    TaskDeletionConflict,
     TaskRepository,
 )
 from data_analysis_agent.scope import GLOBAL_PROJECT_ID
@@ -202,6 +204,11 @@ class TaskResponse(ApiModel):
     status: str
     created_at: str
     updated_at: str
+    pinned: bool
+
+
+class PinTaskRequest(ApiModel):
+    pinned: bool
 
 
 class MessageResponse(ApiModel):
@@ -1195,6 +1202,21 @@ def create_app(
             ],
         )
 
+    @app.put("/api/tasks/{task_id}/pin", response_model=TaskResponse)
+    def set_task_pinned(task_id: str, request: PinTaskRequest) -> TaskResponse:
+        return _task_response(services.tasks.set_pinned(task_id, request.pinned))
+
+    @app.delete("/api/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
+    def delete_task(task_id: str) -> Response:
+        try:
+            services.tasks.soft_delete(task_id)
+        except TaskDeletionConflict as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Wait for the task to finish before deleting it",
+            ) from exc
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
     @app.get("/api/tasks/{task_id}/agents", response_model=list[AgentRunResponse])
     def list_agents(task_id: str) -> list[AgentRunResponse]:
         services.tasks.get(task_id)
@@ -1540,10 +1562,22 @@ def _resume_approved_task(
     )
     try:
         manager = services.team_manager
+
+        def resume_waiting_teammates() -> None:
+            assert manager is not None
+            resumed = manager.resume_waiting(task_id)
+            run_ids = tuple(run.id for run in resumed)
+            if run_ids:
+                manager.await_runs(
+                    run_ids,
+                    min(settings.teammate_timeout_seconds, 120),
+                )
+
         services.agent().resume_approval(
             task_id,
-            (lambda: manager.resume_waiting(task_id)) if manager is not None else None,
+            resume_waiting_teammates if manager is not None else None,
         )
+
     finally:
         try:
             if services.team_manager is not None:
@@ -1612,6 +1646,7 @@ def _task_response(task: Task) -> TaskResponse:
         status=task.status.value,
         created_at=task.created_at,
         updated_at=task.updated_at,
+        pinned=task.pinned,
     )
 
 

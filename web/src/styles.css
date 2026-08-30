@@ -830,6 +830,163 @@ p {
   min-height: 31px;
   padding: 5px 7px;
 }
+.conversation-tree .task-node {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 26px;
+  align-items: center;
+}
+.conversation-tree .task-link {
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+}
+.task-objective {
+  overflow: hidden;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-pin {
+  color: #7f9fff;
+  font-size: 6px;
+  filter: drop-shadow(0 0 4px rgba(95, 132, 255, 0.45));
+}
+.task-menu-anchor {
+  position: relative;
+}
+.task-more {
+  width: 26px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: transparent;
+  font: 8px var(--mono);
+  cursor: pointer;
+}
+.task-node:hover .task-more,
+.task-more:focus-visible,
+.task-more[aria-expanded="true"] {
+  background: rgba(255, 255, 255, 0.045);
+  color: #8da2c8;
+}
+.task-menu {
+  position: absolute;
+  z-index: 30;
+  top: 29px;
+  right: 0;
+  display: grid;
+  width: 118px;
+  gap: 2px;
+  padding: 5px;
+  border: 1px solid rgba(132, 157, 205, 0.22);
+  border-radius: 8px;
+  background: #101d36;
+  box-shadow: 0 14px 32px rgba(1, 8, 23, 0.42);
+}
+.task-menu button {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  min-height: 30px;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #c4d0e7;
+  font-size: 9px;
+  text-align: left;
+  cursor: pointer;
+}
+.task-menu button:hover,
+.task-menu button:focus-visible {
+  background: rgba(92, 127, 236, 0.15);
+  color: #fff;
+  outline: 0;
+}
+.task-menu button.danger {
+  color: #ef9d9d;
+}
+.task-menu button.danger:hover,
+.task-menu button.danger:focus-visible {
+  background: rgba(200, 81, 81, 0.14);
+}
+.task-menu button:disabled {
+  color: #5f6d87;
+  cursor: not-allowed;
+}
+.task-delete-backdrop {
+  position: fixed;
+  z-index: 120;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(3, 10, 24, 0.68);
+  backdrop-filter: blur(8px);
+}
+.task-delete-confirmation {
+  width: min(420px, 100%);
+  padding: 22px;
+  border: 1px solid rgba(229, 113, 113, 0.42);
+  border-radius: 12px;
+  background: #101a2e;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.44);
+  color: #dce5f7;
+}
+.task-delete-confirmation > span {
+  color: #e48686;
+  font: 8px var(--mono);
+  letter-spacing: 0.1em;
+}
+.task-delete-confirmation h2 {
+  margin-top: 8px;
+  color: #fff;
+  font-size: 17px;
+}
+.task-delete-confirmation p {
+  max-height: 72px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  overflow: auto;
+  border-left: 2px solid #c85151;
+  background: rgba(200, 81, 81, 0.08);
+  color: #d7dfef;
+  font-size: 10px;
+  line-height: 1.55;
+}
+.task-delete-confirmation small {
+  display: block;
+  margin-top: 10px;
+  color: #8797b3;
+  font-size: 9px;
+  line-height: 1.5;
+}
+.task-delete-confirmation > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+.task-delete-confirmation button {
+  min-height: 34px;
+  padding: 7px 13px;
+  border: 1px solid #354766;
+  border-radius: 7px;
+  background: #172641;
+  color: #c9d4e8;
+  font-size: 9px;
+  cursor: pointer;
+}
+.task-delete-confirmation button.danger {
+  border-color: #c85151;
+  background: #c85151;
+  color: white;
+}
+.task-delete-confirmation button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 
 /* Conversation */
 .conversation-panel {

@@ -57,7 +57,10 @@ def test_migrate_creates_versioned_core_tables(db_connection) -> None:
         (15,),
         (16,),
         (17,),
+        (18,),
     ]
+    task_columns = {row[1] for row in db_connection.execute("PRAGMA table_info(tasks)")}
+    assert {"pinned", "deleted_at"} <= task_columns
     agent_run_columns = {row[1] for row in db_connection.execute("PRAGMA table_info(agent_runs)")}
     assert {
         "turns_used",

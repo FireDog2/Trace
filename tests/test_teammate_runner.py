@@ -33,12 +33,19 @@ class Protector:
 def test_restricted_registry_exposes_only_sql_role_tools(tool_registry, tool_context) -> None:
     """Removing a tool from a role registry prevents all execution side effects."""
     restricted = tool_registry.restrict(
-        {"inspect_workspace", "inspect_dataset", "query_data", "query_database"}
+        {
+            "inspect_workspace",
+            "inspect_dataset",
+            "inspect_database_schema",
+            "query_data",
+            "query_database",
+        }
     )
 
     assert {item.name for item in restricted.schemas()} == {
         "inspect_workspace",
         "inspect_dataset",
+        "inspect_database_schema",
         "query_data",
         "query_database",
     }
@@ -293,6 +300,135 @@ def test_sql_teammate_sql_and_preview_are_encrypted_then_replayed(
     assert sql.encode() not in bytes(ciphertext)
     replayed = "\n".join(message.content for message in provider.requests[-1].messages)
     assert sql in replayed and "person@example.test" in replayed
+
+
+def test_sql_teammate_replays_exact_approved_call_before_asking_model(
+    settings, db_connection, task
+) -> None:
+    """Approval resumes the bound SQL call instead of asking the model to regenerate it."""
+    sql = "SELECT logistics_cost FROM region_operations"
+
+    class Registry:
+        def __init__(self) -> None:
+            self.calls: list[ToolCall] = []
+
+        def restrict(self, allowed):
+            assert "query_database" in allowed
+            return self
+
+        def schemas(self):
+            return ()
+
+        def execute(self, call, context):
+            del context
+            self.calls.append(call)
+            if len(self.calls) == 1:
+                return ToolResult(
+                    call.id,
+                    False,
+                    {},
+                    "approval_required",
+                    "Approval required",
+                    pauses_task=True,
+                )
+            return ToolResult(
+                call.id,
+                True,
+                {"status": "succeeded", "artifact_id": "approved-result"},
+            )
+
+    repository = TeamRepository(db_connection)
+    run = repository.create_run(task.id, AgentRole.SQL, "Read the restricted cost field")
+    provider = ScriptedProvider(
+        [
+            ModelResponse(
+                "",
+                (
+                    ToolCall(
+                        "restricted-query",
+                        "query_database",
+                        {"data_source_id": "operations", "sql": sql},
+                    ),
+                ),
+            ),
+            ModelResponse('{"artifact_id":"approved-result"}', ()),
+        ]
+    )
+    registry = Registry()
+    runner = TeammateRunner(
+        settings=settings,
+        provider=provider,
+        tools=registry,
+        repository=repository,
+        secret_protector=Protector(),
+    )
+
+    paused = runner.run(run.id)
+    completed = runner.run(run.id)
+
+    assert paused.status is AgentRunStatus.WAITING
+    assert completed.status is AgentRunStatus.COMPLETED
+    assert len(registry.calls) == 2
+    assert registry.calls[1].arguments == registry.calls[0].arguments
+    assert registry.calls[1].id != registry.calls[0].id
+    assert len(provider.requests) == 2
+
+
+def test_sql_teammate_blocks_an_exact_query_after_it_already_succeeded(
+    settings, db_connection, task
+) -> None:
+    sql = "SELECT month, region, logistics_cost FROM region_operations ORDER BY month, region"
+
+    class Registry:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def restrict(self, allowed):
+            assert "query_database" in allowed
+            return self
+
+        def schemas(self):
+            return ()
+
+        def execute(self, call, context):
+            del context
+            self.calls += 1
+            return ToolResult(
+                call.id,
+                True,
+                {"status": "succeeded", "artifact_id": "existing-result"},
+            )
+
+    def query(call_id: str) -> ToolCall:
+        return ToolCall(
+            call_id,
+            "query_database",
+            {"data_source_id": "operations", "sql": sql},
+        )
+
+    repository = TeamRepository(db_connection)
+    run = repository.create_run(task.id, AgentRole.SQL, "Read logistics cost")
+    provider = ScriptedProvider(
+        [
+            ModelResponse("", (query("first"),)),
+            ModelResponse("", (query("duplicate"),)),
+            ModelResponse('{"artifact_id":"existing-result"}', ()),
+        ]
+    )
+    registry = Registry()
+
+    completed = TeammateRunner(
+        settings=settings,
+        provider=provider,
+        tools=registry,
+        repository=repository,
+        secret_protector=Protector(),
+    ).run(run.id)
+
+    assert completed.status is AgentRunStatus.COMPLETED
+    assert registry.calls == 1
+    duplicate_result = json.loads(provider.requests[-1].messages[-1].content)
+    assert duplicate_result["error_category"] == "duplicate_successful_call"
 
 
 def test_teammate_cancellation_before_each_call_and_remaining_call_results(
