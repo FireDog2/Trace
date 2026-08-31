@@ -25,6 +25,9 @@ interface AppProps {
   api?: ApiClient;
 }
 
+const FULL_ANALYSIS_EXAMPLE =
+  "Why did profit in the East region decline in March versus February? Quantify the revenue, product-cost, and logistics-cost drivers by category; create a comparison chart; and publish an evidence-linked management report with the first issue to investigate.";
+
 export function App({ api: suppliedApi }: AppProps) {
   const api = useMemo(() => suppliedApi ?? new HttpApiClient(), [suppliedApi]);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -156,6 +159,34 @@ export function App({ api: suppliedApi }: AppProps) {
       setError(null);
     } catch (cause) {
       setError((cause as Error).message);
+    }
+  }
+
+  async function deleteProject(projectId: string) {
+    try {
+      await api.deleteProject(projectId);
+      const deletedIndex = projects.findIndex(
+        (project) => project.id === projectId,
+      );
+      const remaining = projects.filter((project) => project.id !== projectId);
+      setProjects(remaining);
+      if (selectedProjectId === projectId) {
+        const nextIndex = Math.min(
+          Math.max(deletedIndex, 0),
+          remaining.length - 1,
+        );
+        setSelectedProjectId(remaining[nextIndex]?.id ?? null);
+        setSelectedTaskId(null);
+        setTask(null);
+        setEvents([]);
+        setAgents([]);
+        setRuns([]);
+        setTraceEvents([]);
+      }
+      setError(null);
+    } catch (cause) {
+      setError((cause as Error).message);
+      throw cause;
     }
   }
 
@@ -308,14 +339,14 @@ export function App({ api: suppliedApi }: AppProps) {
             ? "project-drawer-toggle force-visible"
             : "project-drawer-toggle"
         }
-        aria-label="打开任务台"
+        aria-label="Open workbench"
         aria-expanded={projectNavOpen}
         onClick={() => {
           setProjectNavCollapsed(false);
           setProjectNavOpen(true);
         }}
       >
-        <span aria-hidden="true">TRACE</span>任务台
+        <span aria-hidden="true">TRACE</span>Workbench
       </button>
       {task && (
         <button
@@ -325,14 +356,14 @@ export function App({ api: suppliedApi }: AppProps) {
               ? "artifact-drawer-toggle force-visible"
               : "artifact-drawer-toggle"
           }
-          aria-label="打开证据与运行"
+          aria-label="Open evidence and runs"
           aria-expanded={!artifactWorkspaceCollapsed && artifactWorkspaceOpen}
           onClick={() => {
             setArtifactWorkspaceCollapsed(false);
             setArtifactWorkspaceOpen(true);
           }}
         >
-          证据与运行<span aria-hidden="true">{task.artifacts.length}</span>
+          Evidence & runs<span aria-hidden="true">{task.artifacts.length}</span>
         </button>
       )}
 
@@ -361,6 +392,7 @@ export function App({ api: suppliedApi }: AppProps) {
           }}
           onCreateProject={createProject}
           onRenameProject={renameProject}
+          onDeleteProject={deleteProject}
           onPinTask={setTaskPinned}
           onDeleteTask={deleteTask}
           modelConfiguration={modelConfiguration}
@@ -391,25 +423,55 @@ export function App({ api: suppliedApi }: AppProps) {
           <h1>
             {selectedProjectId
               ? tasks.length
-                ? "开始新对话"
-                : "提出第一个经营问题"
-              : "创建一个分析项目"}
+                ? "Start a new conversation"
+                : "Ask your first business question"
+              : "Create an analysis project"}
           </h1>
           <p>
             {selectedProjectId
               ? tasks.length
-                ? "输入第一个问题后，这条对话会出现在左侧项目中。"
-                : "Agent 会检查项目数据、制定计划并留下可复现的代码与证据。"
-              : "项目是数据、业务口径、分析任务和报告的长期容器。"}
+                ? "Once you enter your first question, this conversation will appear under the project on the left."
+                : "The agent will inspect the project data, build a plan, and leave reproducible code and evidence."
+              : "Projects are long-term containers for data, business definitions, analysis tasks, and reports."}
           </p>
           {selectedProjectId && (
+            <section
+              className="example-brief"
+              aria-labelledby="full-analysis-example-title"
+            >
+              <div className="example-brief-copy">
+                <span>FULL OUTPUT EXAMPLE</span>
+                <strong id="full-analysis-example-title">
+                  March profit diagnosis
+                </strong>
+                <p>
+                  Start with a decision-ready brief instead of a one-line
+                  question.
+                </p>
+              </div>
+              <ul aria-label="Example analysis deliverables">
+                <li>KPI delta</li>
+                <li>Driver bridge</li>
+                <li>Category breakdown</li>
+                <li>Comparison chart</li>
+                <li>Management report</li>
+              </ul>
+              <button
+                type="button"
+                onClick={() => setObjective(FULL_ANALYSIS_EXAMPLE)}
+              >
+                Use this brief <span aria-hidden="true">→</span>
+              </button>
+            </section>
+          )}
+          {selectedProjectId && (
             <form className="objective-form" onSubmit={createTask}>
-              <label htmlFor="objective">分析目标</label>
+              <label htmlFor="objective">Analysis objective</label>
               <textarea
                 id="objective"
                 value={objective}
                 autoFocus
-                placeholder="例如：为什么华东区本季度利润下降？"
+                placeholder={FULL_ANALYSIS_EXAMPLE}
                 onChange={(event) => setObjective(event.target.value)}
               />
               <div className="objective-actions">
@@ -423,15 +485,15 @@ export function App({ api: suppliedApi }: AppProps) {
                   <span aria-hidden="true">＋</span>
                   <span>
                     {initialUploading
-                      ? "正在上传…"
+                      ? "Uploading…"
                       : initialUploadName
-                        ? `已添加 ${initialUploadName}`
-                        : "添加 CSV / Excel"}
+                        ? `Added ${initialUploadName}`
+                        : "Add CSV / Excel"}
                   </span>
                   <input
                     type="file"
                     accept=".csv,.xlsx"
-                    aria-label="在提出问题前上传分析文件"
+                    aria-label="Upload an analysis file before asking a question"
                     disabled={initialUploading}
                     onChange={(event) => {
                       const file = event.target.files?.[0];
@@ -441,7 +503,7 @@ export function App({ api: suppliedApi }: AppProps) {
                   />
                 </label>
                 <button type="submit" disabled={!objective.trim()}>
-                  开始分析
+                  Start analysis
                 </button>
               </div>
             </form>

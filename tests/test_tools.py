@@ -633,3 +633,27 @@ def test_duckdb_timeout_is_returned_as_retryable_query_timeout(
     assert result.error_category == "query_timeout"
     assert result.retryable is True
     assert "time limit" not in result.message.lower()
+
+
+def test_query_data_returns_binding_guidance_for_unknown_table(
+    tool_registry, dataset_artifact, task
+) -> None:
+    result = tool_registry.execute(
+        ToolCall(
+            "duck-missing-table",
+            "query_data",
+            {
+                "sql": "SELECT * FROM region_operations_2025",
+                "bindings": {"dataset": dataset_artifact.id},
+            },
+        ),
+        ToolContext(task.project_id, task.id),
+    )
+
+    assert result.success is False
+    assert result.error_category == "unresolved_table"
+    assert result.retryable is False
+    assert result.diagnostics == {
+        "available_tables": ["dataset"],
+        "guidance": "Use a bindings key exactly as the SQL table name.",
+    }

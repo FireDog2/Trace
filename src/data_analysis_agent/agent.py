@@ -26,13 +26,19 @@ from data_analysis_agent.repositories import (
     TaskRepository,
 )
 from data_analysis_agent.settings import Settings
-from data_analysis_agent.tools import ToolContext, ToolRegistry, ToolResult
+from data_analysis_agent.tools import ToolCall, ToolContext, ToolRegistry, ToolResult
 from data_analysis_agent.tracing import TraceContext, TraceRecorder, TraceRepository
 
 SYSTEM_PROMPT = assemble_prompt(PromptContext(role="lead")).text
 
 _PROTECTED_TOOL_NAMES = frozenset({"query_database", "await_teammates"})
 _TRANSIENT_PROVIDER_ERRORS = frozenset({"timeout", "network", "rate_limit", "upstream"})
+_APPROVAL_RESUME_MESSAGE = (
+    "Human approval was granted and waiting teammates were resumed. "
+    "Do not request confirmation again and do not substitute a direct data query. "
+    "Use list_teammates or await_teammates to read the existing teammate result, "
+    "then continue from its handoff."
+)
 
 
 class AgentRunner:
@@ -128,6 +134,34 @@ class AgentRunner:
                 trace("agent.completed", "failed", {"category": "provider_error"})
                 finish_trace("failed", "provider_error")
                 return failed_task
+
+            if not response.tool_calls:
+                active_lookup = getattr(self._tools, "active_teammate_ids", None)
+                active_agent_ids = (
+                    tuple(active_lookup(task_id)) if callable(active_lookup) else ()
+                )
+                if active_agent_ids:
+                    response = replace(
+                        response,
+                        text="",
+                        tool_calls=(
+                            ToolCall(
+                                id=f"auto-await-{action_count + 1}",
+                                name="await_teammates",
+                                arguments={
+                                    "agent_ids": list(active_agent_ids),
+                                    "timeout_seconds": min(
+                                        self._settings.teammate_timeout_seconds, 120
+                                    ),
+                                },
+                            ),
+                        ),
+                    )
+                    trace(
+                        "teammate.await.enforced",
+                        "running",
+                        {"agent_ids": list(active_agent_ids)},
+                    )
 
             if response.text.strip():
                 message = self._tasks.add_message(
@@ -289,6 +323,20 @@ class AgentRunner:
                             ),
                             cancelled.name,
                         )
+                    if call.name == "request_user_input" and tool_result.success:
+                        question = tool_result.output.get("question")
+                        if isinstance(question, str) and question:
+                            assistant_message = self._tasks.add_message(
+                                task_id, "assistant", question
+                            )
+                            self._tasks.append_event(
+                                task_id,
+                                "message.created",
+                                {
+                                    "message_id": assistant_message.id,
+                                    "role": assistant_message.role,
+                                },
+                            )
                     current = self._tasks.get(task_id)
                     trace("agent.completed", "completed", {"paused": True})
                     finish_trace("completed")
@@ -389,6 +437,12 @@ class AgentRunner:
         )
         if resume_waiting is not None:
             resume_waiting()
+        message = self._tasks.add_message(task_id, "system", _APPROVAL_RESUME_MESSAGE)
+        self._tasks.append_event(
+            task_id,
+            "message.created",
+            {"message_id": message.id, "role": message.role},
+        )
         return self.run(task_id)
 
     def _continue(

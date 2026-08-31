@@ -99,6 +99,68 @@ def test_openai_adapter_normalizes_tool_call_and_preserves_history() -> None:
     assert captured["tools"][0]["function"]["name"] == "inspect_dataset"
 
 
+def test_openai_adapter_repairs_legacy_user_input_message_order() -> None:
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"role": "assistant", "content": "done"}}]},
+        )
+
+    request = ModelRequest(
+        system="Use evidence.",
+        objective="Inspect a field",
+        messages=(
+            ModelMessage(
+                role="assistant_tool_call",
+                content=json.dumps(
+                    {
+                        "tool_calls": [
+                            {
+                                "id": "ask-1",
+                                "name": "request_user_input",
+                                "arguments": {"question": "Which detail?"},
+                            }
+                        ]
+                    }
+                ),
+            ),
+            ModelMessage(role="assistant", content="Which detail?"),
+            ModelMessage(
+                role="tool",
+                content=json.dumps(
+                    {
+                        "call_id": "ask-1",
+                        "success": True,
+                        "output": {"question": "Which detail?"},
+                    }
+                ),
+            ),
+            ModelMessage(role="user", content="Data type"),
+        ),
+        tools=(),
+    )
+
+    OpenAICompatibleProvider(
+        base_url="https://model.invalid/v1",
+        api_key="secret",
+        model="test-model",
+        transport=httpx.MockTransport(handler),
+    ).complete(request)
+
+    projected = captured["messages"]
+    assert [message["role"] for message in projected[2:]] == [
+        "assistant",
+        "tool",
+        "assistant",
+        "user",
+    ]
+    assert projected[2]["tool_calls"][0]["id"] == "ask-1"
+    assert projected[3]["tool_call_id"] == "ask-1"
+
+
 def test_openai_adapter_classifies_authentication_failure() -> None:
     provider = OpenAICompatibleProvider(
         base_url="https://model.invalid/v1",

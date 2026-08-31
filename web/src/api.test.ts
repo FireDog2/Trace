@@ -87,6 +87,18 @@ describe("HttpApiClient", () => {
     });
   });
 
+  it("deletes a project through its project endpoint", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      new HttpApiClient().deleteProject("project-1"),
+    ).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith("/api/projects/project-1", {
+      method: "DELETE",
+    });
+  });
+
   it("uploads a business document for automatic knowledge import", async () => {
     const result = {
       file_name: "口径.md",

@@ -54,6 +54,14 @@ class QueryTimeoutError(ExecutionError):
     """Raised when a bounded local query exceeds its deadline."""
 
 
+class DatasetQueryError(ExecutionError):
+    """Raised when DuckDB rejects a local dataset query."""
+
+    def __init__(self, category: str) -> None:
+        super().__init__(category)
+        self.category = category
+
+
 class UnsafePythonError(ExecutionError):
     """Raised when generated Python requests a prohibited capability."""
 
@@ -128,6 +136,18 @@ class DuckDBExecutor:
                 cursor = connection.execute(sql)
                 columns = tuple(item[0] for item in (cursor.description or ()))
                 rows = cursor.fetchall()
+            except duckdb.ParserException as exc:
+                raise DatasetQueryError("parse_error") from exc
+            except duckdb.CatalogException as exc:
+                raise DatasetQueryError("unresolved_table") from exc
+            except duckdb.BinderException as exc:
+                raise DatasetQueryError("unresolved_column") from exc
+            except duckdb.Error as exc:
+                if deadline_expired.is_set():
+                    raise QueryTimeoutError(
+                        f"DuckDB query exceeded the {self._timeout_seconds}-second time limit"
+                    ) from exc
+                raise DatasetQueryError("query_error") from exc
             except Exception as exc:
                 if deadline_expired.is_set():
                     raise QueryTimeoutError(

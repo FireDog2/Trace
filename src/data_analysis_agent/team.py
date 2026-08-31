@@ -157,6 +157,11 @@ ROLE_PROMPTS: dict[AgentRole, str] = {
 
 _MAX_HANDOFF_BYTES = 64_000
 _TRANSIENT_PROVIDER_ERRORS = frozenset({"timeout", "network", "rate_limit", "upstream"})
+_HANDOFF_REPAIR_MESSAGE = (
+    "Your previous response was not a valid teammate handoff. "
+    "Return exactly one JSON object that follows the required handoff schema. "
+    "Do not call another tool and do not wrap the JSON in Markdown."
+)
 
 
 TaskEventPublisher = Callable[[str, str, dict[str, object]], object]
@@ -825,6 +830,7 @@ class TeammateRunner:
         self._trace(run, "teammate.started", "running", {"role": run.role.value})
         tools = self._tools.restrict(ROLE_TOOLS[run.role])
         recovery = RecoveryState(RecoveryPolicy(max_attempts=self._settings.max_tool_attempts))
+        handoff_repair_attempted = False
         if resumed_from_wait:
             try:
                 replay_call = self._approval_replay_call(run.id)
@@ -884,6 +890,19 @@ class TeammateRunner:
                     )
                     return completed
                 except ValueError:
+                    if not handoff_repair_attempted:
+                        handoff_repair_attempted = True
+                        self._repository.append_message(
+                            run.id, "system", _HANDOFF_REPAIR_MESSAGE
+                        )
+                        self._trace(
+                            run,
+                            "teammate.handoff.invalid",
+                            "retrying",
+                            {"attempt": 1, "remaining": 0},
+                            error_category="invalid_handoff",
+                        )
+                        continue
                     return self._repository.fail_run(run.id, "invalid_handoff")
             failure = self._record_and_execute_calls(run, tools, response.tool_calls, recovery)
             if failure is not None:

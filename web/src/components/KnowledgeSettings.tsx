@@ -18,9 +18,9 @@ const EMPTY_FORM: SaveBusinessKnowledge = {
 };
 
 const KIND_LABELS: Record<BusinessKnowledgeKind, string> = {
-  metric: "指标",
-  term: "术语",
-  rule: "业务规则",
+  metric: "Metric",
+  term: "Term",
+  rule: "Business rule",
 };
 
 export function KnowledgeSettings({
@@ -50,7 +50,11 @@ export function KnowledgeSettings({
     void api
       .listBusinessKnowledge()
       .then(setEntries)
-      .catch(() => setError("无法读取业务知识。请确认项目仍然可用。"));
+      .catch(() =>
+        setError(
+          "Unable to load business knowledge. Confirm that the project is still available.",
+        ),
+      );
   }, [api, open]);
 
   function resetForm() {
@@ -97,30 +101,30 @@ export function KnowledgeSettings({
       );
       const categories = [
         result.category_counts.metric
-          ? `${result.category_counts.metric} 个指标`
+          ? `${result.category_counts.metric} ${result.category_counts.metric === 1 ? "metric" : "metrics"}`
           : "",
         result.category_counts.term
-          ? `${result.category_counts.term} 个术语`
+          ? `${result.category_counts.term} ${result.category_counts.term === 1 ? "term" : "terms"}`
           : "",
         result.category_counts.rule
-          ? `${result.category_counts.rule} 条规则`
+          ? `${result.category_counts.rule} ${result.category_counts.rule === 1 ? "business rule" : "business rules"}`
           : "",
       ]
         .filter(Boolean)
-        .join("、");
+        .join(", ");
       const skipped = result.skipped_names.length
-        ? `；${result.skipped_names.length} 个重名条目已跳过`
+        ? `; ${result.skipped_names.length} duplicate entries skipped`
         : "";
       setNotice(
         result.created.length
-          ? `${result.file_name} 已导入：${categories}${skipped}。`
-          : `${result.file_name} 没有新增内容${skipped}。`,
+          ? `${result.file_name} imported: ${categories}${skipped}.`
+          : `${result.file_name} did not add any new content${skipped}.`,
       );
     } catch (reason) {
       setError(
         reason instanceof Error
           ? reason.message
-          : "文档导入失败，请检查文件格式后重试。",
+          : "Document import failed. Check the file format and try again.",
       );
     } finally {
       setImporting(false);
@@ -147,14 +151,16 @@ export function KnowledgeSettings({
       );
       setNotice(
         editingId
-          ? `已保存 ${saved.name} v${saved.version}。`
-          : `已添加 ${saved.name}。`,
+          ? `Saved ${saved.name} v${saved.version}.`
+          : `Added ${saved.name}.`,
       );
       resetForm();
       setError("");
       setMode("document");
     } catch {
-      setError("业务知识未保存。请检查名称是否重复，以及必填字段是否完整。");
+      setError(
+        "Business knowledge was not saved. Check for a duplicate name and make sure all required fields are complete.",
+      );
     }
   }
 
@@ -163,10 +169,12 @@ export function KnowledgeSettings({
       await api.deleteBusinessKnowledge(entry.id);
       setEntries((current) => current.filter((item) => item.id !== entry.id));
       if (editingId === entry.id) resetForm();
-      setNotice(`已删除 ${entry.name}。`);
+      setNotice(`Deleted ${entry.name}.`);
       setError("");
     } catch {
-      setError("无法删除这条业务知识，请刷新后重试。");
+      setError(
+        "Unable to delete this business knowledge entry. Refresh and try again.",
+      );
     }
   }
 
@@ -177,18 +185,21 @@ export function KnowledgeSettings({
         className="data-source-settings knowledge-settings"
         role="dialog"
         aria-modal="true"
-        aria-label="业务知识库"
+        aria-label="Business knowledge base"
       >
         <header className="drawer-header">
           <div>
             <span className="settings-index">GROUND / BUSINESS</span>
-            <h2>业务知识库</h2>
-            <p>上传已有文档，系统会拆分并归类其中的指标、术语和规则。</p>
+            <h2>Business knowledge base</h2>
+            <p>
+              Upload an existing document and the system will split and classify
+              its metrics, terms, and rules.
+            </p>
           </div>
           <button
             className="settings-close"
             onClick={onClose}
-            aria-label="关闭业务知识库"
+            aria-label="Close business knowledge base"
           >
             ×
           </button>
@@ -202,7 +213,7 @@ export function KnowledgeSettings({
         <div
           className="knowledge-mode-switch"
           role="tablist"
-          aria-label="知识录入方式"
+          aria-label="Knowledge entry method"
         >
           <button
             type="button"
@@ -210,7 +221,7 @@ export function KnowledgeSettings({
             aria-selected={mode === "document"}
             onClick={() => setMode("document")}
           >
-            上传文档
+            Upload document
           </button>
           <button
             type="button"
@@ -218,20 +229,25 @@ export function KnowledgeSettings({
             aria-selected={mode === "manual"}
             onClick={() => setMode("manual")}
           >
-            逐条添加
+            Add manually
           </button>
         </div>
         {mode === "document" ? (
-          <section className="knowledge-import" aria-label="上传业务文档">
+          <section
+            className="knowledge-import"
+            aria-label="Upload business document"
+          >
             <div className="document-mark" aria-hidden="true">
               <span>DOC</span>
               <i />
             </div>
             <div>
               <span className="section-label">DOCUMENT INTAKE</span>
-              <h3>把现有口径文档直接交给系统</h3>
+              <h3>Give the system an existing definitions document</h3>
               <p>
-                自动识别文档章节和字段，归类为指标、术语或业务规则；重名内容会跳过，不会覆盖已有口径。
+                Document sections and fields are detected automatically and
+                classified as metrics, terms, or business rules. Duplicate names
+                are skipped and existing definitions are never overwritten.
               </p>
             </div>
             <label
@@ -239,14 +255,14 @@ export function KnowledgeSettings({
             >
               <input
                 type="file"
-                aria-label="选择业务口径文档"
+                aria-label="Choose a business definitions document"
                 accept=".pdf,.docx,.md,.txt,.csv,.xlsx"
                 disabled={importing}
                 onChange={(event) => void importDocument(event)}
               />
-              <span>{importing ? "正在解析…" : "选择文档"}</span>
+              <span>{importing ? "Parsing…" : "Choose document"}</span>
               <small>
-                PDF · Word · Markdown · TXT · CSV · Excel，最大 10 MB
+                PDF · Word · Markdown · TXT · CSV · Excel, up to 10 MB
               </small>
             </label>
           </section>
@@ -255,7 +271,11 @@ export function KnowledgeSettings({
             <div className="knowledge-form-heading">
               <div>
                 <span>{editingId ? "EDIT CONTRACT" : "NEW CONTRACT"}</span>
-                <h3>{editingId ? "更新业务口径" : "添加业务口径"}</h3>
+                <h3>
+                  {editingId
+                    ? "Update business definition"
+                    : "Add business definition"}
+                </h3>
               </div>
               {editingId && (
                 <button
@@ -265,15 +285,15 @@ export function KnowledgeSettings({
                     setMode("document");
                   }}
                 >
-                  取消编辑
+                  Cancel editing
                 </button>
               )}
             </div>
             <div className="knowledge-field-grid">
               <label>
-                <span>类型</span>
+                <span>Type</span>
                 <select
-                  aria-label="知识类型"
+                  aria-label="Knowledge type"
                   value={form.kind}
                   onChange={(event) =>
                     setForm((current) => ({
@@ -282,15 +302,15 @@ export function KnowledgeSettings({
                     }))
                   }
                 >
-                  <option value="metric">指标</option>
-                  <option value="term">术语</option>
-                  <option value="rule">业务规则</option>
+                  <option value="metric">Metric</option>
+                  <option value="term">Term</option>
+                  <option value="rule">Business rule</option>
                 </select>
               </label>
               <label>
-                <span>名称</span>
+                <span>Name</span>
                 <input
-                  aria-label="知识名称"
+                  aria-label="Knowledge name"
                   required
                   value={form.name}
                   onChange={(event) =>
@@ -299,14 +319,14 @@ export function KnowledgeSettings({
                       name: event.target.value,
                     }))
                   }
-                  placeholder="例如：经营利润"
+                  placeholder="For example: Operating profit"
                 />
               </label>
             </div>
             <label>
-              <span>定义</span>
+              <span>Definition</span>
               <textarea
-                aria-label="知识定义"
+                aria-label="Knowledge definition"
                 required
                 value={form.definition}
                 onChange={(event) =>
@@ -315,13 +335,13 @@ export function KnowledgeSettings({
                     definition: event.target.value,
                   }))
                 }
-                placeholder="说明这个指标或术语在当前项目中的唯一含义。"
+                placeholder="Describe the unique meaning of this metric or term in the current project."
               />
             </label>
             <label>
-              <span>公式</span>
+              <span>Formula</span>
               <input
-                aria-label="知识公式"
+                aria-label="Knowledge formula"
                 value={form.formula ?? ""}
                 onChange={(event) =>
                   setForm((current) => ({
@@ -334,28 +354,28 @@ export function KnowledgeSettings({
             </label>
             <div className="knowledge-field-grid">
               <label>
-                <span>适用维度</span>
+                <span>Applicable dimensions</span>
                 <input
-                  aria-label="适用维度"
+                  aria-label="Applicable dimensions"
                   value={dimensionsText}
                   onChange={(event) => setDimensionsText(event.target.value)}
-                  placeholder="月份, 地区"
+                  placeholder="Month, Region"
                 />
               </label>
               <label>
-                <span>同义词</span>
+                <span>Synonyms</span>
                 <input
-                  aria-label="知识同义词"
+                  aria-label="Knowledge synonyms"
                   value={synonymsText}
                   onChange={(event) => setSynonymsText(event.target.value)}
-                  placeholder="营业利润, Operating income"
+                  placeholder="Operating profit, Operating income"
                 />
               </label>
             </div>
             <label>
-              <span>来源</span>
+              <span>Source</span>
               <input
-                aria-label="知识来源"
+                aria-label="Knowledge source"
                 value={form.source ?? ""}
                 onChange={(event) =>
                   setForm((current) => ({
@@ -363,11 +383,11 @@ export function KnowledgeSettings({
                     source: event.target.value,
                   }))
                 }
-                placeholder="财务口径手册 / 负责人 / 文档链接"
+                placeholder="Finance definitions handbook / owner / document link"
               />
             </label>
             <button type="submit" className="primary-action">
-              {editingId ? "保存新版本" : "添加到知识库"}
+              {editingId ? "Save new version" : "Add to knowledge base"}
             </button>
           </form>
         )}
@@ -375,7 +395,7 @@ export function KnowledgeSettings({
           <div className="panel-heading">
             <div>
               <span className="section-label">CATALOG</span>
-              <h3>已登记口径</h3>
+              <h3>Registered definitions</h3>
             </div>
             <span>{entries.length} ENTRIES</span>
           </div>
@@ -398,17 +418,17 @@ export function KnowledgeSettings({
                     </div>
                   )}
                   <footer>
-                    <small>{entry.source || "未注明来源"}</small>
+                    <small>{entry.source || "Source not specified"}</small>
                     <div>
                       <button type="button" onClick={() => edit(entry)}>
-                        编辑
+                        Edit
                       </button>
                       <button
                         type="button"
                         className="danger-action"
                         onClick={() => void remove(entry)}
                       >
-                        删除
+                        Delete
                       </button>
                     </div>
                   </footer>
@@ -417,7 +437,8 @@ export function KnowledgeSettings({
             </div>
           ) : (
             <p className="empty-note">
-              上传一份现有口径文档，Knowledge Agent 会在分析前检索导入的内容。
+              Upload an existing definitions document. The knowledge agent will
+              retrieve the imported content before analysis.
             </p>
           )}
         </section>

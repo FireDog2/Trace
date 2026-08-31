@@ -12,6 +12,7 @@ interface ProjectNavProps {
   onStartNewTask(): void;
   onCreateProject(name: string): Promise<void>;
   onRenameProject(id: string, name: string): Promise<void>;
+  onDeleteProject(id: string): Promise<void>;
   onPinTask(id: string, pinned: boolean): Promise<void>;
   onDeleteTask(id: string): Promise<void>;
   modelConfiguration: ModelConfigurationStatus | null;
@@ -33,6 +34,7 @@ export function ProjectNav({
   onStartNewTask,
   onCreateProject,
   onRenameProject,
+  onDeleteProject,
   onPinTask,
   onDeleteTask,
   modelConfiguration,
@@ -52,7 +54,13 @@ export function ProjectNav({
     null,
   );
   const [renameValue, setRenameValue] = useState("");
+  const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(
+    null,
+  );
   const [openTaskMenuId, setOpenTaskMenuId] = useState<string | null>(null);
+  const [projectDeleteCandidate, setProjectDeleteCandidate] =
+    useState<Project | null>(null);
+  const [deletingProject, setDeletingProject] = useState(false);
   const [deleteCandidate, setDeleteCandidate] = useState<Task | null>(null);
   const [deletingTask, setDeletingTask] = useState(false);
 
@@ -64,6 +72,15 @@ export function ProjectNav({
       setExpandedProjectId(null);
     }
   }, [expandedProjectId, projects]);
+
+  useEffect(() => {
+    if (
+      openProjectMenuId &&
+      !projects.some((project) => project.id === openProjectMenuId)
+    ) {
+      setOpenProjectMenuId(null);
+    }
+  }, [openProjectMenuId, projects]);
 
   useEffect(() => {
     if (openTaskMenuId && !tasks.some((task) => task.id === openTaskMenuId)) {
@@ -89,6 +106,7 @@ export function ProjectNav({
 
   function beginRename(project: Project) {
     onSelectProject(project.id);
+    setOpenProjectMenuId(null);
     setRenamingProjectId(project.id);
     setRenameValue(project.name);
   }
@@ -134,10 +152,23 @@ export function ProjectNav({
     }
   }
 
+  async function confirmProjectDelete() {
+    if (!projectDeleteCandidate) return;
+    setDeletingProject(true);
+    try {
+      await onDeleteProject(projectDeleteCandidate.id);
+      setProjectDeleteCandidate(null);
+    } catch {
+      // Keep the confirmation open so the user can retry after the parent reports the error.
+    } finally {
+      setDeletingProject(false);
+    }
+  }
+
   return (
     <nav
       className={drawerOpen ? "project-rail drawer-open" : "project-rail"}
-      aria-label="任务台"
+      aria-label="Workbench"
     >
       <header className="brand-block">
         <div className="brand-lockup">
@@ -146,13 +177,13 @@ export function ProjectNav({
           </span>
           <div>
             <strong>TRACE</strong>
-            <p>分析任务台</p>
+            <p>Analysis Workbench</p>
           </div>
         </div>
         <button
           type="button"
           className="rail-collapse"
-          aria-label="收起任务台"
+          aria-label="Collapse workbench"
           onClick={onCollapse}
         >
           ‹
@@ -160,7 +191,7 @@ export function ProjectNav({
         <button
           type="button"
           className="rail-close"
-          aria-label="关闭任务台"
+          aria-label="Close workbench"
           onClick={onClose}
         >
           ×
@@ -168,12 +199,14 @@ export function ProjectNav({
       </header>
 
       <section className="rail-section model-section">
-        <div className="section-label">模型配置</div>
+        <div className="section-label">Model configuration</div>
         <button
           type="button"
           className={`model-route ${modelConfiguration?.configured ? "configured" : "unconfigured"}`}
           aria-label={
-            modelConfiguration?.configured ? "更改模型配置" : "配置模型"
+            modelConfiguration?.configured
+              ? "Change model configuration"
+              : "Configure model"
           }
           onClick={onOpenModelSettings}
         >
@@ -184,14 +217,14 @@ export function ProjectNav({
             <strong>
               {modelConfiguration?.configured
                 ? modelConfiguration.model
-                : "配置分析模型"}
+                : "Configure analysis model"}
             </strong>
             <small>
               {modelConfiguration?.configured
                 ? modelConfiguration.providers.find(
                     (item) => item.provider === modelConfiguration.provider,
                   )?.label
-                : "DeepSeek · OpenAI · 中转站"}
+                : "DeepSeek · OpenAI · Custom gateway"}
             </small>
           </span>
           <i>{modelConfiguration?.configured ? "READY" : "SETUP"}</i>
@@ -200,22 +233,22 @@ export function ProjectNav({
 
       <section className="rail-section global-config-section">
         <div className="section-heading">
-          <div className="section-label">全局配置</div>
-          <span className="scope-badge">所有项目通用</span>
+          <div className="section-label">Global settings</div>
+          <span className="scope-badge">Shared by all projects</span>
         </div>
         <div className="global-route-list">
           <button
             type="button"
             className="global-route"
             onClick={onOpenDataSources}
-            aria-label="配置全局数据源"
+            aria-label="Configure global data sources"
           >
             <span className="source-icon database" aria-hidden="true">
               DB
             </span>
             <span>
-              <strong>数据源</strong>
-              <small>连接、字段范围与访问策略</small>
+              <strong>Data sources</strong>
+              <small>Connections, field scope, and access policies</small>
             </span>
             <i aria-hidden="true">›</i>
           </button>
@@ -223,14 +256,14 @@ export function ProjectNav({
             type="button"
             className="global-route"
             onClick={onOpenKnowledge}
-            aria-label="配置全局业务口径"
+            aria-label="Configure global business definitions"
           >
             <span className="source-icon knowledge" aria-hidden="true">
               KB
             </span>
             <span>
-              <strong>业务口径</strong>
-              <small>上传文档并自动分类沉淀</small>
+              <strong>Business definitions</strong>
+              <small>Upload documents for automatic classification</small>
             </span>
             <i aria-hidden="true">›</i>
           </button>
@@ -240,36 +273,38 @@ export function ProjectNav({
       <section className="rail-section project-section">
         <div className="section-heading">
           <div className="section-label">
-            项目 <span>{projects.length}</span>
+            Projects <span>{projects.length}</span>
           </div>
           <button
             type="button"
             className="section-action"
-            aria-label={creatingProject ? "取消新建项目" : "新建项目"}
+            aria-label={creatingProject ? "Cancel new project" : "New project"}
             onClick={() => setCreatingProject((current) => !current)}
           >
-            {creatingProject ? "取消" : "＋ 新建"}
+            {creatingProject ? "Cancel" : "＋ New"}
           </button>
         </div>
         {creatingProject && (
           <form className="compact-form" onSubmit={submitProject}>
             <input
               autoFocus
-              aria-label="新项目名称"
+              aria-label="New project name"
               value={newProjectName}
-              placeholder="输入项目名称"
+              placeholder="Enter a project name"
               onChange={(event) => setNewProjectName(event.target.value)}
             />
             <button
               type="submit"
-              aria-label="创建项目"
+              aria-label="Create project"
               disabled={!newProjectName.trim()}
             >
-              创建
+              Create
             </button>
           </form>
         )}
-        <p className="project-hint">单击切换项目，双击展开对话</p>
+        <p className="project-hint">
+          Click to switch projects; double-click to expand conversations
+        </p>
         {projects.length > 0 ? (
           <ul className="project-tree">
             {projects.map((project) => {
@@ -291,8 +326,8 @@ export function ProjectNav({
                       className="project-toggle"
                       aria-label={
                         expanded
-                          ? `收起项目 ${project.name}`
-                          : `展开项目 ${project.name}`
+                          ? `Collapse project ${project.name}`
+                          : `Expand project ${project.name}`
                       }
                       aria-expanded={expanded}
                       onClick={() => toggleProject(project)}
@@ -303,7 +338,7 @@ export function ProjectNav({
                       <input
                         className="project-rename-input"
                         autoFocus
-                        aria-label={`修改项目名称 ${project.name}`}
+                        aria-label={`Rename project ${project.name}`}
                         value={renameValue}
                         onChange={(event) => setRenameValue(event.target.value)}
                         onBlur={() => void saveRename(project.id)}
@@ -321,14 +356,53 @@ export function ProjectNav({
                       </button>
                     )}
                     {!renaming && (
-                      <button
-                        type="button"
-                        className="project-more"
-                        aria-label={`重命名项目 ${project.name}`}
-                        onClick={() => beginRename(project)}
+                      <div
+                        className="project-menu-anchor"
+                        onBlur={(event) => {
+                          if (
+                            !event.currentTarget.contains(event.relatedTarget)
+                          ) {
+                            setOpenProjectMenuId(null);
+                          }
+                        }}
                       >
-                        •••
-                      </button>
+                        <button
+                          type="button"
+                          className="project-more"
+                          aria-label={`Project actions for ${project.name}`}
+                          aria-haspopup="menu"
+                          aria-expanded={openProjectMenuId === project.id}
+                          onClick={() =>
+                            setOpenProjectMenuId((current) =>
+                              current === project.id ? null : project.id,
+                            )
+                          }
+                        >
+                          •••
+                        </button>
+                        {openProjectMenuId === project.id && (
+                          <div className="task-menu project-menu" role="menu">
+                            <button
+                              type="button"
+                              role="menuitem"
+                              onClick={() => beginRename(project)}
+                            >
+                              <span aria-hidden="true">✎</span>Rename
+                            </button>
+                            <button
+                              type="button"
+                              role="menuitem"
+                              className="danger"
+                              onClick={() => {
+                                setOpenProjectMenuId(null);
+                                setProjectDeleteCandidate(project);
+                              }}
+                            >
+                              <span aria-hidden="true">×</span>Delete project
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     )}
                   </div>
                   {expanded && selected && (
@@ -343,7 +417,7 @@ export function ProjectNav({
                         aria-current={selectedTaskId ? undefined : "page"}
                         onClick={onStartNewTask}
                       >
-                        <span aria-hidden="true">＋</span> 新对话
+                        <span aria-hidden="true">＋</span> New conversation
                       </button>
                       <ul>
                         {tasks.map((task) => {
@@ -375,7 +449,7 @@ export function ProjectNav({
                                 {task.pinned && (
                                   <span
                                     className="task-pin"
-                                    aria-label="已置顶"
+                                    aria-label="Pinned"
                                   >
                                     ◆
                                   </span>
@@ -396,7 +470,7 @@ export function ProjectNav({
                                 <button
                                   type="button"
                                   className="task-more"
-                                  aria-label={`对话操作 ${task.objective}`}
+                                  aria-label={`Conversation actions for ${task.objective}`}
                                   aria-haspopup="menu"
                                   aria-expanded={openTaskMenuId === task.id}
                                   onClick={() =>
@@ -415,7 +489,7 @@ export function ProjectNav({
                                       onClick={() => void togglePinned(task)}
                                     >
                                       <span aria-hidden="true">◆</span>
-                                      {task.pinned ? "取消置顶" : "置顶"}
+                                      {task.pinned ? "Unpin" : "Pin"}
                                     </button>
                                     <button
                                       type="button"
@@ -425,14 +499,14 @@ export function ProjectNav({
                                       title={
                                         deleteAllowed
                                           ? undefined
-                                          : "请等待分析完成后再删除"
+                                          : "Wait for the analysis to finish before deleting"
                                       }
                                       onClick={() => {
                                         setOpenTaskMenuId(null);
                                         setDeleteCandidate(task);
                                       }}
                                     >
-                                      <span aria-hidden="true">×</span>删除
+                                      <span aria-hidden="true">×</span>Delete
                                     </button>
                                   </div>
                                 )}
@@ -441,7 +515,7 @@ export function ProjectNav({
                           );
                         })}
                         {tasks.length === 0 && (
-                          <li className="rail-empty">还没有对话</li>
+                          <li className="rail-empty">No conversations yet</li>
                         )}
                       </ul>
                     </div>
@@ -451,9 +525,60 @@ export function ProjectNav({
             })}
           </ul>
         ) : (
-          <p className="rail-empty">还没有项目，先建立一个分析空间。</p>
+          <p className="rail-empty">
+            No projects yet. Create an analysis workspace to get started.
+          </p>
         )}
       </section>
+      {projectDeleteCandidate && (
+        <div
+          className="task-delete-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !deletingProject) {
+              setProjectDeleteCandidate(null);
+            }
+          }}
+        >
+          <section
+            className="task-delete-confirmation"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="delete-project-title"
+            onKeyDown={(event) => {
+              if (event.key === "Escape" && !deletingProject) {
+                setProjectDeleteCandidate(null);
+              }
+            }}
+          >
+            <span>DELETE PROJECT</span>
+            <h2 id="delete-project-title">Permanently delete this project?</h2>
+            <p>{projectDeleteCandidate.name}</p>
+            <small>
+              All conversations, uploaded datasets, and analysis artifacts in
+              this project will be permanently deleted. This action cannot be
+              undone.
+            </small>
+            <div>
+              <button
+                type="button"
+                autoFocus
+                disabled={deletingProject}
+                onClick={() => setProjectDeleteCandidate(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="danger"
+                disabled={deletingProject}
+                onClick={() => void confirmProjectDelete()}
+              >
+                {deletingProject ? "Deleting…" : "Delete permanently"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
       {deleteCandidate && (
         <div
           className="task-delete-backdrop"
@@ -475,9 +600,12 @@ export function ProjectNav({
             }}
           >
             <span>DELETE CONVERSATION</span>
-            <h2 id="delete-task-title">删除这条对话？</h2>
+            <h2 id="delete-task-title">Delete this conversation?</h2>
             <p>{deleteCandidate.objective}</p>
-            <small>对话将从任务列表移除；源数据和审计记录会保留。</small>
+            <small>
+              The conversation will be removed from the task list; source data
+              and audit records will be retained.
+            </small>
             <div>
               <button
                 type="button"
@@ -485,7 +613,7 @@ export function ProjectNav({
                 disabled={deletingTask}
                 onClick={() => setDeleteCandidate(null)}
               >
-                取消
+                Cancel
               </button>
               <button
                 type="button"
@@ -493,7 +621,7 @@ export function ProjectNav({
                 disabled={deletingTask}
                 onClick={() => void confirmDelete()}
               >
-                {deletingTask ? "删除中…" : "确认删除"}
+                {deletingTask ? "Deleting…" : "Confirm deletion"}
               </button>
             </div>
           </section>

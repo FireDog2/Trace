@@ -26,6 +26,17 @@ def test_portfolio_demo_creates_a_clean_completed_workspace(tmp_path) -> None:
             ArtifactType.CHART,
             ArtifactType.MARKDOWN_REPORT,
         }
+        chart = services.artifacts.get(manifest.chart_artifact_id)
+        report = services.artifacts.get(manifest.report_artifact_id)
+        chart_html = chart.path.read_text(encoding="utf-8")
+        report_markdown = report.path.read_text(encoding="utf-8")
+        assert chart.artifact_type is ArtifactType.CHART
+        assert "<svg" in chart_html
+        assert "Profit and logistics cost by month" in chart_html
+        assert "February → March profit bridge" in chart_html
+        assert "Flat revenue. A logistics shock." in chart_html
+        assert "33.8% drop" in report_markdown
+        assert "What management should investigate first" in report_markdown
         assert len(agents) == 1 and agents[0].status.value == "completed"
         assert trace and manifest.trace_event_count == len(trace)
         assert (settings.data_dir / "demo-manifest.json").is_file()

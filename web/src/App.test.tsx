@@ -5,11 +5,13 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import type { ApiClient } from "./api";
 import type { SaveBusinessKnowledge } from "./types";
+
+afterEach(() => vi.restoreAllMocks());
 
 const PROVIDERS = [
   {
@@ -82,6 +84,7 @@ function fakeApiWithCompletedTask(
     updateProject: async () => {
       throw new Error("Not used in this test");
     },
+    deleteProject: async () => undefined,
     uploadDataset: async () => {
       throw new Error("Not used in this test");
     },
@@ -142,7 +145,7 @@ function fakeApiWithCompletedTask(
           artifact_type: "chart",
           title: "物流成本趋势",
           description: "华东物流成本变化",
-          content_type: "text/html",
+          content_type: "text/html; charset=utf-8",
           created_at: "2026-08-05T00:04:00Z",
           content_url: "/api/artifacts/chart-1/content",
         },
@@ -235,11 +238,13 @@ describe("analysis workbench", () => {
     render(<App api={fakeApiWithCompletedTask()} />);
 
     const projectContext = await screen.findByRole("navigation", {
-      name: "任务台",
+      name: "Workbench",
     });
-    const conversation = await screen.findByRole("main", { name: "分析对话" });
+    const conversation = await screen.findByRole("main", {
+      name: "Analysis conversation",
+    });
     const artifacts = await screen.findByRole("complementary", {
-      name: "证据与运行",
+      name: "Evidence & runs",
     });
     const shell = projectContext.parentElement;
 
@@ -263,29 +268,39 @@ describe("analysis workbench", () => {
     expect(
       await screen.findByText("TRACE", { selector: ".brand-block strong" }),
     ).toBeVisible();
-    expect(screen.getByText("分析任务台")).toBeVisible();
+    expect(screen.getByText("Analysis Workbench")).toBeVisible();
 
-    fireEvent.click(screen.getByRole("button", { name: "更改模型配置" }));
-    expect(screen.getByRole("heading", { name: "模型供应商" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "连接配置" })).toBeVisible();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Change model configuration" }),
+    );
+    expect(
+      screen.getByRole("heading", { name: "Model provider" }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("heading", { name: "Connection settings" }),
+    ).toBeVisible();
   });
 
   it("opens and closes the project console for narrow screens", async () => {
     render(<App api={fakeApiWithCompletedTask()} />);
 
-    const toggle = await screen.findByRole("button", { name: "打开任务台" });
+    const toggle = await screen.findByRole("button", {
+      name: "Open workbench",
+    });
     expect(
-      await screen.findByRole("textbox", { name: "给分析 Agent 留言" }),
+      await screen.findByRole("textbox", {
+        name: "Message the analysis agent",
+      }),
     ).toBeVisible();
     expect(toggle).toHaveAttribute("aria-expanded", "false");
 
     fireEvent.click(toggle);
     expect(toggle).toHaveAttribute("aria-expanded", "true");
     expect(
-      screen.getByRole("textbox", { name: "给分析 Agent 留言" }),
+      screen.getByRole("textbox", { name: "Message the analysis agent" }),
     ).toBeVisible();
 
-    fireEvent.click(screen.getByRole("button", { name: "关闭任务台" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close workbench" }));
     expect(toggle).toHaveAttribute("aria-expanded", "false");
   });
 
@@ -293,19 +308,21 @@ describe("analysis workbench", () => {
     render(<App api={fakeApiWithCompletedTask()} />);
 
     expect(
-      await screen.findByRole("navigation", { name: "任务台" }),
+      await screen.findByRole("navigation", { name: "Workbench" }),
     ).toBeVisible();
-    const conversation = await screen.findByRole("main", { name: "分析对话" });
-    fireEvent.click(screen.getByRole("button", { name: "收起任务台" }));
+    const conversation = await screen.findByRole("main", {
+      name: "Analysis conversation",
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Collapse workbench" }));
 
     expect(
-      screen.queryByRole("navigation", { name: "任务台" }),
+      screen.queryByRole("navigation", { name: "Workbench" }),
     ).not.toBeInTheDocument();
     expect(conversation.parentElement).toHaveClass("project-collapsed");
 
-    fireEvent.click(screen.getByRole("button", { name: "打开任务台" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open workbench" }));
     expect(
-      await screen.findByRole("navigation", { name: "任务台" }),
+      await screen.findByRole("navigation", { name: "Workbench" }),
     ).toBeVisible();
     expect(conversation.parentElement).not.toHaveClass("project-collapsed");
   });
@@ -313,16 +330,22 @@ describe("analysis workbench", () => {
   it("keeps the question, execution trace, and composer in the center conversation", async () => {
     render(<App api={fakeApiWithCompletedTask()} />);
 
-    const conversation = await screen.findByRole("main", { name: "分析对话" });
+    const conversation = await screen.findByRole("main", {
+      name: "Analysis conversation",
+    });
     expect(
       within(conversation).getByRole("heading", { name: "华东利润诊断" }),
     ).toBeVisible();
     expect(
-      within(conversation).getByRole("heading", { name: "Agent 执行轨迹" }),
+      within(conversation).getByRole("heading", {
+        name: "Agent execution trace",
+      }),
     ).toBeVisible();
     expect(within(conversation).getByText("检查数据")).toBeVisible();
     expect(
-      within(conversation).getByRole("textbox", { name: "给分析 Agent 留言" }),
+      within(conversation).getByRole("textbox", {
+        name: "Message the analysis agent",
+      }),
     ).toBeVisible();
   });
 
@@ -344,10 +367,14 @@ describe("analysis workbench", () => {
     api.sendMessage = retry;
     render(<App api={api} />);
 
-    expect(await screen.findByText("上次执行未完成")).toBeVisible();
-    const input = screen.getByRole("textbox", { name: "修改问题并重试" });
+    expect(
+      await screen.findByText("The previous run did not finish"),
+    ).toBeVisible();
+    const input = screen.getByRole("textbox", {
+      name: "Revise the question and retry",
+    });
     fireEvent.change(input, { target: { value: "重新列出项目产物" } });
-    fireEvent.click(screen.getByRole("button", { name: "重新执行" }));
+    fireEvent.click(screen.getByRole("button", { name: "Run again" }));
 
     await waitFor(() =>
       expect(retry).toHaveBeenCalledWith("task-1", "重新列出项目产物"),
@@ -365,11 +392,13 @@ describe("analysis workbench", () => {
     api.sendMessage = send;
     render(<App api={api} />);
 
-    expect(await screen.findByText("Agent 正在处理这个问题")).toBeVisible();
     expect(
-      screen.getByRole("textbox", { name: "当前问题正在执行" }),
+      await screen.findByText("The agent is working on this question"),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("textbox", { name: "This question is running" }),
     ).toBeDisabled();
-    expect(screen.getByRole("button", { name: "执行中…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Running…" })).toBeDisabled();
     expect(send).not.toHaveBeenCalled();
   });
 
@@ -381,7 +410,9 @@ describe("analysis workbench", () => {
     });
     fireEvent.doubleClick(project);
 
-    expect(await screen.findByRole("button", { name: "新对话" })).toBeVisible();
+    expect(
+      await screen.findByRole("button", { name: "New conversation" }),
+    ).toBeVisible();
     expect(screen.getByRole("button", { name: "华东利润诊断" })).toBeVisible();
   });
 
@@ -395,12 +426,14 @@ describe("analysis workbench", () => {
       await screen.findByRole("button", { name: "2026 Business Review" }),
     );
     fireEvent.click(
-      await screen.findByRole("button", { name: "对话操作 华东利润诊断" }),
+      await screen.findByRole("button", {
+        name: "Conversation actions for 华东利润诊断",
+      }),
     );
-    fireEvent.click(screen.getByRole("menuitem", { name: "置顶" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Pin" }));
 
     await waitFor(() => expect(pin).toHaveBeenCalledWith("task-1", true));
-    expect(await screen.findByLabelText("已置顶")).toBeVisible();
+    expect(await screen.findByLabelText("Pinned")).toBeVisible();
   });
 
   it("requires confirmation before deleting a conversation", async () => {
@@ -413,19 +446,23 @@ describe("analysis workbench", () => {
       await screen.findByRole("button", { name: "2026 Business Review" }),
     );
     fireEvent.click(
-      await screen.findByRole("button", { name: "对话操作 华东利润诊断" }),
+      await screen.findByRole("button", {
+        name: "Conversation actions for 华东利润诊断",
+      }),
     );
-    fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
 
     expect(
-      screen.getByRole("alertdialog", { name: "删除这条对话？" }),
+      screen.getByRole("alertdialog", { name: "Delete this conversation?" }),
     ).toBeVisible();
     expect(remove).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm deletion" }));
 
     await waitFor(() => expect(remove).toHaveBeenCalledWith("task-1"));
     expect(
-      screen.queryByRole("button", { name: "对话操作 华东利润诊断" }),
+      screen.queryByRole("button", {
+        name: "Conversation actions for 华东利润诊断",
+      }),
     ).not.toBeInTheDocument();
   });
 
@@ -440,18 +477,22 @@ describe("analysis workbench", () => {
     });
     fireEvent.doubleClick(project);
     const newConversation = await screen.findByRole("button", {
-      name: "新对话",
+      name: "New conversation",
     });
     fireEvent.click(newConversation);
 
     expect(
-      await screen.findByRole("heading", { name: "开始新对话" }),
+      await screen.findByRole("heading", { name: "Start a new conversation" }),
     ).toBeVisible();
     expect(
-      screen.getByText("输入第一个问题后，这条对话会出现在左侧项目中。"),
+      screen.getByText(
+        "Once you enter your first question, this conversation will appear under the project on the left.",
+      ),
     ).toBeVisible();
     expect(newConversation).toHaveAttribute("aria-current", "page");
-    expect(screen.getByRole("textbox", { name: "分析目标" })).toHaveFocus();
+    expect(
+      screen.getByRole("textbox", { name: "Analysis objective" }),
+    ).toHaveFocus();
     expect(create).not.toHaveBeenCalled();
   });
 
@@ -469,11 +510,12 @@ describe("analysis workbench", () => {
 
     fireEvent.click(
       await screen.findByRole("button", {
-        name: "重命名项目 2026 Business Review",
+        name: "Project actions for 2026 Business Review",
       }),
     );
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
     const input = screen.getByRole("textbox", {
-      name: "修改项目名称 2026 Business Review",
+      name: "Rename project 2026 Business Review",
     });
     fireEvent.change(input, { target: { value: "华东经营复盘" } });
     fireEvent.keyDown(input, { key: "Enter" });
@@ -484,6 +526,52 @@ describe("analysis workbench", () => {
     expect(
       await screen.findByRole("button", { name: "华东经营复盘" }),
     ).toBeVisible();
+  });
+
+  it("requires confirmation before permanently deleting a project", async () => {
+    const api = fakeApiWithCompletedTask();
+    api.listProjects = async () => [
+      {
+        id: "project-1",
+        name: "2026 Business Review",
+        status: "active",
+        created_at: "2026-08-05T00:00:00Z",
+        updated_at: "2026-08-05T00:00:00Z",
+      },
+      {
+        id: "project-2",
+        name: "Supply Review",
+        status: "active",
+        created_at: "2026-08-06T00:00:00Z",
+        updated_at: "2026-08-06T00:00:00Z",
+      },
+    ];
+    const remove = vi.fn(async () => undefined);
+    api.deleteProject = remove;
+    render(<App api={api} />);
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Project actions for 2026 Business Review",
+      }),
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete project" }));
+
+    expect(
+      screen.getByRole("alertdialog", {
+        name: "Permanently delete this project?",
+      }),
+    ).toBeVisible();
+    expect(remove).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Delete permanently" }));
+
+    await waitFor(() => expect(remove).toHaveBeenCalledWith("project-1"));
+    expect(
+      screen.queryByRole("button", { name: "2026 Business Review" }),
+    ).not.toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "Supply Review" }),
+    ).toHaveAttribute("aria-current", "page");
   });
 
   it("uploads a dataset from the conversation plus button", async () => {
@@ -502,7 +590,7 @@ describe("analysis workbench", () => {
     api.uploadDataset = upload;
     render(<App api={api} />);
 
-    fireEvent.change(await screen.findByLabelText("上传分析文件"), {
+    fireEvent.change(await screen.findByLabelText("Upload analysis file"), {
       target: {
         files: [
           new File(["region,revenue"], "sales.csv", { type: "text/csv" }),
@@ -513,7 +601,7 @@ describe("analysis workbench", () => {
     await waitFor(() =>
       expect(upload).toHaveBeenCalledWith("project-1", expect.any(File)),
     );
-    expect(await screen.findByText("已添加 sales.csv")).toBeVisible();
+    expect(await screen.findByText("Added sales.csv")).toBeVisible();
   });
 
   it("imports a knowledge document from the conversation plus button", async () => {
@@ -527,7 +615,7 @@ describe("analysis workbench", () => {
     api.importBusinessKnowledge = importDocument;
     render(<App api={api} />);
 
-    fireEvent.change(await screen.findByLabelText("上传分析文件"), {
+    fireEvent.change(await screen.findByLabelText("Upload analysis file"), {
       target: {
         files: [new File(["# 营业利润"], "口径.md", { type: "text/markdown" })],
       },
@@ -536,22 +624,30 @@ describe("analysis workbench", () => {
     await waitFor(() =>
       expect(importDocument).toHaveBeenCalledWith(expect.any(File)),
     );
-    expect(await screen.findByText("已添加 口径.md")).toBeVisible();
+    expect(await screen.findByText("Added 口径.md")).toBeVisible();
   });
 
   it("shows model and shared configuration above the project tree", async () => {
     render(<App api={fakeApiWithCompletedTask()} />);
 
     const projectContext = await screen.findByRole("navigation", {
-      name: "任务台",
+      name: "Workbench",
     });
-    expect(within(projectContext).getByText("模型配置")).toBeVisible();
-    expect(within(projectContext).getByText("所有项目通用")).toBeVisible();
     expect(
-      within(projectContext).getByRole("button", { name: "配置全局数据源" }),
+      within(projectContext).getByText("Model configuration"),
     ).toBeVisible();
     expect(
-      within(projectContext).getByRole("button", { name: "配置全局业务口径" }),
+      within(projectContext).getByText("Shared by all projects"),
+    ).toBeVisible();
+    expect(
+      within(projectContext).getByRole("button", {
+        name: "Configure global data sources",
+      }),
+    ).toBeVisible();
+    expect(
+      within(projectContext).getByRole("button", {
+        name: "Configure global business definitions",
+      }),
     ).toBeVisible();
   });
 
@@ -559,10 +655,14 @@ describe("analysis workbench", () => {
     render(<App api={fakeApiWithCompletedTask()} />);
 
     fireEvent.click(
-      await screen.findByRole("button", { name: "配置全局数据源" }),
+      await screen.findByRole("button", {
+        name: "Configure global data sources",
+      }),
     );
 
-    expect(screen.getByRole("dialog", { name: "数据库治理" })).toBeVisible();
+    expect(
+      screen.getByRole("dialog", { name: "Database governance" }),
+    ).toBeVisible();
     expect(screen.getByLabelText("PostgreSQL DSN")).toHaveAttribute(
       "type",
       "password",
@@ -585,20 +685,26 @@ describe("analysis workbench", () => {
     render(<App api={api} />);
 
     fireEvent.click(
-      await screen.findByRole("button", { name: "配置全局业务口径" }),
+      await screen.findByRole("button", {
+        name: "Configure global business definitions",
+      }),
     );
-    expect(screen.getByRole("dialog", { name: "业务知识库" })).toBeVisible();
-    fireEvent.click(screen.getByRole("tab", { name: "逐条添加" }));
-    fireEvent.change(screen.getByLabelText("知识名称"), {
+    expect(
+      screen.getByRole("dialog", { name: "Business knowledge base" }),
+    ).toBeVisible();
+    fireEvent.click(screen.getByRole("tab", { name: "Add manually" }));
+    fireEvent.change(screen.getByLabelText("Knowledge name"), {
       target: { value: "经营利润" },
     });
-    fireEvent.change(screen.getByLabelText("知识定义"), {
+    fireEvent.change(screen.getByLabelText("Knowledge definition"), {
       target: { value: "收入减去全部经营成本。" },
     });
-    fireEvent.change(screen.getByLabelText("知识公式"), {
+    fireEvent.change(screen.getByLabelText("Knowledge formula"), {
       target: { value: "revenue - operating_cost" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "添加到知识库" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Add to knowledge base" }),
+    );
 
     await waitFor(() => expect(create).toHaveBeenCalled());
     expect(
@@ -632,18 +738,23 @@ describe("analysis workbench", () => {
     render(<App api={api} />);
 
     fireEvent.click(
-      await screen.findByRole("button", { name: "配置全局业务口径" }),
+      await screen.findByRole("button", {
+        name: "Configure global business definitions",
+      }),
     );
-    fireEvent.change(screen.getByLabelText("选择业务口径文档"), {
-      target: {
-        files: [
-          new File(["# 经营利润"], "财务口径.md", { type: "text/markdown" }),
-        ],
+    fireEvent.change(
+      screen.getByLabelText("Choose a business definitions document"),
+      {
+        target: {
+          files: [
+            new File(["# 经营利润"], "财务口径.md", { type: "text/markdown" }),
+          ],
+        },
       },
-    });
+    );
 
     expect(
-      await screen.findByText("财务口径.md 已导入：1 个指标。"),
+      await screen.findByText("财务口径.md imported: 1 metric."),
     ).toBeVisible();
     expect(screen.getByRole("heading", { name: "经营利润" })).toBeVisible();
   });
@@ -678,22 +789,26 @@ describe("analysis workbench", () => {
     render(<App api={api} />);
 
     fireEvent.click(
-      await screen.findByRole("button", { name: "配置全局数据源" }),
+      await screen.findByRole("button", {
+        name: "Configure global data sources",
+      }),
     );
     fireEvent.click(await screen.findByRole("button", { name: /经营库/ }));
-    const tablePolicy = await screen.findByLabelText("orders.* 权限");
+    const tablePolicy = await screen.findByLabelText("orders.* access");
     expect(tablePolicy).toBeDisabled();
-    expect(screen.getByLabelText("orders.amount 权限")).toHaveValue(
+    expect(screen.getByLabelText("orders.amount access")).toHaveValue(
       "approval_required",
     );
-    fireEvent.click(screen.getByRole("button", { name: "修改访问策略" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit access policy" }));
     fireEvent.change(tablePolicy, { target: { value: "allowed" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() =>
       expect(replace).toHaveBeenCalledWith("database-1", expect.any(Array), 3),
     );
-    expect(await screen.findByText("访问策略修改已保存为 v4。")).toBeVisible();
+    expect(
+      await screen.findByText("Access policy changes saved as v4."),
+    ).toBeVisible();
   });
 
   it("shows a masked saved DSN and updates an existing connection", async () => {
@@ -724,25 +839,36 @@ describe("analysis workbench", () => {
     render(<App api={api} />);
 
     fireEvent.click(
-      await screen.findByRole("button", { name: "配置全局数据源" }),
+      await screen.findByRole("button", {
+        name: "Configure global data sources",
+      }),
     );
-    const nameInput = await screen.findByLabelText("数据源名称");
+    const nameInput = await screen.findByLabelText("Data source name");
     const dsnInput = screen.getByLabelText("PostgreSQL DSN");
     await waitFor(() => expect(nameInput).toHaveValue("经营库"));
-    expect(dsnInput).toHaveAttribute("placeholder", "••••••••••••（已配置）");
+    expect(dsnInput).toHaveAttribute(
+      "placeholder",
+      "•••••••••••• (configured)",
+    );
     expect(dsnInput).not.toBeRequired();
     expect(
-      screen.getByText("DSN 已加密保存；留空保持原配置，输入新地址可替换。"),
+      screen.getByText(
+        "DSN is stored in encrypted form. Leave blank to keep the current value, or enter a new address to replace it.",
+      ),
     ).toBeVisible();
 
     fireEvent.change(nameInput, { target: { value: "经营分析库" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存连接修改" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Save connection changes" }),
+    );
 
     await waitFor(() =>
       expect(update).toHaveBeenCalledWith("database-1", { name: "经营分析库" }),
     );
     expect(
-      await screen.findByText("连接配置已更新；DSN 已安全保存。"),
+      await screen.findByText(
+        "Connection settings updated; the DSN is stored securely.",
+      ),
     ).toBeVisible();
   });
 
@@ -769,25 +895,29 @@ describe("analysis workbench", () => {
     render(<App api={api} />);
 
     fireEvent.click(
-      await screen.findByRole("button", { name: "配置全局数据源" }),
+      await screen.findByRole("button", {
+        name: "Configure global data sources",
+      }),
     );
-    fireEvent.click(await screen.findByRole("button", { name: "删除数据源" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Delete data source" }),
+    );
 
     expect(remove).not.toHaveBeenCalled();
     expect(
-      screen.getByRole("alertdialog", { name: "删除 经营库？" }),
+      screen.getByRole("alertdialog", { name: "Delete 经营库?" }),
     ).toBeVisible();
     expect(
       screen.getByText(
-        "删除后，所有项目都无法再使用此连接；已产生的历史查询与审计记录会继续保留。",
+        "After deletion, no project will be able to use this connection. Existing query history and audit records will be retained.",
       ),
     ).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm deletion" }));
 
     await waitFor(() => expect(remove).toHaveBeenCalledWith("database-1"));
     expect(
       await screen.findByText(
-        "已删除数据源 经营库；历史查询与审计记录仍保留。",
+        "Deleted data source 经营库; historical queries and audit records are retained.",
       ),
     ).toBeVisible();
     expect(
@@ -819,20 +949,24 @@ describe("analysis workbench", () => {
     render(<App api={api} />);
 
     fireEvent.click(
-      await screen.findByRole("button", { name: "配置全局数据源" }),
+      await screen.findByRole("button", {
+        name: "Configure global data sources",
+      }),
     );
-    expect(await screen.findByText("暂时无法连接数据库")).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "修改访问策略" }));
-    fireEvent.change(screen.getByLabelText("手动添加表名"), {
+    expect(
+      await screen.findByText("Unable to connect to the database right now"),
+    ).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Edit access policy" }));
+    fireEvent.change(screen.getByLabelText("Manually add table name"), {
       target: { value: "orders" },
     });
-    fireEvent.change(screen.getByLabelText("手动添加字段名"), {
+    fireEvent.change(screen.getByLabelText("Manually add field name"), {
       target: { value: "customer_email" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "添加规则" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add rule" }));
 
-    expect(screen.getByLabelText("orders.* 权限")).toBeEnabled();
-    expect(screen.getByLabelText("orders.customer_email 权限")).toBeEnabled();
+    expect(screen.getByLabelText("orders.* access")).toBeEnabled();
+    expect(screen.getByLabelText("orders.customer_email access")).toBeEnabled();
   });
 
   it("shows durable agents and correlated trace in the evidence workspace", async () => {
@@ -882,25 +1016,27 @@ describe("analysis workbench", () => {
     render(<App api={api} />);
 
     const workspace = await screen.findByRole("complementary", {
-      name: "证据与运行",
+      name: "Evidence & runs",
     });
-    fireEvent.click(within(workspace).getByRole("tab", { name: "运行" }));
+    fireEvent.click(within(workspace).getByRole("tab", { name: "Runs" }));
     fireEvent.click(within(workspace).getByRole("tab", { name: /Agent/ }));
     expect(await within(workspace).findByText("执行受控 SQL")).toBeVisible();
 
     fireEvent.click(within(workspace).getByRole("tab", { name: /Trace/ }));
     fireEvent.change(
-      within(workspace).getByRole("combobox", { name: "选择运行" }),
+      within(workspace).getByRole("combobox", { name: "Select a run" }),
       {
         target: { value: "run-1" },
       },
     );
-    expect(await within(workspace).findByText("SQL 校验")).toBeVisible();
+    expect(await within(workspace).findByText("SQL validated")).toBeVisible();
     expect(
-      within(workspace).getByRole("button", { name: "接受运行并沉淀 Skill" }),
+      within(workspace).getByRole("button", {
+        name: "Accept run and create skill candidate",
+      }),
     ).toBeVisible();
     expect(
-      within(workspace).getByRole("link", { name: "完整回放 JSON" }),
+      within(workspace).getByRole("link", { name: "Full replay JSON" }),
     ).toHaveAttribute("href", "/api/runs/run-1/replay");
   });
 
@@ -908,26 +1044,37 @@ describe("analysis workbench", () => {
     render(<App api={fakeApiWithCompletedTask()} />);
 
     const artifacts = await screen.findByRole("complementary", {
-      name: "证据与运行",
+      name: "Evidence & runs",
     });
     expect(
       within(artifacts).getByText("物流成本增长是主要变化。"),
     ).toBeVisible();
 
-    fireEvent.click(within(artifacts).getByRole("tab", { name: /图表/ }));
+    fireEvent.click(within(artifacts).getByRole("tab", { name: /Charts/ }));
     const artifactLink = within(artifacts).getByRole("link", {
-      name: "打开 物流成本趋势",
+      name: "Open 物流成本趋势",
     });
     expect(artifactLink).toHaveAttribute(
       "href",
       "/api/artifacts/chart-1/content",
     );
+    expect(
+      within(artifacts).getByTitle("物流成本趋势 preview"),
+    ).toHaveAttribute("src", "/api/artifacts/chart-1/content?preview=true");
 
-    fireEvent.click(within(artifacts).getByRole("tab", { name: /数据/ }));
-    expect(within(artifacts).getByText("暂无数据产物")).toBeVisible();
+    fireEvent.click(within(artifacts).getByRole("tab", { name: /Data/ }));
+    expect(within(artifacts).getByText("No data artifacts")).toBeVisible();
   });
 
   it("renders the analysis summary as Markdown and exports reports as PDF or Markdown", async () => {
+    const reportFetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        new Response(
+          "# East Region March Profit Review\n\n> Investigate logistics first.\n\n## Driver bridge\n\n| Driver | Effect |\n| --- | ---: |\n| Logistics | -27 |",
+          { status: 200, headers: { "Content-Type": "text/markdown" } },
+        ),
+      );
     const api = fakeApiWithCompletedTask();
     const getTask = api.getTask.bind(api);
     api.getTask = async (taskId) => {
@@ -961,7 +1108,7 @@ describe("analysis workbench", () => {
     render(<App api={api} />);
 
     const workspace = await screen.findByRole("complementary", {
-      name: "证据与运行",
+      name: "Evidence & runs",
     });
     expect(
       await within(workspace).findByRole("heading", { name: "关键发现" }),
@@ -970,11 +1117,36 @@ describe("analysis workbench", () => {
     expect(
       within(workspace).queryByText("**利润下滑**"),
     ).not.toBeInTheDocument();
+    const renderedReport = await within(workspace).findByRole("region", {
+      name: "华东利润诊断报告 report content",
+    });
+    expect(
+      within(renderedReport).getByRole("heading", {
+        name: "East Region March Profit Review",
+      }),
+    ).toBeVisible();
+    expect(
+      within(renderedReport).getByText("Investigate logistics first."),
+    ).toBeVisible();
+    expect(within(renderedReport).getByRole("table")).toBeVisible();
+    const summary = within(workspace).getByRole("heading", {
+      name: "Analysis summary",
+    });
+    expect(
+      renderedReport.compareDocumentPosition(summary) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(reportFetch).toHaveBeenCalledWith(
+      "/api/artifacts/report-1/content",
+      expect.objectContaining({
+        headers: { Accept: "text/markdown, text/plain;q=0.9" },
+      }),
+    );
 
     const format = within(workspace).getByRole("combobox", {
-      name: "华东利润诊断报告 导出格式",
+      name: "华东利润诊断报告 export format",
     });
-    const exportLink = within(workspace).getByRole("link", { name: /导出/ });
+    const exportLink = within(workspace).getByRole("link", { name: /Export/ });
     expect(format).toHaveValue("pdf");
     expect(exportLink).toHaveAttribute(
       "href",
@@ -985,6 +1157,47 @@ describe("analysis workbench", () => {
       "href",
       "/api/artifacts/report-1/export?format=markdown",
     );
+  });
+
+  it("keeps report actions available when inline preview fails", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("Unavailable", { status: 503 }),
+    );
+    const api = fakeApiWithCompletedTask();
+    const getTask = api.getTask.bind(api);
+    api.getTask = async (taskId) => ({
+      ...(await getTask(taskId)),
+      artifacts: [
+        {
+          id: "report-failed",
+          project_id: "project-1",
+          task_id: "task-1",
+          artifact_type: "markdown_report",
+          title: "Operational review",
+          description: "Evidence-linked report",
+          content_type: "text/markdown",
+          created_at: "2026-08-05T00:05:00Z",
+          content_url: "/api/artifacts/report-failed/content",
+        },
+      ],
+    });
+
+    render(<App api={api} />);
+
+    const workspace = await screen.findByRole("complementary", {
+      name: "Evidence & runs",
+    });
+    expect(
+      await within(workspace).findByText(
+        "Report preview is unavailable. Open or export the artifact below.",
+      ),
+    ).toBeVisible();
+    expect(
+      within(workspace).getByRole("link", { name: "Open Operational review" }),
+    ).toHaveAttribute("href", "/api/artifacts/report-failed/content");
+    expect(
+      within(workspace).getByRole("link", { name: /Export/ }),
+    ).toBeVisible();
   });
 
   it("renders assistant Markdown inside the center conversation", async () => {
@@ -1004,7 +1217,9 @@ describe("analysis workbench", () => {
     });
     render(<App api={api} />);
 
-    const conversation = await screen.findByRole("main", { name: "分析对话" });
+    const conversation = await screen.findByRole("main", {
+      name: "Analysis conversation",
+    });
     const markdown = conversation.querySelector<HTMLElement>(
       ".conversation-markdown",
     );
@@ -1024,35 +1239,37 @@ describe("analysis workbench", () => {
     render(<App api={fakeApiWithCompletedTask()} />);
 
     const workspace = await screen.findByRole("complementary", {
-      name: "证据与运行",
+      name: "Evidence & runs",
     });
     expect(
-      within(workspace).getByRole("tab", { name: "证据" }),
+      within(workspace).getByRole("tab", { name: "Evidence" }),
     ).toHaveAttribute("aria-selected", "true");
     expect(
       within(workspace).queryByRole("tab", { name: /Agent/ }),
     ).not.toBeInTheDocument();
-    fireEvent.click(within(workspace).getByRole("tab", { name: "运行" }));
+    fireEvent.click(within(workspace).getByRole("tab", { name: "Runs" }));
     expect(within(workspace).getByRole("tab", { name: /Agent/ })).toBeVisible();
 
     fireEvent.click(
-      within(workspace).getByRole("button", { name: "隐藏证据与运行" }),
+      within(workspace).getByRole("button", { name: "Hide evidence and runs" }),
     );
     expect(
-      screen.queryByRole("complementary", { name: "证据与运行" }),
+      screen.queryByRole("complementary", { name: "Evidence & runs" }),
     ).not.toBeInTheDocument();
     expect(
-      screen.getByRole("main", { name: "分析对话" }).parentElement,
+      screen.getByRole("main", { name: "Analysis conversation" }).parentElement,
     ).toHaveClass("artifact-collapsed");
-    const toggle = screen.getByRole("button", { name: "打开证据与运行" });
+    const toggle = screen.getByRole("button", {
+      name: "Open evidence and runs",
+    });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     fireEvent.click(toggle);
     expect(toggle).toHaveAttribute("aria-expanded", "true");
     expect(
-      await screen.findByRole("complementary", { name: "证据与运行" }),
+      await screen.findByRole("complementary", { name: "Evidence & runs" }),
     ).toBeVisible();
     expect(
-      screen.getByRole("main", { name: "分析对话" }).parentElement,
+      screen.getByRole("main", { name: "Analysis conversation" }).parentElement,
     ).not.toHaveClass("artifact-collapsed");
   });
 
@@ -1063,12 +1280,23 @@ describe("analysis workbench", () => {
     render(<App api={api} />);
 
     expect(
-      await screen.findByRole("textbox", { name: "分析目标" }),
+      await screen.findByRole("textbox", { name: "Analysis objective" }),
     ).toBeVisible();
     expect(
-      screen.queryByRole("textbox", { name: "给分析 Agent 留言" }),
+      screen.queryByRole("textbox", { name: "Message the analysis agent" }),
     ).not.toBeInTheDocument();
-    expect(screen.getByLabelText("在提出问题前上传分析文件")).toBeVisible();
+    expect(
+      screen.getByLabelText("Upload an analysis file before asking a question"),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("list", { name: "Example analysis deliverables" }),
+    ).toHaveTextContent("Comparison chart");
+    fireEvent.click(screen.getByRole("button", { name: /Use this brief/ }));
+    expect(
+      screen.getByRole("textbox", { name: "Analysis objective" }),
+    ).toHaveValue(
+      "Why did profit in the East region decline in March versus February? Quantify the revenue, product-cost, and logistics-cost drivers by category; create a comparison chart; and publish an evidence-linked management report with the first issue to investigate.",
+    );
   });
 
   it("uploads CSV before the first question is submitted", async () => {
@@ -1089,18 +1317,23 @@ describe("analysis workbench", () => {
     api.uploadDataset = upload;
     render(<App api={api} />);
 
-    fireEvent.change(await screen.findByLabelText("在提出问题前上传分析文件"), {
-      target: {
-        files: [
-          new File(["region,revenue"], "first.csv", { type: "text/csv" }),
-        ],
+    fireEvent.change(
+      await screen.findByLabelText(
+        "Upload an analysis file before asking a question",
+      ),
+      {
+        target: {
+          files: [
+            new File(["region,revenue"], "first.csv", { type: "text/csv" }),
+          ],
+        },
       },
-    });
+    );
 
     await waitFor(() =>
       expect(upload).toHaveBeenCalledWith("project-1", expect.any(File)),
     );
-    expect(await screen.findByText("已添加 first.csv")).toBeVisible();
+    expect(await screen.findByText("Added first.csv")).toBeVisible();
   });
 
   it("shows approval cards and records a decision", async () => {
@@ -1112,7 +1345,7 @@ describe("analysis workbench", () => {
     render(<App api={fakeApiWithCompletedTask(true, decideApproval)} />);
 
     expect(await screen.findByText("覆盖已有产物需要确认")).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "批准操作" }));
+    fireEvent.click(screen.getByRole("button", { name: "Approve action" }));
 
     await waitFor(() => {
       expect(decideApproval).toHaveBeenCalledWith("approval-1", true);
@@ -1132,18 +1365,22 @@ describe("analysis workbench", () => {
     api.saveModelConfiguration = saveModelConfiguration;
     render(<App api={api} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "配置模型" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Configure model" }),
+    );
     fireEvent.click(screen.getByRole("radio", { name: "第三方中转站" }));
     fireEvent.change(screen.getByLabelText("Base URL"), {
       target: { value: "https://relay.example/v1" },
     });
-    fireEvent.change(screen.getByLabelText("模型名称"), {
+    fireEvent.change(screen.getByLabelText("Model name"), {
       target: { value: "relay-model" },
     });
     fireEvent.change(screen.getByLabelText("API Key"), {
       target: { value: "relay-secret" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "保存模型配置" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Save model configuration" }),
+    );
 
     await waitFor(() => {
       expect(saveModelConfiguration).toHaveBeenCalledWith({
@@ -1161,7 +1398,9 @@ describe("analysis workbench", () => {
     api.getModelConfiguration = async () => UNCONFIGURED_MODEL;
     render(<App api={api} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "配置模型" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Configure model" }),
+    );
     fireEvent.click(screen.getByRole("radio", { name: "DeepSeek" }));
 
     expect(screen.getByDisplayValue("https://api.deepseek.com")).toBeDisabled();
@@ -1185,7 +1424,7 @@ describe("analysis workbench", () => {
     render(<App api={fakeApiWithCompletedTask()} />);
 
     fireEvent.click(
-      await screen.findByRole("button", { name: "更改模型配置" }),
+      await screen.findByRole("button", { name: "Change model configuration" }),
     );
     expect(screen.getByLabelText("API Key")).not.toBeRequired();
 

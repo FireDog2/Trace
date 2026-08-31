@@ -7,6 +7,7 @@ import pytest
 import data_analysis_agent.execution as execution_module
 from data_analysis_agent.domain import ArtifactType, ExecutionStatus
 from data_analysis_agent.execution import (
+    DatasetQueryError,
     DuckDBExecutor,
     QueryTimeoutError,
     ReadOnlyQueryError,
@@ -36,6 +37,27 @@ def test_duckdb_queries_registered_csv(duckdb_executor, dataset_artifact) -> Non
     assert result.columns == ("region", "profit")
     assert result.row_count == 3
     assert result.preview[0] == {"region": "East", "profit": 208}
+
+
+@pytest.mark.parametrize(
+    ("sql", "category"),
+    [
+        ("SELECT * FROM missing_table", "unresolved_table"),
+        ("SELECT missing_column FROM operations", "unresolved_column"),
+        ("SELECT FROM operations", "parse_error"),
+    ],
+)
+def test_duckdb_returns_structured_query_errors(
+    duckdb_executor, dataset_artifact, sql, category
+) -> None:
+    with pytest.raises(DatasetQueryError) as error:
+        duckdb_executor.query(
+            dataset_artifact.project_id,
+            sql,
+            {"operations": dataset_artifact.id},
+        )
+
+    assert error.value.category == category
 
 
 def test_duckdb_timeout_interrupts_and_closes_connection(

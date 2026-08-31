@@ -54,6 +54,10 @@ class TaskDeletionConflict(RepositoryError):
     """Raised when an active task cannot be safely deleted."""
 
 
+class ProjectDeletionConflict(RepositoryError):
+    """Raised when a project with active tasks cannot be safely deleted."""
+
+
 class ProtectedMessageError(RepositoryError):
     """Protected agent message content cannot be stored or recovered safely."""
 
@@ -189,6 +193,130 @@ class ProjectRepository:
         if cursor.rowcount == 0:
             raise RecordNotFoundError(f"Project not found: {project_id}")
         return self.get(project_id)
+
+    @sqlite_connection_guarded
+    def delete(self, project_id: str) -> None:
+        if project_id == GLOBAL_PROJECT_ID:
+            raise RecordNotFoundError(f"Project not found: {project_id}")
+        if self._connection.execute(
+            "SELECT 1 FROM projects WHERE id = ?",
+            (project_id,),
+        ).fetchone() is None:
+            raise RecordNotFoundError(f"Project not found: {project_id}")
+        terminal_statuses = (
+            TaskStatus.COMPLETED.value,
+            TaskStatus.FAILED.value,
+            TaskStatus.CANCELLED.value,
+        )
+        active_task = self._connection.execute(
+            "SELECT 1 FROM tasks WHERE project_id = ? AND status NOT IN (?, ?, ?) LIMIT 1",
+            (project_id, *terminal_statuses),
+        ).fetchone()
+        if active_task is not None:
+            raise ProjectDeletionConflict("Projects with active tasks cannot be deleted")
+
+        task_ids = "SELECT id FROM tasks WHERE project_id = ?"
+        artifact_ids = "SELECT id FROM artifacts WHERE project_id = ?"
+        analysis_run_ids = f"SELECT id FROM analysis_runs WHERE task_id IN ({task_ids})"
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            self._connection.execute(
+                f"DELETE FROM skill_candidates WHERE source_run_id IN ({analysis_run_ids})",
+                (project_id,),
+            )
+            self._connection.execute(
+                f"DELETE FROM agent_runs WHERE task_id IN ({task_ids})",
+                (project_id,),
+            )
+            self._connection.execute(
+                f"DELETE FROM trace_events WHERE task_id IN ({task_ids})",
+                (project_id,),
+            )
+            self._connection.execute(
+                f"DELETE FROM analysis_runs WHERE task_id IN ({task_ids})",
+                (project_id,),
+            )
+            self._connection.execute(
+                f"DELETE FROM database_query_attempts WHERE task_id IN ({task_ids})",
+                (project_id,),
+            )
+            self._connection.execute(
+                f"DELETE FROM artifact_inputs WHERE artifact_id IN ({artifact_ids}) "
+                f"OR input_artifact_id IN ({artifact_ids})",
+                (project_id, project_id),
+            )
+            self._connection.execute(
+                f"DELETE FROM evidence_links WHERE report_artifact_id IN ({artifact_ids}) "
+                f"OR evidence_artifact_id IN ({artifact_ids})",
+                (project_id, project_id),
+            )
+            self._connection.execute("DELETE FROM artifacts WHERE project_id = ?", (project_id,))
+            self._connection.execute(
+                f"DELETE FROM tool_executions WHERE task_id IN ({task_ids})",
+                (project_id,),
+            )
+            self._connection.execute(
+                "DELETE FROM plan_steps WHERE plan_revision_id IN "
+                f"(SELECT id FROM plan_revisions WHERE task_id IN ({task_ids}))",
+                (project_id,),
+            )
+            self._connection.execute(
+                f"DELETE FROM plan_revisions WHERE task_id IN ({task_ids})",
+                (project_id,),
+            )
+            self._connection.execute(
+                f"DELETE FROM approvals WHERE task_id IN ({task_ids})",
+                (project_id,),
+            )
+            self._connection.execute(
+                f"DELETE FROM task_query_budget WHERE task_id IN ({task_ids})",
+                (project_id,),
+            )
+            self._connection.execute(
+                f"DELETE FROM task_events WHERE task_id IN ({task_ids})",
+                (project_id,),
+            )
+            self._connection.execute(
+                f"DELETE FROM messages WHERE task_id IN ({task_ids})",
+                (project_id,),
+            )
+            for source in self._connection.execute(
+                "SELECT id, name FROM data_sources WHERE project_id = ?",
+                (project_id,),
+            ).fetchall():
+                source_name = source["name"]
+                if self._connection.execute(
+                    "SELECT 1 FROM data_sources WHERE project_id = ? AND name = ? LIMIT 1",
+                    (GLOBAL_PROJECT_ID, source_name),
+                ).fetchone() is not None:
+                    source_name = f"{source_name} [{source['id']}]"
+                self._connection.execute(
+                    "UPDATE data_sources SET project_id = ?, name = ?, updated_at = ? "
+                    "WHERE id = ?",
+                    (GLOBAL_PROJECT_ID, source_name, utc_now(), source["id"]),
+                )
+            for entry in self._connection.execute(
+                "SELECT id, name FROM business_knowledge_entries WHERE project_id = ?",
+                (project_id,),
+            ).fetchall():
+                entry_name = entry["name"]
+                if self._connection.execute(
+                    "SELECT 1 FROM business_knowledge_entries "
+                    "WHERE project_id = ? AND name = ? COLLATE NOCASE LIMIT 1",
+                    (GLOBAL_PROJECT_ID, entry_name),
+                ).fetchone() is not None:
+                    entry_name = f"{entry_name} [{entry['id']}]"
+                self._connection.execute(
+                    "UPDATE business_knowledge_entries "
+                    "SET project_id = ?, name = ?, updated_at = ? WHERE id = ?",
+                    (GLOBAL_PROJECT_ID, entry_name, utc_now(), entry["id"]),
+                )
+            self._connection.execute("DELETE FROM tasks WHERE project_id = ?", (project_id,))
+            self._connection.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+            self._connection.commit()
+        except BaseException:
+            self._connection.rollback()
+            raise
 
     @sqlite_connection_guarded
     def list(self) -> tuple[Project, ...]:

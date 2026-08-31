@@ -27,6 +27,8 @@ def test_lead_prompt_has_explicit_role_routing_contract() -> None:
     assert "Report Agent" in prompt
     assert "Lead must not" in prompt
     assert "at most three active teammates" in prompt
+    assert "never send a final or placeholder response" in prompt
+    assert "at least one decision-relevant chart" in prompt
 
 
 def test_agent_executes_tools_and_completes(
@@ -63,6 +65,79 @@ def test_agent_executes_tools_and_completes(
     ]
 
 
+def test_agent_auto_awaits_active_teammate_instead_of_completing_placeholder(
+    settings,
+    task_repository,
+    task,
+) -> None:
+    class Protector:
+        def protect(self, value):
+            return b"cipher:" + value.encode()
+
+        def unprotect(self, value):
+            return value.removeprefix(b"cipher:").decode()
+
+    class Registry:
+        def __init__(self) -> None:
+            self.active = True
+            self.calls = []
+
+        def schemas(self):
+            return ()
+
+        def active_teammate_ids(self, task_id):
+            assert task_id == task.id
+            return ("sql-1",) if self.active else ()
+
+        def execute(self, call, context):
+            assert context.task_id == task.id
+            self.calls.append(call)
+            self.active = False
+            return ToolResult(
+                call_id=call.id,
+                success=True,
+                output={
+                    "agents": [
+                        {
+                            "agent_id": "sql-1",
+                            "role": "sql",
+                            "status": "completed",
+                            "result": {"summary": "Evidence ready"},
+                        }
+                    ]
+                },
+            )
+
+    registry = Registry()
+    completed = AgentRunner(
+        settings=settings,
+        provider=ScriptedProvider(
+            [
+                response_with_text("The SQL Agent is still working. Please wait."),
+                response_with_text("Profit declined because logistics cost increased."),
+            ]
+        ),
+        tools=registry,
+        tasks=task_repository,
+        secret_protector=Protector(),
+    ).run(task.id)
+
+    assert completed.status is TaskStatus.COMPLETED
+    assert len(registry.calls) == 1
+    assert registry.calls[0].name == "await_teammates"
+    assert registry.calls[0].arguments == {
+        "agent_ids": ["sql-1"],
+        "timeout_seconds": min(settings.teammate_timeout_seconds, 120),
+    }
+    messages = task_repository.list_messages(task.id)
+    assert [message.role for message in messages] == [
+        "assistant_tool_call",
+        "tool",
+        "assistant",
+    ]
+    assert all("Please wait" not in message.content for message in messages)
+
+
 def test_agent_pauses_for_business_input(
     settings,
     task_repository,
@@ -86,7 +161,13 @@ def test_agent_pauses_for_business_input(
     ).run(task.id)
 
     assert paused.status is TaskStatus.NEEDS_INPUT
-    assert "profit definition" in task_repository.list_messages(task.id)[0].content
+    messages = task_repository.list_messages(task.id)
+    assert [message.role for message in messages] == [
+        "assistant_tool_call",
+        "tool",
+        "assistant",
+    ]
+    assert "profit definition" in messages[-1].content
 
 
 def test_agent_stops_when_a_tool_moves_task_to_needs_input_without_pause_flag(
@@ -133,7 +214,10 @@ def test_agent_resumes_after_approval_without_fake_user_message(
     ).resume_approval(task.id)
 
     assert completed.status is TaskStatus.COMPLETED
-    assert [message.role for message in task_repository.list_messages(task.id)] == ["assistant"]
+    messages = task_repository.list_messages(task.id)
+    assert [message.role for message in messages] == ["system", "assistant"]
+    assert all(message.role != "user" for message in messages)
+    assert "Do not request confirmation again" in messages[0].content
 
 
 def test_database_rich_result_is_current_run_only_and_persisted_as_safe_summary(

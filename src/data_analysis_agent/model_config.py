@@ -49,7 +49,7 @@ MODEL_PROVIDER_CATALOG = (
     ),
     ProviderDefinition(
         kind=ModelProviderKind.CUSTOM,
-        label="第三方中转站",
+        label="Custom Gateway",
         base_url=None,
         models=(),
         default_model="",

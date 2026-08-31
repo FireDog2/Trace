@@ -7,9 +7,9 @@ const roles = {
 };
 export function AgentTeamPanel({ agents }: { agents: AgentRun[] }) {
   return (
-    <section aria-label="Agent 团队">
+    <section aria-label="Agent team">
       <div className="panel-heading">
-        <h2>Agent 团队</h2>
+        <h2>Agent team</h2>
         <span>{agents.length} ACTIVE RECORDS</span>
       </div>
       {agents.length ? (
@@ -30,7 +30,9 @@ export function AgentTeamPanel({ agents }: { agents: AgentRun[] }) {
         </ul>
       ) : (
         <p className="empty-note">
-          Lead Agent 尚未派发队友。执行 SQL、查找口径或生成报告时会在这里出现。
+          The lead agent has not delegated to any teammates yet. They will
+          appear here when SQL is executed, definitions are retrieved, or
+          reports are generated.
         </p>
       )}
     </section>

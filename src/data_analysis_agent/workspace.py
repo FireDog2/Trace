@@ -43,6 +43,13 @@ class WorkspaceService:
             (root / directory).mkdir(exist_ok=True)
         return root
 
+    def delete_project(self, project_id: str) -> None:
+        root = self.project_root(project_id)
+        if root.parent != self._projects_root or root == self._projects_root:
+            raise WorkspaceBoundaryError(project_id)
+        if root.exists():
+            shutil.rmtree(root)
+
     def resolve_inside(self, project_id: str, relative_path: str | Path) -> Path:
         root = self.project_root(project_id)
         candidate_path = Path(relative_path)

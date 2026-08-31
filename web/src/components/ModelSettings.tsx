@@ -118,13 +118,16 @@ export function ModelSettings({
         <header className="model-settings-header">
           <div>
             <span className="settings-index">MODEL ROUTE / RUNTIME</span>
-            <h2 id="model-settings-title">模型配置</h2>
-            <p>保存后立即用于新分析任务，不需要重启服务。</p>
+            <h2 id="model-settings-title">Model configuration</h2>
+            <p>
+              Saved settings apply to new analysis tasks immediately. No service
+              restart is required.
+            </p>
           </div>
           <button
             type="button"
             className="settings-close"
-            aria-label="关闭模型配置"
+            aria-label="Close model configuration"
             onClick={onClose}
           >
             ×
@@ -137,10 +140,10 @@ export function ModelSettings({
               className="settings-provider-panel"
               aria-labelledby="provider-heading"
             >
-              <h3 id="provider-heading">模型供应商</h3>
-              <p>选择分析任务使用的推理服务。</p>
+              <h3 id="provider-heading">Model provider</h3>
+              <p>Choose the inference service used for analysis tasks.</p>
               <fieldset className="provider-selector">
-                <legend className="sr-only">选择厂商</legend>
+                <legend className="sr-only">Choose a provider</legend>
                 {configuration.providers.map((item, index) => (
                   <label
                     key={item.provider}
@@ -158,7 +161,9 @@ export function ModelSettings({
                     <span>
                       <strong>{item.label}</strong>
                       <small>
-                        {item.custom_url ? "OpenAI 兼容接口" : "官方接口"}
+                        {item.custom_url
+                          ? "OpenAI-compatible API"
+                          : "Official API"}
                       </small>
                     </span>
                   </label>
@@ -170,8 +175,11 @@ export function ModelSettings({
               className="settings-config-panel"
               aria-labelledby="configuration-heading"
             >
-              <h3 id="configuration-heading">连接配置</h3>
-              <p>设置当前供应商的服务地址、模型和访问密钥。</p>
+              <h3 id="configuration-heading">Connection settings</h3>
+              <p>
+                Set the service URL, model, and API key for the current
+                provider.
+              </p>
               <div className="settings-fields">
                 <label>
                   <span>Base URL</span>
@@ -184,15 +192,17 @@ export function ModelSettings({
                     onChange={(event) => setBaseUrl(event.target.value)}
                   />
                   {!definition.custom_url && (
-                    <small>官方地址已锁定，避免误配。</small>
+                    <small>
+                      The official URL is locked to prevent misconfiguration.
+                    </small>
                   )}
                 </label>
 
                 <label>
-                  <span>模型</span>
+                  <span>Model</span>
                   {definition.models.length > 0 ? (
                     <select
-                      aria-label="模型"
+                      aria-label="Model"
                       value={model}
                       onChange={(event) => setModel(event.target.value)}
                     >
@@ -204,10 +214,10 @@ export function ModelSettings({
                     </select>
                   ) : (
                     <input
-                      aria-label="模型名称"
+                      aria-label="Model name"
                       value={model}
                       required
-                      placeholder="例如：provider/model-name"
+                      placeholder="For example: provider/model-name"
                       onChange={(event) => setModel(event.target.value)}
                     />
                   )}
@@ -223,15 +233,15 @@ export function ModelSettings({
                     autoComplete="new-password"
                     placeholder={
                       preservesKey
-                        ? "留空则继续使用已保存的密钥"
-                        : "输入厂商 API Key"
+                        ? "Leave blank to keep the saved key"
+                        : "Enter the provider API key"
                     }
                     onChange={(event) => setApiKey(event.target.value)}
                   />
                   <small>
                     {preservesKey
-                      ? "已安全保存；此处不会回显。"
-                      : "密钥仅保存在当前 Windows 用户的加密存储中。"}
+                      ? "Saved securely; the key is never displayed here."
+                      : "The key is stored only in encrypted storage for the current Windows user."}
                   </small>
                 </label>
               </div>
@@ -247,14 +257,14 @@ export function ModelSettings({
           <footer className="settings-actions">
             <span>
               {configuration.configured
-                ? "更新将作用于下一次执行"
-                : "完成配置后即可开始分析"}
+                ? "Updates apply to the next run"
+                : "Complete setup to start analyzing"}
             </span>
             <button type="button" onClick={onClose}>
-              取消
+              Cancel
             </button>
             <button type="submit" disabled={saving}>
-              {saving ? "保存中…" : "保存模型配置"}
+              {saving ? "Saving…" : "Save model configuration"}
             </button>
           </footer>
         </form>

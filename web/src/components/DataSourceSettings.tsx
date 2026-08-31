@@ -51,7 +51,9 @@ export function DataSourceSettings({
         setSources(items);
         if (items[0]) void choose(items[0]);
       })
-      .catch(() => setError("无法读取数据源。请确认项目权限。"));
+      .catch(() =>
+        setError("Unable to load data sources. Check the project permissions."),
+      );
   }, [api, open]);
 
   async function choose(next: DataSource) {
@@ -96,7 +98,9 @@ export function DataSourceSettings({
       );
     } catch {
       setSchemaStatus("error");
-      setError("无法读取已有访问策略，请刷新后重试。");
+      setError(
+        "Unable to load the existing access policy. Refresh and try again.",
+      );
     }
   }
 
@@ -119,15 +123,15 @@ export function DataSourceSettings({
       if (!source) setEditing(true);
       setNotice(
         source
-          ? "连接配置已更新；DSN 已安全保存。"
-          : "已保存连接。现在可以配置首个访问策略版本。",
+          ? "Connection settings updated; the DSN is stored securely."
+          : "Connection saved. You can now configure the first access policy version.",
       );
     } catch {
       setDsn("");
       setError(
         source
-          ? "连接修改未保存。请检查名称或新的 PostgreSQL DSN。"
-          : "连接未保存。请检查 PostgreSQL DSN。",
+          ? "Connection changes were not saved. Check the name or new PostgreSQL DSN."
+          : "Connection was not saved. Check the PostgreSQL DSN.",
       );
     }
   }
@@ -166,11 +170,13 @@ export function DataSourceSettings({
       setEditing(false);
       setDeleteConfirmOpen(false);
       setNotice(
-        `已删除数据源 ${deletedSource.name}；历史查询与审计记录仍保留。`,
+        `Deleted data source ${deletedSource.name}; historical queries and audit records are retained.`,
       );
     } catch (reason) {
       setError(
-        reason instanceof Error ? reason.message : "数据源未删除，请稍后重试。",
+        reason instanceof Error
+          ? reason.message
+          : "The data source was not deleted. Try again later.",
       );
     } finally {
       setDeleting(false);
@@ -235,12 +241,12 @@ export function DataSourceSettings({
       );
       setSavedRules(rules);
       setEditing(false);
-      setNotice(`访问策略修改已保存为 v${saved.version}。`);
+      setNotice(`Access policy changes saved as v${saved.version}.`);
     } catch (reason) {
       setError(
         reason instanceof Error && reason.message.includes("changed")
-          ? "访问策略已被其他人修改，请重新载入后再编辑。"
-          : "策略未保存。请检查字段配置后重试。",
+          ? "The access policy was changed by someone else. Reload it before editing."
+          : "The policy was not saved. Check the field configuration and try again.",
       );
     } finally {
       setSaving(false);
@@ -260,18 +266,20 @@ export function DataSourceSettings({
         className="data-source-settings"
         role="dialog"
         aria-modal="true"
-        aria-label="数据库治理"
+        aria-label="Database governance"
       >
         <header className="drawer-header">
           <div>
             <span className="settings-index">GOVERN / POSTGRES</span>
-            <h2>数据库治理</h2>
-            <p>连接、字段级策略与人工审批边界。</p>
+            <h2>Database governance</h2>
+            <p>
+              Connections, field-level policies, and human approval boundaries.
+            </p>
           </div>
           <button
             className="settings-close"
             onClick={onClose}
-            aria-label="关闭数据库治理"
+            aria-label="Close database governance"
           >
             ×
           </button>
@@ -291,7 +299,11 @@ export function DataSourceSettings({
               <span className="settings-index">
                 {source ? "EDIT CONNECTION" : "NEW CONNECTION"}
               </span>
-              <h3>{source ? "修改连接配置" : "添加 PostgreSQL 连接"}</h3>
+              <h3>
+                {source
+                  ? "Edit connection settings"
+                  : "Add PostgreSQL connection"}
+              </h3>
             </div>
             {source && (
               <div className="connection-editor-actions">
@@ -300,18 +312,18 @@ export function DataSourceSettings({
                   className="delete-source-trigger"
                   onClick={() => setDeleteConfirmOpen(true)}
                 >
-                  删除数据源
+                  Delete data source
                 </button>
                 <button type="button" onClick={beginNewSource}>
-                  ＋ 新增连接
+                  ＋ Add connection
                 </button>
               </div>
             )}
           </div>
           <label>
-            <span>数据源名称</span>
+            <span>Data source name</span>
             <input
-              aria-label="数据源名称"
+              aria-label="Data source name"
               value={name}
               onChange={(event) => setName(event.target.value)}
               required
@@ -328,19 +340,20 @@ export function DataSourceSettings({
               required={!source}
               placeholder={
                 source
-                  ? "••••••••••••（已配置）"
+                  ? "•••••••••••• (configured)"
                   : "postgresql://user:password@host:5432/database"
               }
             />
             {source && (
               <small className="credential-hint">
-                <i aria-hidden="true">✓</i> DSN
-                已加密保存；留空保持原配置，输入新地址可替换。
+                <i aria-hidden="true">✓</i> DSN is stored in encrypted form.
+                Leave blank to keep the current value, or enter a new address to
+                replace it.
               </small>
             )}
           </label>
           <button type="submit" className="primary-action">
-            {source ? "保存连接修改" : "保存并检查连接"}
+            {source ? "Save connection changes" : "Save and test connection"}
           </button>
         </form>
         {source && deleteConfirmOpen && (
@@ -351,9 +364,10 @@ export function DataSourceSettings({
           >
             <div>
               <span className="settings-index">DELETE CONNECTION</span>
-              <h3 id="delete-source-title">删除 {source.name}？</h3>
+              <h3 id="delete-source-title">Delete {source.name}?</h3>
               <p>
-                删除后，所有项目都无法再使用此连接；已产生的历史查询与审计记录会继续保留。
+                After deletion, no project will be able to use this connection.
+                Existing query history and audit records will be retained.
               </p>
             </div>
             <div className="delete-source-actions">
@@ -362,7 +376,7 @@ export function DataSourceSettings({
                 onClick={() => setDeleteConfirmOpen(false)}
                 disabled={deleting}
               >
-                取消
+                Cancel
               </button>
               <button
                 type="button"
@@ -370,13 +384,13 @@ export function DataSourceSettings({
                 onClick={() => void removeSource()}
                 disabled={deleting}
               >
-                {deleting ? "删除中…" : "确认删除"}
+                {deleting ? "Deleting…" : "Confirm deletion"}
               </button>
             </div>
           </section>
         )}
         <section className="governed-sources">
-          <h3>已连接数据源</h3>
+          <h3>Connected data sources</h3>
           {sources.length ? (
             <div className="source-list">
               {sources.map((item) => (
@@ -393,7 +407,8 @@ export function DataSourceSettings({
             </div>
           ) : (
             <p className="empty-note">
-              先保存一个 PostgreSQL 数据源，再配置表和字段策略。
+              Save a PostgreSQL data source before configuring table and field
+              policies.
             </p>
           )}
         </section>
@@ -401,16 +416,18 @@ export function DataSourceSettings({
           <section className={`policy-editor ${editing ? "is-editing" : ""}`}>
             <div className="panel-heading">
               <div>
-                <h3>{source.name} 访问策略</h3>
+                <h3>{source.name} access policy</h3>
                 <p className="policy-version-note">
-                  当前 v{source.policy_version} ·{" "}
-                  {editing ? "正在修改，保存后生成新版本" : "只读预览"}
+                  Current v{source.policy_version} ·{" "}
+                  {editing
+                    ? "Editing; saving will create a new version"
+                    : "Read-only preview"}
                 </p>
               </div>
               {editing ? (
                 <div className="policy-actions">
                   <button type="button" onClick={cancelEditing}>
-                    取消
+                    Cancel
                   </button>
                   <button
                     type="button"
@@ -418,7 +435,7 @@ export function DataSourceSettings({
                     disabled={!dirty || saving}
                     className="primary-action"
                   >
-                    {saving ? "保存中…" : "保存修改"}
+                    {saving ? "Saving…" : "Save changes"}
                   </button>
                 </div>
               ) : (
@@ -430,19 +447,23 @@ export function DataSourceSettings({
                   }}
                   className="primary-action"
                 >
-                  修改访问策略
+                  Edit access policy
                 </button>
               )}
             </div>
             <p className="policy-help">
-              修改表级权限会同步该表全部字段，也可以再单独调整某个字段。
+              Changing table-level access updates every field in that table.
+              Individual fields can still be adjusted afterward.
             </p>
             {schemaStatus === "loading" && (
               <div className="policy-schema-state" role="status">
                 <span className="schema-spinner" />
                 <div>
-                  <strong>正在读取表结构</strong>
-                  <p>已有策略会先显示，数据库字段将在连接完成后补齐。</p>
+                  <strong>Loading table schema</strong>
+                  <p>
+                    Existing policies appear first; database fields will be
+                    added after the connection completes.
+                  </p>
                 </div>
               </div>
             )}
@@ -451,13 +472,16 @@ export function DataSourceSettings({
                 <div>
                   <strong>
                     {schemaStatus === "error"
-                      ? "暂时无法连接数据库"
-                      : "数据库没有返回可见表"}
+                      ? "Unable to connect to the database right now"
+                      : "The database returned no visible tables"}
                   </strong>
-                  <p>你仍可修改已显示的规则，或手动添加需要治理的表和字段。</p>
+                  <p>
+                    You can still edit the displayed rules or manually add
+                    tables and fields to govern.
+                  </p>
                 </div>
                 <button type="button" onClick={() => void choose(source)}>
-                  重新读取
+                  Reload
                 </button>
               </div>
             )}
@@ -465,9 +489,9 @@ export function DataSourceSettings({
               (schemaStatus === "empty" || schemaStatus === "error") && (
                 <form className="manual-policy-rule" onSubmit={addManualRule}>
                   <label>
-                    <span>表名</span>
+                    <span>Table name</span>
                     <input
-                      aria-label="手动添加表名"
+                      aria-label="Manually add table name"
                       value={manualTable}
                       onChange={(event) => setManualTable(event.target.value)}
                       placeholder="orders"
@@ -475,15 +499,15 @@ export function DataSourceSettings({
                     />
                   </label>
                   <label>
-                    <span>字段名（可选）</span>
+                    <span>Field name (optional)</span>
                     <input
-                      aria-label="手动添加字段名"
+                      aria-label="Manually add field name"
                       value={manualColumn}
                       onChange={(event) => setManualColumn(event.target.value)}
                       placeholder="customer_email"
                     />
                   </label>
-                  <button type="submit">添加规则</button>
+                  <button type="submit">Add rule</button>
                 </form>
               )}
             {Object.entries(schema).map(([table, columns]) => (
@@ -580,14 +604,14 @@ function PolicySelect({
     <label className="policy-row">
       <span>{label}</span>
       <select
-        aria-label={`${label} 权限`}
+        aria-label={`${label} access`}
         value={value}
         disabled={disabled}
         onChange={(event) => onChange(event.target.value as AccessLevel)}
       >
-        <option value="allowed">自动允许</option>
-        <option value="approval_required">需要审批</option>
-        <option value="denied">禁止访问</option>
+        <option value="allowed">Allow automatically</option>
+        <option value="approval_required">Approval required</option>
+        <option value="denied">Deny access</option>
       </select>
     </label>
   );

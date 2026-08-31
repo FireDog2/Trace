@@ -30,16 +30,16 @@ def extract_knowledge_candidates(filename: str, content: bytes) -> tuple[Knowled
     safe_name = Path(filename).name
     suffix = Path(safe_name).suffix.lower()
     if suffix not in SUPPORTED_KNOWLEDGE_DOCUMENTS:
-        raise KnowledgeDocumentError("仅支持 PDF、Word、Markdown、TXT、CSV 和 Excel 文档")
+        raise KnowledgeDocumentError("Only PDF, Word, Markdown, TXT, CSV, and Excel documents are supported")
     try:
         text = _extract_text(suffix, content)
     except KnowledgeDocumentError:
         raise
     except Exception as exc:
-        raise KnowledgeDocumentError("文档内容无法解析") from exc
+        raise KnowledgeDocumentError("The document content could not be parsed") from exc
     text = _clean_text(text)
     if not text:
-        raise KnowledgeDocumentError("文档中没有可导入的文字")
+        raise KnowledgeDocumentError("The document contains no importable text")
     if len(text) > MAX_DOCUMENT_CHARACTERS:
         text = text[:MAX_DOCUMENT_CHARACTERS]
 
@@ -48,7 +48,7 @@ def extract_knowledge_candidates(filename: str, content: bytes) -> tuple[Knowled
         candidates = (
             KnowledgeCandidate(
                 kind=_classify(safe_name, text),
-                name=Path(safe_name).stem[:160] or "未命名业务文档",
+                name=Path(safe_name).stem[:160] or "Untitled business document",
                 definition=text[:4_000],
             ),
         )
@@ -64,7 +64,7 @@ def _extract_text(suffix: str, content: bytes) -> str:
         return _xlsx_text(content)
     if suffix == ".pdf":
         return _pdf_text(content)
-    raise KnowledgeDocumentError("不支持的文档类型")
+    raise KnowledgeDocumentError("Unsupported document type")
 
 
 def _decode_text(content: bytes) -> str:
@@ -73,7 +73,7 @@ def _decode_text(content: bytes) -> str:
             return content.decode(encoding)
         except UnicodeDecodeError:
             continue
-    raise KnowledgeDocumentError("文本文件必须使用 UTF-8 或 GB18030 编码")
+    raise KnowledgeDocumentError("Text files must use UTF-8 or GB18030 encoding")
 
 
 def _docx_text(content: bytes) -> str:
@@ -81,7 +81,7 @@ def _docx_text(content: bytes) -> str:
         with zipfile.ZipFile(io.BytesIO(content)) as archive:
             document = archive.read("word/document.xml")
     except (KeyError, zipfile.BadZipFile) as exc:
-        raise KnowledgeDocumentError("Word 文档格式无效") from exc
+        raise KnowledgeDocumentError("Invalid Word document format") from exc
     root = ElementTree.fromstring(document)
     paragraphs: list[str] = []
     for paragraph in root.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p"):
@@ -119,15 +119,15 @@ def _pdf_text(content: bytes) -> str:
     try:
         from pypdf import PdfReader
     except ImportError as exc:  # pragma: no cover - dependency is declared by the package
-        raise KnowledgeDocumentError("当前环境缺少 PDF 解析组件") from exc
+        raise KnowledgeDocumentError("The PDF parsing component is not available in this environment") from exc
     reader = PdfReader(io.BytesIO(content))
     if reader.is_encrypted:
         try:
             reader.decrypt("")
         except Exception as exc:
-            raise KnowledgeDocumentError("暂不支持加密 PDF") from exc
+            raise KnowledgeDocumentError("Encrypted PDFs are not supported") from exc
     if len(reader.pages) > 300:
-        raise KnowledgeDocumentError("PDF 超过 300 页，请拆分后上传")
+        raise KnowledgeDocumentError("The PDF exceeds 300 pages. Split it into smaller files before uploading")
     return "\n\n".join((page.extract_text() or "").strip() for page in reader.pages)
 
 

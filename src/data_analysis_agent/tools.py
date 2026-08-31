@@ -12,6 +12,7 @@ from data_analysis_agent.data_sources import CredentialError
 from data_analysis_agent.datasets import DatasetService
 from data_analysis_agent.domain import ArtifactType, PlanStepDraft, TaskStatus
 from data_analysis_agent.execution import (
+    DatasetQueryError,
     DuckDBExecutor,
     PythonExecutor,
     QueryTimeoutError,
@@ -111,8 +112,16 @@ class InspectDatasetInput(ToolInput):
 
 
 class QueryDataInput(ToolInput):
-    sql: str = Field(min_length=1)
-    bindings: dict[str, str]
+    sql: str = Field(
+        min_length=1,
+        description="Read-only DuckDB SQL. Every table name must match a bindings key exactly.",
+    )
+    bindings: dict[str, str] = Field(
+        description=(
+            "Map SQL table aliases to dataset artifact IDs, for example "
+            "{'operations': 'artifact-id'} with FROM operations."
+        )
+    )
 
 
 class QueryDatabaseInput(ToolInput):
@@ -202,6 +211,17 @@ class ToolRegistry:
         if self._team_coordinator is None:
             self._team_coordinator = {}
         self._team_coordinator.update({"manager": manager, "repository": repository})
+
+    def active_teammate_ids(self, task_id: str) -> tuple[str, ...]:
+        """Return active teammate IDs so the lead cannot finish while work is in flight."""
+        if not self._team_coordinator or "manager" not in self._team_coordinator:
+            return ()
+        return tuple(
+            run.id
+            for run in self._team_coordinator["manager"].list(task_id)
+            if run.status.value in {"created", "working", "waiting"}
+            and not run.cancel_requested
+        )
 
     def schemas(self) -> tuple[ToolSchema, ...]:
         return tuple(
@@ -358,7 +378,7 @@ class ToolRegistry:
                 error_category=category,
                 message=message,
                 retryable=exc.retryable,
-                diagnostics=_safe_tool_diagnostics(category),
+                diagnostics=_safe_tool_diagnostics(category, exc.diagnostics),
                 pauses_task=exc.pauses_task,
             )
         except Exception:
@@ -510,6 +530,16 @@ def build_tool_registry(
                 "DuckDB query exceeded its time limit",
                 category="query_timeout",
                 retryable=True,
+            ) from exc
+        except DatasetQueryError as exc:
+            raise ToolHandlerError(
+                "DuckDB rejected the dataset query",
+                category=exc.category,
+                retryable=False,
+                diagnostics={
+                    "available_tables": sorted(arguments.bindings),
+                    "guidance": "Use a bindings key exactly as the SQL table name.",
+                },
             ) from exc
         artifact_ids = (result.artifact.id,) if result.artifact else ()
         return HandlerResult(
@@ -761,15 +791,9 @@ def build_tool_registry(
         context: ToolContext,
     ) -> HandlerResult:
         assert isinstance(arguments, RequestUserInputInput)
-        message = tasks.add_message(context.task_id, "assistant", arguments.question)
         task = tasks.get(context.task_id)
         if task.status is not TaskStatus.NEEDS_INPUT:
             tasks.transition(task.id, TaskStatus.NEEDS_INPUT)
-        tasks.append_event(
-            context.task_id,
-            "message.created",
-            {"message_id": message.id, "role": message.role},
-        )
         return HandlerResult(
             {"question": arguments.question},
             pauses_task=True,
@@ -888,7 +912,7 @@ def build_tool_registry(
         ),
         ToolDefinition(
             "query_data",
-            "Run one read-only DuckDB SQL query against registered dataset bindings.",
+            "Run read-only DuckDB SQL. bindings maps SQL table aliases to dataset artifact IDs; every FROM/JOIN table name must exactly match a bindings key.",
             QueryDataInput,
             query_data,
         ),
@@ -1098,9 +1122,29 @@ def _safe_tool_category(category: str) -> str:
     return category if category in _TOOL_CATEGORIES else "internal_tool_error"
 
 
-def _safe_tool_diagnostics(category: str) -> dict[str, str] | None:
+def _safe_tool_diagnostics(
+    category: str, diagnostics: dict[str, Any] | None = None
+) -> dict[str, Any] | None:
     if category in _DATABASE_REASON_CODES:
         return {"reason_code": category}
+    if category in {"parse_error", "unresolved_table", "unresolved_column", "query_error"}:
+        available_tables = (diagnostics or {}).get("available_tables")
+        if (
+            isinstance(available_tables, list)
+            and len(available_tables) <= 50
+            and all(
+                isinstance(table, str)
+                and len(table) <= 128
+                and table.isascii()
+                and table.replace("_", "a").isalnum()
+                and not table[0].isdigit()
+                for table in available_tables
+            )
+        ):
+            return {
+                "available_tables": available_tables,
+                "guidance": "Use a bindings key exactly as the SQL table name.",
+            }
     return None
 
 

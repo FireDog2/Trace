@@ -65,8 +65,10 @@ describe("agent observability", () => {
         ]}
       />,
     );
-    expect(screen.getAllByRole("listitem")[0]).toHaveTextContent("Agent 启动");
-    expect(screen.getByText("第 2 次尝试")).toBeVisible();
+    expect(screen.getAllByRole("listitem")[0]).toHaveTextContent(
+      "Agent started",
+    );
+    expect(screen.getByText("Attempt 2")).toBeVisible();
   });
   it("approves without enabling a skill", () => {
     const onDecision = vi.fn(async () => undefined);
@@ -87,8 +89,10 @@ describe("agent observability", () => {
         onDecision={onDecision}
       />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "批准候选 Skill" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Approve skill candidate" }),
+    );
     expect(onDecision).toHaveBeenCalledWith("c", true);
-    expect(screen.getByText(/始终禁用/)).toBeVisible();
+    expect(screen.getByText(/remains disabled/)).toBeVisible();
   });
 });

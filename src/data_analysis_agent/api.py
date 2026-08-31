@@ -67,6 +67,7 @@ from data_analysis_agent.providers import (
 from data_analysis_agent.reporting import ReportService
 from data_analysis_agent.repositories import (
     ArtifactRepository,
+    ProjectDeletionConflict,
     ProjectRepository,
     RecordNotFoundError,
     RepositoryError,
@@ -686,6 +687,23 @@ def create_app(
                 detail="Project name must not be empty",
             ) from exc
 
+    @app.delete("/api/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
+    def delete_project(project_id: str) -> Response:
+        try:
+            services.projects.delete(project_id)
+            services.workspace.delete_project(project_id)
+        except RecordNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Project not found",
+            ) from exc
+        except ProjectDeletionConflict as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Wait for active tasks to finish before deleting the project",
+            ) from exc
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
     @app.get(
         "/api/projects/{project_id}/knowledge",
         response_model=list[BusinessKnowledgeResponse],
@@ -772,7 +790,7 @@ def create_app(
                     formula=candidate.formula,
                     dimensions=candidate.dimensions,
                     synonyms=candidate.synonyms,
-                    source=f"文档导入 · {file_name}",
+                    source=f"Document import · {file_name}",
                 )
             except RepositoryError:
                 skipped_names.append(candidate.name)
@@ -1092,12 +1110,31 @@ def create_app(
         return asdict(services.datasets.inspect(artifact_id, sample_rows))
 
     @app.get("/api/artifacts/{artifact_id}/content")
-    def artifact_content(artifact_id: str) -> FileResponse:
+    def artifact_content(
+        artifact_id: str,
+        preview: bool = Query(False),
+    ) -> FileResponse:
         artifact = services.artifacts.get(artifact_id)
+        preview_headers = (
+            {
+                "Content-Security-Policy": (
+                    "sandbox allow-scripts; default-src 'self' data: blob: https:; "
+                    "style-src 'self' 'unsafe-inline' https:; "
+                    "script-src 'self' 'unsafe-inline' https:; "
+                    "img-src 'self' data: blob: https:; "
+                    "font-src 'self' data: https:; connect-src 'self' https:"
+                ),
+                "X-Content-Type-Options": "nosniff",
+            }
+            if preview
+            else None
+        )
         return FileResponse(
             artifact.path,
+            headers=preview_headers,
             media_type=artifact.content_type,
             filename=artifact.path.name,
+            content_disposition_type="inline" if preview else "attachment",
         )
 
     @app.get("/api/artifacts/{artifact_id}/export")

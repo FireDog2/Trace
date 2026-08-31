@@ -12,14 +12,14 @@ interface ConversationProps {
 }
 
 const STATUS_LABELS: Record<string, string> = {
-  understanding: "理解问题",
-  planning: "制定计划",
-  running: "执行分析",
-  synthesizing: "综合结论",
-  needs_input: "等待输入",
-  failed: "执行失败",
-  cancelled: "已取消",
-  completed: "分析完成",
+  understanding: "Understanding the question",
+  planning: "Planning",
+  running: "Running analysis",
+  synthesizing: "Synthesizing findings",
+  needs_input: "Waiting for input",
+  failed: "Failed",
+  cancelled: "Cancelled",
+  completed: "Analysis complete",
 };
 
 const ACTIVE_STATUSES = new Set([
@@ -112,10 +112,10 @@ export function Conversation({
   }
 
   return (
-    <main className="conversation-panel" aria-label="分析对话">
+    <main className="conversation-panel" aria-label="Analysis conversation">
       <header className="conversation-header">
         <div>
-          <span>分析对话</span>
+          <span>Analysis conversation</span>
           <h1>{task.objective}</h1>
         </div>
         <span className={`task-state ${task.status}`}>
@@ -126,16 +126,17 @@ export function Conversation({
       <div className="conversation-scroll">
         <div className="message-list conversation-opening">
           <article className="message user">
-            <span>你</span>
+            <span>You</span>
             <p>{task.objective}</p>
           </article>
         </div>
         {failed && (
           <section className="task-retry-guide" role="alert">
             <span>RETRY AVAILABLE</span>
-            <strong>上次执行未完成</strong>
+            <strong>The previous run did not finish</strong>
             <p>
-              检查模型连接后，可在下方补充或修改问题并重新执行；已有证据不会被删除。
+              Check the model connection, then revise or add to the question
+              below and run it again. Existing evidence will be preserved.
             </p>
           </section>
         )}
@@ -151,15 +152,16 @@ export function Conversation({
               <i />
             </span>
             <div>
-              <strong>Agent 正在处理这个问题</strong>
+              <strong>The agent is working on this question</strong>
               <p>
-                查询、分析和报告生成可能需要一些时间。执行完成后，结果会自动显示在对话中。
+                Queries, analysis, and report generation may take a little time.
+                Results will appear here automatically when the run finishes.
               </p>
             </div>
           </section>
         )}
         <section className="agent-trace" aria-labelledby="agent-trace-heading">
-          <h2 id="agent-trace-heading">Agent 执行轨迹</h2>
+          <h2 id="agent-trace-heading">Agent execution trace</h2>
           <ol>
             {executionRows.map((row) => (
               <li key={row.id} data-status={row.status}>
@@ -174,7 +176,8 @@ export function Conversation({
         <div className="message-list" aria-live="polite">
           {items.length === 0 && (
             <p className="empty-note">
-              对话负责表达意图，正式工作会沉淀到左侧任务中。
+              Use the conversation to express your intent. The resulting work
+              will be saved to the task on the left.
             </p>
           )}
           {items.map((item) => {
@@ -190,8 +193,8 @@ export function Conversation({
                   </span>
                   <strong>
                     {approval.status === "pending"
-                      ? "需要你的批准"
-                      : "审批已处理"}
+                      ? "Your approval is required"
+                      : "Approval handled"}
                   </strong>
                   <p>{approval.reason}</p>
                   {approval.status === "pending" ? (
@@ -199,25 +202,25 @@ export function Conversation({
                       <button
                         type="button"
                         disabled={deciding === approval.id}
-                        aria-label="拒绝操作"
+                        aria-label="Reject action"
                         onClick={() => void decide(approval.id, false)}
                       >
-                        拒绝
+                        Rejected
                       </button>
                       <button
                         type="button"
                         disabled={deciding === approval.id}
-                        aria-label="批准操作"
+                        aria-label="Approve action"
                         onClick={() => void decide(approval.id, true)}
                       >
-                        批准一次
+                        Approve once
                       </button>
                     </div>
                   ) : (
                     <small>
                       {approval.status === "approved"
-                        ? "已批准，任务将继续"
-                        : "已拒绝"}
+                        ? "Approved. The task will continue."
+                        : "Rejected"}
                     </small>
                   )}
                 </article>
@@ -226,14 +229,14 @@ export function Conversation({
             const message = item.message;
             const roleLabel =
               message.role === "user"
-                ? "你"
+                ? "You"
                 : message.role === "assistant"
                   ? "Agent"
-                  : "执行";
+                  : "Execution";
             if (message.role === "tool") {
               return (
                 <details key={message.id} className="message tool-message">
-                  <summary>{roleLabel} · 查看执行详情</summary>
+                  <summary>{roleLabel} · View execution details</summary>
                   <p>{message.content}</p>
                 </details>
               );
@@ -258,28 +261,28 @@ export function Conversation({
       <form className="message-composer" onSubmit={submit}>
         <label htmlFor="agent-message">
           {active
-            ? "当前问题正在执行"
+            ? "This question is running"
             : failed
-              ? "修改问题并重试"
-              : "给分析 Agent 留言"}
+              ? "Revise the question and retry"
+              : "Message the analysis agent"}
         </label>
         <textarea
           id="agent-message"
           aria-label={
             active
-              ? "当前问题正在执行"
+              ? "This question is running"
               : failed
-                ? "修改问题并重试"
-                : "给分析 Agent 留言"
+                ? "Revise the question and retry"
+                : "Message the analysis agent"
           }
           value={content}
           disabled={sending || composerLocked}
           placeholder={
             active
-              ? "完成后即可继续追问"
+              ? "You can follow up when the run finishes"
               : failed
-                ? "例如：重试，并先列出当前项目的全部产物"
-                : "例如：物流成本按发货日期重新计算"
+                ? "For example: Retry, and first list every artifact in this project"
+                : "For example: Recalculate logistics costs by shipping date"
           }
           onChange={(event) => setContent(event.target.value)}
         />
@@ -289,13 +292,13 @@ export function Conversation({
               className={
                 uploading ? "composer-upload uploading" : "composer-upload"
               }
-              title="上传分析数据或业务口径文档"
+              title="Upload analysis data or a business definitions document"
             >
               <span aria-hidden="true">＋</span>
               <input
                 type="file"
                 accept=".csv,.xlsx,.pdf,.docx,.md,.txt"
-                aria-label="上传分析文件"
+                aria-label="Upload analysis file"
                 disabled={uploading || composerLocked}
                 onChange={(event) => {
                   const file = event.target.files?.[0];
@@ -306,26 +309,26 @@ export function Conversation({
             </label>
             <span className="attachment-status">
               {uploading
-                ? "正在上传…"
+                ? "Uploading…"
                 : uploadedFileName
-                  ? `已添加 ${uploadedFileName}`
-                  : "添加数据或口径文档"}
+                  ? `Added ${uploadedFileName}`
+                  : "Add data or definitions"}
             </span>
           </div>
           <span className="send-hint">
-            {active ? "完成后可继续追问" : "Ctrl ↵"}
+            {active ? "Follow up when finished" : "Ctrl ↵"}
           </span>
           <button
             type="submit"
             disabled={sending || composerLocked || !content.trim()}
           >
             {active
-              ? "执行中…"
+              ? "Running…"
               : sending
-                ? "发送中"
+                ? "Sending"
                 : failed
-                  ? "重新执行"
-                  : "发送指令"}
+                  ? "Run again"
+                  : "Send instruction"}
           </button>
         </div>
       </form>
@@ -345,7 +348,10 @@ function approvalViews(events: TaskEvent[]): ApprovalView[] {
       approvals.set(approvalId, {
         id: approvalId,
         toolName: String(event.payload.tool_name ?? "unknown action"),
-        reason: String(event.payload.reason ?? "该操作超出自动权限边界"),
+        reason: String(
+          event.payload.reason ??
+            "This action exceeds the automatic permission boundary",
+        ),
         status: "pending",
         sequence: event.sequence,
       });

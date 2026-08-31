@@ -1,12 +1,12 @@
 import { CSSProperties } from "react";
 import type { TraceEvent } from "../types";
 const labels: Record<string, string> = {
-  "agent.started": "Agent 启动",
-  "tool.started": "工具调用开始",
-  "tool.completed": "工具调用完成",
-  "tool.failed": "工具调用失败",
-  "sql.validated": "SQL 校验",
-  "approval.requested": "请求人工审批",
+  "agent.started": "Agent started",
+  "tool.started": "Tool call started",
+  "tool.completed": "Tool call completed",
+  "tool.failed": "Tool call failed",
+  "sql.validated": "SQL validated",
+  "approval.requested": "Human approval requested",
 };
 export function TraceTimeline({ events }: { events: TraceEvent[] }) {
   const byId = new Map(events.map((e) => [e.id, e]));
@@ -41,11 +41,11 @@ export function TraceTimeline({ events }: { events: TraceEvent[] }) {
               <span className={`trace-status ${event.status}`}>
                 {event.status}
               </span>
-              {event.attempt > 1 && <span>第 {event.attempt} 次尝试</span>}
+              {event.attempt > 1 && <span>Attempt {event.attempt}</span>}
               {event.duration_ms != null && <span>{event.duration_ms} ms</span>}
               {event.error_category && <code>{event.error_category}</code>}
               <details>
-                <summary>安全 payload</summary>
+                <summary>Sanitized payload</summary>
                 <pre>{JSON.stringify(event.payload, null, 2)}</pre>
               </details>
             </div>

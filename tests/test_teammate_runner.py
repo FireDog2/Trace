@@ -98,19 +98,49 @@ def test_teammate_fails_after_turn_budget(settings, db_connection, task, tool_re
 def test_teammate_requires_json_object_handoff(
     settings, db_connection, task, tool_registry
 ) -> None:
-    """Plain text and JSON arrays are not structured teammate handoffs."""
+    """A second invalid response exhausts the bounded handoff repair."""
     repository = TeamRepository(db_connection)
     run = repository.create_run(task.id, AgentRole.KNOWLEDGE, "Find definition")
 
     failed = TeammateRunner(
         settings=settings,
-        provider=ScriptedProvider([ModelResponse("[]", ())]),
+        provider=ScriptedProvider([ModelResponse("[]", ()), ModelResponse("still invalid", ())]),
         tools=tool_registry,
         repository=repository,
     ).run(run.id)
 
     assert failed.status is AgentRunStatus.FAILED
     assert failed.error_category == "invalid_handoff"
+
+
+def test_teammate_repairs_one_invalid_handoff(
+    settings, db_connection, task, tool_registry
+) -> None:
+    repository = TeamRepository(db_connection)
+    run = repository.create_run(task.id, AgentRole.SQL, "Return query evidence")
+    provider = ScriptedProvider(
+        [
+            ModelResponse("Query completed successfully.", ()),
+            ModelResponse('{"summary":"Query completed","artifact_ids":["a1"]}', ()),
+        ]
+    )
+
+    completed = TeammateRunner(
+        settings=settings,
+        provider=provider,
+        tools=tool_registry,
+        repository=repository,
+    ).run(run.id)
+
+    assert completed.status is AgentRunStatus.COMPLETED
+    assert json.loads(completed.result_json or "") == {
+        "summary": "Query completed",
+        "artifact_ids": ["a1"],
+    }
+    assert [message.role for message in repository.list_messages(run.id)] == [
+        "system",
+        "assistant",
+    ]
 
 
 def test_provider_error_has_safe_category(settings, db_connection, task, tool_registry) -> None:
@@ -976,7 +1006,9 @@ def test_teammate_rejects_non_finite_json_handoffs(
 
     failed = TeammateRunner(
         settings=settings,
-        provider=ScriptedProvider([ModelResponse(text, ())]),
+        provider=ScriptedProvider(
+            [ModelResponse(text, ()), ModelResponse(text, ())]
+        ),
         tools=tool_registry,
         repository=repository,
     ).run(run.id)

@@ -168,31 +168,35 @@ def _openai_messages(request: ModelRequest) -> list[dict[str, Any]]:
         {"role": "system", "content": request.system},
         {"role": "user", "content": request.objective},
     ]
+    pending_tool_call_ids: set[str] = set()
+    deferred_assistant_messages: list[dict[str, Any]] = []
     for message in request.messages:
         if message.role == "assistant_tool_call":
             try:
                 raw_calls = json.loads(message.content)["tool_calls"]
+                normalized_calls = [
+                    {
+                        "id": call["id"],
+                        "type": "function",
+                        "function": {
+                            "name": call["name"],
+                            "arguments": json.dumps(
+                                call["arguments"],
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                        },
+                    }
+                    for call in raw_calls
+                ]
                 messages.append(
                     {
                         "role": "assistant",
                         "content": None,
-                        "tool_calls": [
-                            {
-                                "id": call["id"],
-                                "type": "function",
-                                "function": {
-                                    "name": call["name"],
-                                    "arguments": json.dumps(
-                                        call["arguments"],
-                                        ensure_ascii=False,
-                                        separators=(",", ":"),
-                                    ),
-                                },
-                            }
-                            for call in raw_calls
-                        ],
+                        "tool_calls": normalized_calls,
                     }
                 )
+                pending_tool_call_ids.update(str(call["id"]) for call in normalized_calls)
             except (KeyError, TypeError, json.JSONDecodeError) as exc:
                 raise ProviderError(
                     "invalid_history",
@@ -214,8 +218,20 @@ def _openai_messages(request: ModelRequest) -> list[dict[str, Any]]:
                     "content": message.content,
                 }
             )
+            pending_tool_call_ids.discard(str(call_id))
+            if not pending_tool_call_ids and deferred_assistant_messages:
+                messages.extend(deferred_assistant_messages)
+                deferred_assistant_messages.clear()
+        elif message.role == "assistant" and pending_tool_call_ids:
+            # Older runs persisted the visible request-user-input question before
+            # its tool result. Keep the immutable audit history intact while
+            # projecting a protocol-valid order for OpenAI-compatible providers.
+            deferred_assistant_messages.append(
+                {"role": message.role, "content": message.content}
+            )
         elif message.role in {"user", "assistant", "system"}:
             messages.append({"role": message.role, "content": message.content})
+    messages.extend(deferred_assistant_messages)
     return messages
 
 

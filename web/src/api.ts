@@ -18,6 +18,7 @@ export interface ApiClient {
   listProjects(): Promise<Project[]>;
   createProject(name: string): Promise<Project>;
   updateProject(projectId: string, name: string): Promise<Project>;
+  deleteProject(projectId: string): Promise<void>;
   uploadDataset(projectId: string, file: File): Promise<Artifact>;
   listArtifacts(projectId: string): Promise<Artifact[]>;
   listTasks(projectId: string): Promise<Task[]>;
@@ -124,6 +125,10 @@ export class HttpApiClient implements ApiClient {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name }),
     });
+  }
+
+  deleteProject(projectId: string): Promise<void> {
+    return this.request(`/api/projects/${projectId}`, { method: "DELETE" });
   }
 
   uploadDataset(projectId: string, file: File): Promise<Artifact> {
@@ -359,7 +364,7 @@ export class HttpApiClient implements ApiClient {
       };
       const message =
         typeof body.detail === "string" ? body.detail : body.detail?.message;
-      throw new Error(message ?? `请求失败（${response.status}）`);
+      throw new Error(message ?? `Request failed (${response.status})`);
     }
     if (response.status === 204) return undefined as T;
     return (await response.json()) as T;

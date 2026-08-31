@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 import data_analysis_agent.api as api_module
 from data_analysis_agent.api import create_app
-from data_analysis_agent.domain import TaskStatus
+from data_analysis_agent.domain import PlanStepDraft, TaskStatus
 from data_analysis_agent.model_config import SecretStorageUnavailable
 from data_analysis_agent.permissions import ToolAction
 from data_analysis_agent.providers import ModelResponse, ScriptedProvider
@@ -35,6 +35,108 @@ def test_project_can_be_renamed_and_global_workspace_stays_hidden(settings) -> N
     assert updated.json()["name"] == "Quarterly review"
     assert [project["name"] for project in projects.json()] == ["Quarterly review"]
     assert all(project["id"] != GLOBAL_PROJECT_ID for project in projects.json())
+
+
+def test_project_can_be_permanently_deleted_with_its_workspace(settings, operations_csv) -> None:
+    app = create_app(
+        settings,
+        ScriptedProvider(()),
+        secret_protector=RecordingProtector(),
+    )
+
+    with TestClient(app) as client:
+        project = client.post("/api/projects", json={"name": "Temporary review"}).json()
+        project_root = app.state.services.workspace.project_root(project["id"])
+        other_project = app.state.services.projects.create("Other review")
+        app.state.services.workspace.create_project(other_project.id)
+        other_task = app.state.services.tasks.create(other_project.id, "Cross-project audit")
+        legacy_source = app.state.services.data_sources.create(
+            project["id"],
+            "Legacy warehouse",
+            "postgresql://localhost/review",
+        )
+        legacy_entry = app.state.services.knowledge.create(
+            project["id"],
+            kind="term",
+            name="Legacy term",
+            definition="A project-scoped definition from an older release.",
+        )
+        app.state.services.connection.execute(
+            "INSERT INTO database_query_attempts("
+            "id, task_id, data_source_id, policy_version, sql_hash, approval_id, "
+            "status, error_category, started_at, completed_at"
+            ") VALUES (?, ?, ?, ?, ?, NULL, 'completed', NULL, ?, ?)",
+            (
+                "cross-project-attempt",
+                other_task.id,
+                legacy_source.id,
+                legacy_source.policy_version,
+                "sql-hash",
+                "2026-08-30T00:00:00+00:00",
+                "2026-08-30T00:00:01+00:00",
+            ),
+        )
+        app.state.services.connection.commit()
+        with operations_csv.open("rb") as source:
+            uploaded = client.post(
+                f"/api/projects/{project['id']}/datasets",
+                files={"file": ("operations.csv", source, "text/csv")},
+            )
+        task = app.state.services.tasks.create(project["id"], "Completed review")
+        app.state.services.tasks.add_message(task.id, "user", "Review the uploaded data")
+        app.state.services.tasks.revise_plan(
+            task.id,
+            (PlanStepDraft(title="Inspect the dataset"),),
+            "Initial plan",
+        )
+        app.state.services.tasks.append_event(task.id, "task.started", {})
+        for target in (
+            TaskStatus.PLANNING,
+            TaskStatus.RUNNING,
+            TaskStatus.SYNTHESIZING,
+            TaskStatus.COMPLETED,
+        ):
+            app.state.services.tasks.transition(task.id, target)
+        deleted = client.delete(f"/api/projects/{project['id']}")
+
+        assert uploaded.status_code == 201
+        assert deleted.status_code == 204
+        assert [item["id"] for item in client.get("/api/projects").json()] == [
+            other_project.id
+        ]
+        assert client.get(f"/api/tasks/{task.id}").status_code == 404
+        assert client.get(f"/api/tasks/{other_task.id}").status_code == 200
+        assert not project_root.exists()
+        for table in ("artifacts", "tasks"):
+            assert app.state.services.connection.execute(
+                f"SELECT 1 FROM {table} WHERE project_id = ?",
+                (project["id"],),
+            ).fetchone() is None
+        for table in ("messages", "plan_revisions", "task_events"):
+            assert app.state.services.connection.execute(
+                f"SELECT 1 FROM {table} WHERE task_id = ?",
+                (task.id,),
+            ).fetchone() is None
+        assert app.state.services.data_sources.get_public(
+            legacy_source.id
+        ).project_id == GLOBAL_PROJECT_ID
+        assert app.state.services.knowledge.get(
+            legacy_entry.id
+        ).project_id == GLOBAL_PROJECT_ID
+        assert app.state.services.connection.execute(
+            "SELECT 1 FROM database_query_attempts WHERE id = 'cross-project-attempt'"
+        ).fetchone() is not None
+
+
+def test_project_with_active_task_cannot_be_deleted(api_client) -> None:
+    project = api_client.post("/api/projects", json={"name": "Active review"}).json()
+    task = api_client.app.state.services.tasks.create(project["id"], "Still running")
+
+    response = api_client.delete(f"/api/projects/{project['id']}")
+
+    assert response.status_code == 409
+    assert api_client.get(f"/api/tasks/{task.id}").status_code == 200
+    assert api_client.app.state.services.workspace.project_root(project["id"]).exists()
 
 
 def test_global_data_sources_and_knowledge_are_not_bound_to_a_user_project(
@@ -220,9 +322,17 @@ def test_markdown_report_can_be_exported_as_source_or_pdf(settings) -> None:
     )
 
     with TestClient(app) as client:
+        download = client.get(f"/api/artifacts/{report.id}/content")
+        preview = client.get(f"/api/artifacts/{report.id}/content?preview=true")
         markdown = client.get(f"/api/artifacts/{report.id}/export?format=markdown")
         pdf = client.get(f"/api/artifacts/{report.id}/export?format=pdf")
 
+    assert download.headers["content-disposition"].startswith("attachment;")
+    assert preview.headers["content-disposition"].startswith("inline;")
+    assert preview.headers["content-security-policy"].startswith(
+        "sandbox allow-scripts;"
+    )
+    assert preview.headers["x-content-type-options"] == "nosniff"
     assert markdown.status_code == 200
     assert markdown.content.startswith("# 分析报告".encode())
     assert pdf.status_code == 200
@@ -258,7 +368,7 @@ def test_business_knowledge_document_import_creates_classified_entries(
         "经营利润",
         "数据导出规则",
     ]
-    assert all(entry["source"] == "文档导入 · 财务口径.md" for entry in response.json()["created"])
+    assert all(entry["source"] == "Document import · 财务口径.md" for entry in response.json()["created"])
 
 
 def test_policy_update_rejects_a_stale_editor_version(settings) -> None:
