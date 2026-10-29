@@ -54,6 +54,7 @@ class AnalysisRun:
     task_id: str
     status: str
     accepted: bool
+    review_requested: bool
     started_at: str
     completed_at: str | None
     error_category: str | None
@@ -99,10 +100,12 @@ class TraceRepository:
             is None
         ):
             raise RecordNotFoundError("Task not found")
-        run = AnalysisRun(str(uuid4()), task_id, "running", False, utc_now(), None, None)
+        run = AnalysisRun(str(uuid4()), task_id, "running", False, False, utc_now(), None, None)
         self._connection.execute(
-            "INSERT INTO analysis_runs VALUES (?,?,?,?,?,?,?)",
-            (run.id, run.task_id, run.status, 0, run.started_at, None, None),
+            "INSERT INTO analysis_runs "
+            "(id,task_id,status,accepted,started_at,completed_at,error_category,review_requested) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (run.id, run.task_id, run.status, 0, run.started_at, None, None, 0),
         )
         self._connection.commit()
         return run
@@ -136,6 +139,17 @@ class TraceRepository:
         if run.status != "completed":
             raise ValueError("Only completed runs can be accepted")
         self._connection.execute("UPDATE analysis_runs SET accepted=1 WHERE id=?", (run_id,))
+        self._connection.commit()
+        return self.get_run(run_id)
+
+    @sqlite_connection_guarded
+    def request_failure_review(self, run_id: str) -> AnalysisRun:
+        run = self.get_run(run_id)
+        if run.status != "failed":
+            raise ValueError("Only failed runs can be reviewed")
+        self._connection.execute(
+            "UPDATE analysis_runs SET review_requested=1 WHERE id=?", (run_id,)
+        )
         self._connection.commit()
         return self.get_run(run_id)
 
@@ -299,6 +313,7 @@ def _run(row: sqlite3.Row) -> AnalysisRun:
         row["task_id"],
         row["status"],
         bool(row["accepted"]),
+        bool(row["review_requested"]),
         row["started_at"],
         row["completed_at"],
         row["error_category"],

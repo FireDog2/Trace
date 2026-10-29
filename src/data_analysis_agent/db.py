@@ -404,6 +404,26 @@ CREATE INDEX IF NOT EXISTS idx_tasks_project_visible_pinned
 ON tasks(project_id, pinned, updated_at) WHERE deleted_at IS NULL;
 """
 
+MIGRATION_19_SQL = """
+ALTER TABLE analysis_runs ADD COLUMN review_requested INTEGER NOT NULL DEFAULT 0 CHECK(review_requested IN (0,1));
+ALTER TABLE skill_candidates ADD COLUMN candidate_type TEXT NOT NULL DEFAULT 'workflow'
+    CHECK(candidate_type IN ('workflow','failure_review'));
+"""
+
+MIGRATION_20_SQL = """
+ALTER TABLE agent_runs ADD COLUMN work_order_json TEXT;
+ALTER TABLE agent_runs ADD COLUMN handoff_validation_json TEXT;
+ALTER TABLE agent_runs ADD COLUMN handoff_repair_attempted INTEGER NOT NULL DEFAULT 0
+    CHECK(handoff_repair_attempted IN (0,1));
+CREATE TABLE artifact_execution_provenance (
+    artifact_id TEXT PRIMARY KEY REFERENCES artifacts(id) ON DELETE CASCADE,
+    execution_id TEXT NOT NULL REFERENCES tool_executions(id) ON DELETE CASCADE,
+    agent_id TEXT,
+    run_id TEXT,
+    content_hash TEXT NOT NULL
+);
+"""
+
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
@@ -610,6 +630,27 @@ def migrate(connection: sqlite3.Connection) -> None:
             "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
             (18, utc_now()),
         )
+    if 19 not in applied:
+        connection.executescript(MIGRATION_19_SQL)
+        connection.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+            (19, utc_now()),
+        )
+    if 20 not in applied:
+        connection.commit()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for statement in MIGRATION_20_SQL.split(";"):
+                if statement.strip():
+                    connection.execute(statement)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                (20, utc_now()),
+            )
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
     connection.execute("PRAGMA foreign_keys = ON")
     connection.commit()
 

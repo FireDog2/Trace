@@ -22,6 +22,7 @@ def test_prompt_sections_are_deterministic_versioned_and_role_scoped() -> None:
         "role.knowledge",
         "recovery",
         "output.handoff",
+        "output.schema",
         "runtime",
     )
     assert all(section.version == 1 for section in first.sections)

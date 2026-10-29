@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import ast
 import hashlib
-import os
+import json
 import re
 import shutil
-import subprocess
-import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -22,6 +20,7 @@ import polars as pl
 
 from data_analysis_agent.datasets import _read_excel
 from data_analysis_agent.domain import Artifact, ArtifactType, ExecutionStatus
+from data_analysis_agent.python_runtime import run_in_workspace, workspace_exceeded
 from data_analysis_agent.repositories import ArtifactRepository, TaskRepository
 from data_analysis_agent.settings import Settings
 from data_analysis_agent.workspace import WorkspaceBoundaryError, WorkspaceService
@@ -35,7 +34,6 @@ MUTATING_SQL = re.compile(
 SAFE_TABLE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 BANNED_IMPORT_ROOTS = frozenset({"ftplib", "httpx", "requests", "socket", "subprocess", "urllib"})
 BANNED_CALLS = frozenset({"__import__", "eval", "exec", "os.popen", "os.system", "shutil.rmtree"})
-OUTPUT_LIMIT = 65_536
 
 
 class ExecutionError(RuntimeError):
@@ -92,18 +90,26 @@ class DuckDBExecutor:
         workspace: WorkspaceService,
         artifacts: ArtifactRepository,
         timeout_seconds: float = 30,
+        max_rows: int = 100_000,
+        max_result_bytes: int = 20_000_000,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         self._workspace = workspace
         self._artifacts = artifacts
         self._timeout_seconds = timeout_seconds
+        if max_rows < 1 or max_result_bytes < 1:
+            raise ValueError("Query result limits must be positive")
+        self._max_rows = max_rows
+        self._max_result_bytes = max_result_bytes
 
     def query(
         self,
         project_id: str,
         sql: str,
         bindings: Mapping[str, str],
+        *,
+        task_id: str | None = None,
     ) -> QueryResult:
         _validate_read_only_sql(sql)
         connection = duckdb.connect(database=":memory:")
@@ -135,13 +141,27 @@ class DuckDBExecutor:
             try:
                 cursor = connection.execute(sql)
                 columns = tuple(item[0] for item in (cursor.description or ()))
-                rows = cursor.fetchall()
+                rows: list[tuple[Any, ...]] = []
+                result_bytes = 0
+                while batch := cursor.fetchmany(min(512, self._max_rows + 1)):
+                    for row in batch:
+                        result_bytes += len(
+                            json.dumps(
+                                [_json_scalar(value) for value in row],
+                                ensure_ascii=False,
+                            ).encode("utf-8")
+                        )
+                        if len(rows) >= self._max_rows or result_bytes > self._max_result_bytes:
+                            raise DatasetQueryError("result_limit")
+                        rows.append(row)
             except duckdb.ParserException as exc:
                 raise DatasetQueryError("parse_error") from exc
             except duckdb.CatalogException as exc:
                 raise DatasetQueryError("unresolved_table") from exc
             except duckdb.BinderException as exc:
                 raise DatasetQueryError("unresolved_column") from exc
+            except DatasetQueryError:
+                raise
             except duckdb.Error as exc:
                 if deadline_expired.is_set():
                     raise QueryTimeoutError(
@@ -160,24 +180,25 @@ class DuckDBExecutor:
                 {column: _json_scalar(value) for column, value in zip(columns, row, strict=True)}
                 for row in rows[:200]
             )
-            materialized_artifact: Artifact | None = None
-            if len(rows) > 200:
-                path = self._workspace.resolve_inside(
-                    project_id,
-                    f"derived/query-{uuid4().hex}.parquet",
-                )
-                frame = pl.DataFrame(rows, schema=list(columns), orient="row")
-                frame.write_parquet(path)
-                materialized_artifact = self._artifacts.register(
-                    project_id=project_id,
-                    task_id=None,
-                    artifact_type=ArtifactType.DERIVED_DATASET,
-                    path=path,
-                    title="Materialized query result",
-                    description="Full result for a query whose preview exceeded 200 rows",
-                    producer_execution_id=None,
-                    input_artifact_ids=tuple(input_artifact_ids),
-                )
+            path = self._workspace.resolve_inside(
+                project_id,
+                f"derived/query-{uuid4().hex}.parquet",
+            )
+            frame = pl.DataFrame(rows, schema=list(columns), orient="row")
+            frame.write_parquet(path)
+            if path.stat().st_size > self._max_result_bytes:
+                path.unlink()
+                raise DatasetQueryError("result_limit")
+            materialized_artifact = self._artifacts.register(
+                project_id=project_id,
+                task_id=task_id,
+                artifact_type=ArtifactType.DERIVED_DATASET,
+                path=path,
+                title="Materialized query result",
+                description="Complete bounded query result, including empty results",
+                producer_execution_id=None,
+                input_artifact_ids=tuple(input_artifact_ids),
+            )
             return QueryResult(
                 columns=columns,
                 preview=preview,
@@ -206,6 +227,8 @@ class PythonExecutor:
         task_id: str,
         code: str,
         declared_outputs: tuple[str, ...],
+        *,
+        input_artifact_ids: tuple[str, ...] | None = None,
     ) -> PythonResult:
         _validate_python(code)
         task = self._tasks.get(task_id)
@@ -230,98 +253,85 @@ class PythonExecutor:
             task.project_id,
             declared_outputs,
         )
-        before = _snapshot_files(root)
-        source_root = self._workspace.resolve_inside(task.project_id, "source")
-
+        inputs = self._input_artifacts(task.project_id, task.id, input_artifact_ids)
         started = time.monotonic()
-        with tempfile.TemporaryDirectory(prefix="daa-source-backup-") as backup_name:
-            backup_root = Path(backup_name) / "source"
-            shutil.copytree(source_root, backup_root)
-            try:
-                completed = subprocess.run(
-                    [sys.executable, "-I", str(code_path)],
-                    cwd=root,
-                    env=_minimal_environment(),
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=self._settings.python_timeout_seconds,
-                    check=False,
-                )
-                status = (
-                    ExecutionStatus.SUCCEEDED
-                    if completed.returncode == 0
-                    else ExecutionStatus.FAILED
-                )
-                exit_code: int | None = completed.returncode
-                stdout = completed.stdout[-OUTPUT_LIMIT:]
-                stderr = completed.stderr[-OUTPUT_LIMIT:]
-                error_message = (
-                    "" if completed.returncode == 0 else "Python process exited with an error"
-                )
-            except subprocess.TimeoutExpired as exc:
-                status = ExecutionStatus.TIMED_OUT
-                exit_code = None
-                stdout = _timeout_text(exc.stdout)
-                stderr = _timeout_text(exc.stderr)
-                error_message = (
-                    f"Python execution exceeded the "
-                    f"{self._settings.python_timeout_seconds}-second time limit"
-                )
-
-            after = _snapshot_files(root)
-            source_changed = _subtree_changed(before, after, "source/")
-            if source_changed:
-                _restore_source(source_root, backup_root)
-                status = ExecutionStatus.FAILED
-                error_message = "Python attempted to modify immutable source data"
-
-        changed_files = {
-            relative_path
-            for relative_path, fingerprint in after.items()
-            if before.get(relative_path) != fingerprint
-        }
-        allowed_files = {path.relative_to(root).as_posix() for path in declared_paths}
-        undeclared = sorted(
-            relative_path
-            for relative_path in changed_files
-            if relative_path != code_path.relative_to(root).as_posix()
-            and relative_path not in allowed_files
-            and not relative_path.startswith("source/")
-        )
-        if undeclared:
-            for relative_path in undeclared:
-                if relative_path not in before:
-                    self._workspace.resolve_inside(
-                        task.project_id,
-                        relative_path,
-                    ).unlink(missing_ok=True)
-            status = ExecutionStatus.FAILED
-            error_message = "Undeclared output: " + ", ".join(undeclared)
-
         output_artifacts: list[Artifact] = []
-        if status is ExecutionStatus.SUCCEEDED:
-            missing = [path for path in declared_paths if not path.is_file()]
-            if missing:
+        with tempfile.TemporaryDirectory(prefix="trace-python-") as temporary:
+            stage = Path(temporary) / "input"
+            exported = Path(temporary) / "output"
+            stage.mkdir()
+            exported.mkdir()
+            for directory in ("source", "derived", "charts", "reports", "logs", "code"):
+                (stage / directory).mkdir()
+            snapshot_bytes = 0
+            for artifact in (*inputs, code_artifact):
+                source = self._workspace.resolve_inside(task.project_id, artifact.path)
+                snapshot_bytes += source.stat().st_size
+                if snapshot_bytes > self._settings.python_workspace_mb * 1024 * 1024:
+                    raise UnsafePythonError("Python input snapshot exceeds its resource limit")
+                destination = stage / source.relative_to(root)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination)
+            for path in declared_paths:
+                (stage / path.relative_to(root)).parent.mkdir(parents=True, exist_ok=True)
+            if workspace_exceeded(stage, self._settings):
+                raise UnsafePythonError("Python input snapshot exceeds its resource limit")
+            before = _snapshot_files(stage)
+            completed = run_in_workspace(
+                self._settings, stage, code_path.relative_to(root).as_posix(), exported
+            )
+            exit_code = completed.returncode
+            stdout, stderr = completed.stdout, completed.stderr
+            error_message = completed.error
+            status = (
+                ExecutionStatus.TIMED_OUT
+                if completed.timed_out
+                else ExecutionStatus.FAILED
+                if completed.error or completed.returncode != 0
+                else ExecutionStatus.SUCCEEDED
+            )
+            if status is ExecutionStatus.FAILED and not error_message:
+                error_message = "Python process exited with an error"
+            # Inspect only private exported files. No generated code writes into the real project.
+            if workspace_exceeded(exported, self._settings):
                 status = ExecutionStatus.FAILED
-                error_message = "Declared output was not created: " + ", ".join(
-                    path.name for path in missing
-                )
-            else:
-                for path in declared_paths:
-                    output_artifacts.append(
-                        self._artifacts.register(
-                            project_id=task.project_id,
-                            task_id=task.id,
-                            artifact_type=_artifact_type_for_output(path),
-                            path=path,
-                            title=path.name,
-                            description="Output produced by generated Python analysis",
-                            producer_execution_id=None,
-                            input_artifact_ids=(code_artifact.id,),
+                error_message = "Python outputs contain unsafe links or exceed resource limits"
+            elif status is ExecutionStatus.SUCCEEDED:
+                after = _snapshot_files(exported)
+                allowed = {path.relative_to(root).as_posix() for path in declared_paths}
+                changed_inputs = [name for name in before if before[name] != after.get(name)]
+                undeclared = set(after) - set(before) - allowed
+                missing = allowed - set(after)
+                if changed_inputs:
+                    status = ExecutionStatus.FAILED
+                    error_message = "Python attempted to modify immutable input data"
+                elif undeclared:
+                    status = ExecutionStatus.FAILED
+                    error_message = "Undeclared output: " + ", ".join(sorted(undeclared))
+                elif missing:
+                    status = ExecutionStatus.FAILED
+                    error_message = "Declared output was not created: " + ", ".join(sorted(missing))
+                else:
+                    for path in declared_paths:
+                        # Exclusive creation also protects concurrent runs with the same output name.
+                        with (exported / path.relative_to(root)).open("rb") as output_stream:
+                            with path.open("xb") as destination_stream:
+                                shutil.copyfileobj(output_stream, destination_stream)
+                        output_artifacts.append(
+                            self._artifacts.register(
+                                project_id=task.project_id,
+                                task_id=task.id,
+                                artifact_type=_artifact_type_for_output(path),
+                                path=path,
+                                title=path.name,
+                                description="Output produced by isolated Python analysis",
+                                producer_execution_id=None,
+                                input_artifact_ids=(
+                                    code_artifact.id,
+                                    *(item.id for item in inputs),
+                                ),
+                            )
                         )
-                    )
 
         return PythonResult(
             status=status,
@@ -333,6 +343,28 @@ class PythonExecutor:
             output_artifacts=tuple(output_artifacts),
             error_message=error_message,
         )
+
+    def _input_artifacts(
+        self, project_id: str, task_id: str, artifact_ids: tuple[str, ...] | None
+    ) -> tuple[Artifact, ...]:
+        if artifact_ids is None:
+            artifacts = tuple(
+                item
+                for item in self._artifacts.list_for_project(project_id)
+                if item.artifact_type is ArtifactType.SOURCE_DATASET
+                or (item.task_id == task_id and item.artifact_type is ArtifactType.DERIVED_DATASET)
+            )
+        else:
+            artifacts = tuple(self._artifacts.get(item) for item in dict.fromkeys(artifact_ids))
+        if len(artifacts) > 64:
+            raise UnsafePythonError("Too many Python input artifacts")
+        for artifact in artifacts:
+            if artifact.project_id != project_id or artifact.artifact_type not in {
+                ArtifactType.SOURCE_DATASET,
+                ArtifactType.DERIVED_DATASET,
+            }:
+                raise UnsafePythonError("Python input must be a registered dataset in this project")
+        return artifacts
 
     def _validate_declared_outputs(
         self,
@@ -357,6 +389,8 @@ class PythonExecutor:
                 )
             if path.exists():
                 raise UnsafePythonError("Python may not overwrite an existing artifact")
+            if path in paths:
+                raise UnsafePythonError("Python output paths must be unique")
             path.parent.mkdir(parents=True, exist_ok=True)
             paths.append(path)
         return tuple(paths)
@@ -421,14 +455,6 @@ def _call_name(node: ast.expr) -> str:
     return ""
 
 
-def _minimal_environment() -> dict[str, str]:
-    environment = {"PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1"}
-    for name in ("SystemRoot", "WINDIR", "TEMP", "TMP"):
-        if value := os.environ.get(name):
-            environment[name] = value
-    return environment
-
-
 def _snapshot_files(root: Path) -> dict[str, str]:
     snapshot: dict[str, str] = {}
     for path in root.rglob("*"):
@@ -443,25 +469,6 @@ def _snapshot_files(root: Path) -> dict[str, str]:
     return snapshot
 
 
-def _subtree_changed(
-    before: dict[str, str],
-    after: dict[str, str],
-    prefix: str,
-) -> bool:
-    before_subset = {key: value for key, value in before.items() if key.startswith(prefix)}
-    after_subset = {key: value for key, value in after.items() if key.startswith(prefix)}
-    return before_subset != after_subset
-
-
-def _restore_source(source_root: Path, backup_root: Path) -> None:
-    for path in sorted(source_root.rglob("*"), reverse=True):
-        if path.is_file():
-            path.unlink()
-        elif path.is_dir():
-            path.rmdir()
-    shutil.copytree(backup_root, source_root, dirs_exist_ok=True)
-
-
 def _artifact_type_for_output(path: Path) -> ArtifactType:
     extension = path.suffix.lower()
     if extension in {".csv", ".parquet", ".xlsx"}:
@@ -473,14 +480,6 @@ def _artifact_type_for_output(path: Path) -> ArtifactType:
     if extension == ".py":
         return ArtifactType.PYTHON_CODE
     return ArtifactType.EXECUTION_LOG
-
-
-def _timeout_text(value: bytes | str | None) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")[-OUTPUT_LIMIT:]
-    return value[-OUTPUT_LIMIT:]
 
 
 def _json_scalar(value: Any) -> Any:

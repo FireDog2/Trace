@@ -7,6 +7,7 @@ from queue import Queue
 from threading import Barrier, Event, Lock, Thread
 
 import pytest
+from handoff_samples import blocked_handoff
 
 import data_analysis_agent.team as team_module
 from data_analysis_agent.db import connect_database
@@ -70,13 +71,15 @@ def test_teammate_keeps_history_out_of_parent_conversation(
 
     completed = TeammateRunner(
         settings=settings,
-        provider=ScriptedProvider([ModelResponse('{"summary":"Use gross profit"}', ())]),
+        provider=ScriptedProvider(
+            [ModelResponse(blocked_handoff("knowledge", "Use gross profit"), ())]
+        ),
         tools=tool_registry,
         repository=repository,
     ).run(run.id)
 
     assert completed.status is AgentRunStatus.COMPLETED
-    assert json.loads(completed.result_json or "") == {"summary": "Use gross profit"}
+    assert json.loads(completed.result_json or "")["summary"] == "Use gross profit"
     assert task_repository.list_messages(task.id) == ()
 
 
@@ -113,15 +116,13 @@ def test_teammate_requires_json_object_handoff(
     assert failed.error_category == "invalid_handoff"
 
 
-def test_teammate_repairs_one_invalid_handoff(
-    settings, db_connection, task, tool_registry
-) -> None:
+def test_teammate_repairs_one_invalid_handoff(settings, db_connection, task, tool_registry) -> None:
     repository = TeamRepository(db_connection)
     run = repository.create_run(task.id, AgentRole.SQL, "Return query evidence")
     provider = ScriptedProvider(
         [
             ModelResponse("Query completed successfully.", ()),
-            ModelResponse('{"summary":"Query completed","artifact_ids":["a1"]}', ()),
+            ModelResponse(blocked_handoff("sql", "Query completed"), ()),
         ]
     )
 
@@ -133,10 +134,7 @@ def test_teammate_repairs_one_invalid_handoff(
     ).run(run.id)
 
     assert completed.status is AgentRunStatus.COMPLETED
-    assert json.loads(completed.result_json or "") == {
-        "summary": "Query completed",
-        "artifact_ids": ["a1"],
-    }
+    assert json.loads(completed.result_json or "")["summary"] == "Query completed"
     assert [message.role for message in repository.list_messages(run.id)] == [
         "system",
         "assistant",
@@ -176,7 +174,9 @@ def test_teammate_retries_transient_provider_errors_with_bounded_backoff(
             self.calls += 1
             if self.calls < 3:
                 raise ProviderError("network", "temporary")
-            return ModelResponse('{"recovered":true}', ())
+            return ModelResponse(
+                blocked_handoff("knowledge", "No verified evidence is available"), ()
+            )
 
     repository = TeamRepository(db_connection)
     run = repository.create_run(task.id, AgentRole.KNOWLEDGE, "Recover provider")
@@ -237,7 +237,7 @@ def test_sql_teammate_reports_retry_budget_then_fallback_to_model(
             ModelResponse("", (call("first"),)),
             ModelResponse("", (call("second"),)),
             ModelResponse("", (call("blocked"),)),
-            ModelResponse('{"status":"fallback"}', ()),
+            ModelResponse(blocked_handoff("sql", "No verified evidence is available"), ()),
         ]
     )
     registry = TimeoutRegistry()
@@ -307,7 +307,7 @@ def test_sql_teammate_sql_and_preview_are_encrypted_then_replayed(
                     ),
                 ),
             ),
-            ModelResponse('{"artifact_id":"a1"}', ()),
+            ModelResponse(blocked_handoff("sql", "No verified evidence is available"), ()),
         ]
     )
 
@@ -381,7 +381,7 @@ def test_sql_teammate_replays_exact_approved_call_before_asking_model(
                     ),
                 ),
             ),
-            ModelResponse('{"artifact_id":"approved-result"}', ()),
+            ModelResponse(blocked_handoff("sql", "No verified evidence is available"), ()),
         ]
     )
     registry = Registry()
@@ -442,7 +442,7 @@ def test_sql_teammate_blocks_an_exact_query_after_it_already_succeeded(
         [
             ModelResponse("", (query("first"),)),
             ModelResponse("", (query("duplicate"),)),
-            ModelResponse('{"artifact_id":"existing-result"}', ()),
+            ModelResponse(blocked_handoff("sql", "No verified evidence is available"), ()),
         ]
     )
     registry = Registry()
@@ -522,7 +522,9 @@ def test_response_boundary_cancellation_wins_before_handoff_or_tool_history(
         def complete(self, request):
             del request
             cancelled.set()
-            return ModelResponse('{"would":"complete"}', ())
+            return ModelResponse(
+                blocked_handoff("knowledge", "No verified evidence is available"), ()
+            )
 
     result = TeammateRunner(
         settings=settings,
@@ -549,7 +551,9 @@ def test_response_boundary_deadline_wins_before_handoff(
         def complete(self, request):
             del request
             now[0] = "2026-08-06T00:00:02+00:00"
-            return ModelResponse('{"would":"complete"}', ())
+            return ModelResponse(
+                blocked_handoff("knowledge", "No verified evidence is available"), ()
+            )
 
     result = TeammateRunner(
         settings=replace(settings, teammate_timeout_seconds=1),
@@ -609,7 +613,7 @@ def test_safe_database_error_result_does_not_require_second_protection(
                         ),
                     ),
                 ),
-                ModelResponse('{"status":"handled"}', ()),
+                ModelResponse(blocked_handoff("sql", "No verified evidence is available"), ()),
             ]
         ),
         tools=Registry(),
@@ -771,7 +775,9 @@ def test_waiting_run_reserves_turns_across_resumes_without_extending_deadline(
     ).run(run.id)
     resumed = TeammateRunner(
         settings=replace(settings, max_teammate_turns=1),
-        provider=ScriptedProvider([ModelResponse('{"should":"not call"}', ())]),
+        provider=ScriptedProvider(
+            [ModelResponse(blocked_handoff("knowledge", "No verified evidence is available"), ())]
+        ),
         tools=PausingRegistry(),
         repository=repository,
     ).run(run.id)
@@ -791,7 +797,9 @@ def test_working_run_continues_without_illegal_self_transition(
     repository.transition_run(run.id, AgentRunStatus.WORKING)
     result = TeammateRunner(
         settings=settings,
-        provider=ScriptedProvider([ModelResponse('{"ok":true}', ())]),
+        provider=ScriptedProvider(
+            [ModelResponse(blocked_handoff("knowledge", "No verified evidence is available"), ())]
+        ),
         tools=tool_registry,
         repository=repository,
     ).run(run.id)
@@ -857,7 +865,7 @@ def test_concurrent_runners_execute_only_lease_owner_for_working_run(
                     self.calls += 1
                 provider_entered.set()
                 assert allow_owner.wait(timeout=5)
-                return ModelResponse('{"owner":true}', ())
+                return ModelResponse(blocked_handoff("knowledge", "owner"), ())
 
         provider = BlockingProvider()
         barrier = Barrier(2)
@@ -894,7 +902,7 @@ def test_concurrent_runners_execute_only_lease_owner_for_working_run(
             assert [future.result(timeout=5) for future in futures]
 
         assert completed.status is AgentRunStatus.COMPLETED
-        assert completed.result_json == '{"owner":true}'
+        assert json.loads(completed.result_json or "")["summary"] == "owner"
         assert provider.calls == 1
         assert not contender_mutated.is_set()
         final = owner_repository.get_run(run.id)
@@ -941,7 +949,9 @@ def test_owner_keeps_lease_between_turns_and_blocks_midrun_contender(
                     self.calls += 1
                     if self.calls == 1:
                         return ModelResponse("", (ToolCall("inspect", "inspect_workspace", {}),))
-                    return ModelResponse('{"completed":"after tool"}', ())
+                    return ModelResponse(
+                        blocked_handoff("knowledge", "No verified evidence is available"), ()
+                    )
 
         provider = TwoTurnProvider()
 
@@ -1006,9 +1016,7 @@ def test_teammate_rejects_non_finite_json_handoffs(
 
     failed = TeammateRunner(
         settings=settings,
-        provider=ScriptedProvider(
-            [ModelResponse(text, ()), ModelResponse(text, ())]
-        ),
+        provider=ScriptedProvider([ModelResponse(text, ()), ModelResponse(text, ())]),
         tools=tool_registry,
         repository=repository,
     ).run(run.id)

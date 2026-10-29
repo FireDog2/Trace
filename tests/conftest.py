@@ -94,6 +94,7 @@ def settings(tmp_path: Path) -> Settings:
         data_dir=data_dir,
         database_path=data_dir / "metadata.sqlite3",
         python_timeout_seconds=1,
+        python_backend="trusted_local",  # Deterministic, repository-owned test programs only.
     )
 
 

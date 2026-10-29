@@ -27,6 +27,7 @@ interface ArtifactWorkspaceProps {
   curating: boolean;
   onSelectRun(runId: string): Promise<void>;
   onAcceptRun(runId: string): Promise<void>;
+  onFailureReview(runId: string): Promise<void>;
   onDecideSkill(id: string, approved: boolean): Promise<void>;
   drawerOpen: boolean;
   onClose(): void;
@@ -86,6 +87,7 @@ export function ArtifactWorkspace({
   curating,
   onSelectRun,
   onAcceptRun,
+  onFailureReview,
   onDecideSkill,
   drawerOpen,
   onClose,
@@ -251,10 +253,23 @@ export function ArtifactWorkspace({
                     <span className={`run-state ${selectedRun.status}`}>
                       {selectedRun.status}
                     </span>
-                    {selectedRun.accepted ? (
+                    {selectedRun.accepted || selectedRun.review_requested ? (
                       <strong>
-                        Accepted. The curator will create a skill candidate.
+                        {selectedRun.review_requested
+                          ? "Failure review requested. The curator will prepare a review candidate."
+                          : "Accepted. The curator will create a skill candidate."}
                       </strong>
+                    ) : selectedRun.status === "failed" ? (
+                      <button
+                        type="button"
+                        className="primary-action"
+                        disabled={curating}
+                        onClick={() => void onFailureReview(selectedRun.id)}
+                      >
+                        {curating
+                          ? "Preparing failure review"
+                          : "Review failed run"}
+                      </button>
                     ) : (
                       <button
                         type="button"

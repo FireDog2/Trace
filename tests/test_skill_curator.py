@@ -161,3 +161,42 @@ def test_approved_candidate_remains_disabled(db_connection, task) -> None:
 
     assert approved.status == "approved"
     assert approved.enabled is False
+
+
+def test_failure_review_creates_disabled_review_candidate(db_connection, task) -> None:
+    traces = TraceRepository(db_connection)
+    source = traces.start_run(task.id)
+    traces.append(
+        source.id,
+        task.id,
+        "tool.completed",
+        "failed",
+        {"tool": "query_data", "error_category": "invalid_binding"},
+        error_category="invalid_binding",
+    )
+    traces.finish_run(source.id, "failed", "tool_retry_exhausted")
+    reviewed = traces.request_failure_review(source.id)
+    assert reviewed.review_requested is True
+
+    candidate = WorkflowCurator(
+        traces,
+        SkillCandidateRepository(db_connection),
+        ScriptedProvider([ModelResponse(_SAFE, ())]),
+    ).create_failure_review(source.id, "scripted")
+
+    assert candidate.candidate_type == "failure_review"
+    assert candidate.status == "candidate"
+    assert candidate.enabled is False
+
+
+def test_failure_review_requires_explicit_request(db_connection, task) -> None:
+    traces = TraceRepository(db_connection)
+    source = traces.start_run(task.id)
+    traces.append(source.id, task.id, "tool.completed", "failed", {})
+    traces.finish_run(source.id, "failed")
+    with pytest.raises(SkillEligibilityError):
+        WorkflowCurator(
+            traces,
+            SkillCandidateRepository(db_connection),
+            ScriptedProvider([ModelResponse(_SAFE, ())]),
+        ).create_failure_review(source.id, "scripted")

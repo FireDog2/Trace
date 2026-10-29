@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from hashlib import sha256
 
+from data_analysis_agent.handoffs import handoff_schema
+
 
 @dataclass(frozen=True, slots=True)
 class PromptContext:
@@ -12,6 +14,7 @@ class PromptContext:
     task_id: str = ""
     task_status: str = ""
     enabled_tools: tuple[str, ...] = ()
+    work_order: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,14 +63,17 @@ _RECOVERY = PromptSection(
 
 _LEAD = PromptSection(
     "role.lead",
-    3,
+    4,
     "stable",
     "You are the Lead Agent. Maintain a concise plan and coordinate bounded role-scoped teammates. "
     "When a metric definition or business term is unclear, spawn one Knowledge Agent and await its "
     "structured handoff before planning the relevant query. When PostgreSQL evidence is required, "
     "spawn one SQL Agent; the Lead must not execute database SQL directly. When the user requests a "
     "report, chart, or final evidence package, spawn one Report Agent after evidence is available and "
-    "await its handoff. Use at most three active teammates and inspect their terminal results. If an "
+    "await its handoff. Supply input_artifact_ids and knowledge_refs when delegating known evidence. "
+    "A teammate's completed execution is not proof of business success: inspect its handoff status "
+    "(ready, partial, blocked) and reference validation. Resolve reported limitations before claiming success. "
+    "Use at most three active teammates and inspect their terminal results. If an "
     "await call returns a created or working teammate, await it again; never send a final or placeholder "
     "response while a teammate is active. Treat comparative business diagnoses and management reviews "
     "as final evidence packages: after the evidence is ready, spawn a Report Agent to publish a concise "
@@ -86,9 +92,16 @@ _ROLE_SECTIONS = {
     ),
     "sql": PromptSection(
         "role.sql",
-        2,
+        3,
         "stable",
-        "You are the SQL Agent. Produce evidence with governed query tools, keep queries read-only, and "
+        "You are the SQL Agent. Analyze SQL databases, CSV, and Excel datasets. Use governed read-only "
+        "SQL tools for database access and run_python with Python/Pandas for local data cleaning, joins, "
+        "aggregation, and statistical analysis. Inspect registered datasets first; use project-relative "
+        "paths in the isolated execution workspace, never host absolute paths or database credentials. "
+        "Declare every output file under derived/ and provide input_artifact_ids for its lineage. "
+        "Persist analysis results as CSV, Parquet, or Excel evidence; stdout alone is not evidence. "
+        "Do not install dependencies, access the network, launch processes, or modify inputs. "
+        "Leave final report publication to the Report Agent. Keep queries read-only, and "
         "return a bounded JSON handoff containing registered artifact identifiers. For query_data, use "
         "each bindings key exactly as its SQL table name and use only columns returned by inspect_dataset.",
     ),
@@ -132,6 +145,19 @@ def _assemble_prompt_cached(context: PromptContext) -> PromptAssembly:
     sections: list[PromptSection] = [_IDENTITY, _SAFETY, role_section, _RECOVERY]
     if role != "lead":
         sections.append(_OUTPUT)
+        schema = handoff_schema(role)
+        if schema:
+            sections.append(
+                PromptSection(
+                    "output.schema",
+                    1,
+                    "stable",
+                    "Return the role handoff matching this JSON Schema. Only cite real tool evidence. "
+                    "For knowledge definitions, copy the stored definition and version exactly. "
+                    "Use blocked with limitations when evidence is unavailable; never invent IDs.\n"
+                    + schema,
+                )
+            )
 
     runtime_lines = []
     if context.project_id:
@@ -142,6 +168,8 @@ def _assemble_prompt_cached(context: PromptContext) -> PromptAssembly:
         runtime_lines.append(f"Task status: {context.task_status}")
     if context.enabled_tools:
         runtime_lines.append("Enabled tools: " + ", ".join(sorted(context.enabled_tools)))
+    if context.work_order:
+        runtime_lines.append("Work order (authoritative input references): " + context.work_order)
     if runtime_lines:
         sections.append(PromptSection("runtime", 1, "dynamic", "\n".join(runtime_lines)))
 

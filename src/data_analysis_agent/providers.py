@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import threading
+import uuid
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 import httpx
@@ -151,6 +154,175 @@ class OpenAICompatibleProvider:
             ) from exc
 
 
+class LocalTransformersProvider:
+    """In-process Hugging Face model adapter using Trace's JSON action protocol."""
+
+    def __init__(
+        self,
+        model_path: str | Path,
+        *,
+        device: str = "auto",
+        dtype: str = "auto",
+        max_new_tokens: int = 2_048,
+    ) -> None:
+        self._model_path = str(model_path)
+        self._device = device
+        self._dtype = dtype
+        self._max_new_tokens = max_new_tokens
+        self._lock = threading.Lock()
+        self._tokenizer: Any = None
+        self._model: Any = None
+
+    def complete(self, request: ModelRequest) -> ModelResponse:
+        try:
+            with self._lock:
+                self._load()
+                prompt = _local_prompt(request)
+                encoded = self._tokenizer.apply_chat_template(
+                    prompt,
+                    tokenize=True,
+                    add_generation_prompt=True,
+                    return_tensors="pt",
+                )
+                encoded = encoded.to(self._model.device)
+                import torch
+
+                with torch.inference_mode():
+                    output = self._model.generate(
+                        encoded,
+                        max_new_tokens=self._max_new_tokens,
+                        do_sample=False,
+                        pad_token_id=self._tokenizer.eos_token_id,
+                    )
+                generated = output[0, encoded.shape[-1] :]
+                raw = self._tokenizer.decode(generated, skip_special_tokens=True).strip()
+            return _parse_local_response(raw, request)
+        except ProviderError:
+            raise
+        except ImportError as exc:
+            raise ProviderError(
+                "runtime_unavailable",
+                "Install the local-model optional dependencies to use this checkpoint",
+            ) from exc
+        except Exception as exc:
+            raise ProviderError("local_inference", "Local model inference failed") from exc
+
+    def _load(self) -> None:
+        if self._model is not None:
+            return
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        self._tokenizer = AutoTokenizer.from_pretrained(self._model_path, local_files_only=True)
+        load_options: dict[str, Any] = {"local_files_only": True}
+        if self._device != "auto":
+            load_options["device_map"] = self._device
+        else:
+            load_options["device_map"] = "auto"
+        if self._dtype != "auto":
+            import torch
+
+            dtype = {
+                "float16": torch.float16,
+                "bfloat16": torch.bfloat16,
+                "float32": torch.float32,
+            }.get(self._dtype)
+            if dtype is None:
+                raise ValueError("Unsupported local model dtype")
+            load_options["torch_dtype"] = dtype
+        self._model = AutoModelForCausalLM.from_pretrained(self._model_path, **load_options)
+        self._model.eval()
+
+
+_LOCAL_PROVIDER_CACHE: dict[tuple[str, str, str, int], LocalTransformersProvider] = {}
+_LOCAL_PROVIDER_CACHE_LOCK = threading.Lock()
+
+
+def local_provider_from_settings(settings: Any) -> ModelProvider | None:
+    model_path = getattr(settings, "local_model_path", None)
+    if model_path is None:
+        return None
+    key = (
+        str(model_path),
+        settings.local_model_device,
+        settings.local_model_dtype,
+        settings.local_model_max_new_tokens,
+    )
+    with _LOCAL_PROVIDER_CACHE_LOCK:
+        provider = _LOCAL_PROVIDER_CACHE.get(key)
+        if provider is None:
+            provider = LocalTransformersProvider(
+                key[0],
+                device=key[1],
+                dtype=key[2],
+                max_new_tokens=key[3],
+            )
+            _LOCAL_PROVIDER_CACHE[key] = provider
+        return provider
+
+
+def _local_prompt(request: ModelRequest) -> list[dict[str, str]]:
+    tool_descriptions = [
+        {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.input_schema,
+        }
+        for tool in request.tools
+    ]
+    protocol = (
+        "Return exactly one JSON object with keys text and tool_calls. "
+        'Use {"text":"final answer","tool_calls":[]} for a final answer, or '
+        "set text to an empty string and tool_calls to objects with name and arguments. "
+        "Only call listed tools. Never include markdown fences or executable code.\n"
+        f"Allowed tools: {json.dumps(tool_descriptions, ensure_ascii=False)}"
+    )
+    history = [{"role": "system", "content": request.system + "\n\n" + protocol}]
+    history.append({"role": "user", "content": request.objective})
+    for message in request.messages:
+        if message.role in {"user", "assistant", "system"}:
+            history.append({"role": message.role, "content": message.content})
+        else:
+            history.append({"role": "user", "content": f"[{message.role}] {message.content}"})
+    return history
+
+
+def _parse_local_response(raw: str, request: ModelRequest) -> ModelResponse:
+    try:
+        body = json.loads(raw)
+        if not isinstance(body, dict) or not isinstance(body.get("text"), str):
+            raise TypeError("Expected text field")
+        raw_calls = body.get("tool_calls", [])
+        if not isinstance(raw_calls, list):
+            raise TypeError("Expected tool_calls array")
+        allowed = {tool.name for tool in request.tools}
+        calls: list[ToolCall] = []
+        for item in raw_calls:
+            if not isinstance(item, dict):
+                raise TypeError("Tool call must be an object")
+            name = item.get("name")
+            arguments = item.get("arguments")
+            if name not in allowed:
+                raise ValueError("Unknown tool")
+            if not isinstance(arguments, dict):
+                raise TypeError("Tool arguments must be an object")
+            calls.append(
+                ToolCall(
+                    id=f"local-{uuid.uuid4().hex}",
+                    name=name,
+                    arguments=arguments,
+                )
+            )
+        if calls and body["text"].strip():
+            raise ValueError("A response cannot contain both final text and tool calls")
+        if not calls and not body["text"].strip():
+            raise ValueError("Response must contain text or tool calls")
+        return ModelResponse(text=body["text"], tool_calls=tuple(calls))
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise ProviderError(
+            "invalid_local_output", "Local model returned an invalid action"
+        ) from exc
+
+
 def provider_from_credentials(
     credentials: ProviderCredentials,
     timeout_seconds: int = 60,
@@ -226,9 +398,7 @@ def _openai_messages(request: ModelRequest) -> list[dict[str, Any]]:
             # Older runs persisted the visible request-user-input question before
             # its tool result. Keep the immutable audit history intact while
             # projecting a protocol-valid order for OpenAI-compatible providers.
-            deferred_assistant_messages.append(
-                {"role": message.role, "content": message.content}
-            )
+            deferred_assistant_messages.append({"role": message.role, "content": message.content})
         elif message.role in {"user", "assistant", "system"}:
             messages.append({"role": message.role, "content": message.content})
     messages.extend(deferred_assistant_messages)

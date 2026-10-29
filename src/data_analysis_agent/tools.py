@@ -17,6 +17,12 @@ from data_analysis_agent.execution import (
     PythonExecutor,
     QueryTimeoutError,
 )
+from data_analysis_agent.handoffs import (
+    HandoffValidationService,
+    KnowledgeReference,
+    WorkOrder,
+    validation_metadata,
+)
 from data_analysis_agent.knowledge import BusinessKnowledgeRepository
 from data_analysis_agent.permissions import (
     ApprovalRepository,
@@ -139,8 +145,9 @@ class SearchBusinessKnowledgeInput(ToolInput):
 
 
 class RunPythonInput(ToolInput):
-    code: str = Field(min_length=1)
-    declared_outputs: tuple[str, ...] = ()
+    code: str = Field(min_length=1, max_length=128_000)
+    declared_outputs: tuple[str, ...] = Field(default=(), max_length=32)
+    input_artifact_ids: tuple[str, ...] | None = Field(default=None, max_length=64)
 
 
 class SaveArtifactInput(ToolInput):
@@ -167,6 +174,10 @@ class RequestUserInputInput(ToolInput):
 class SpawnTeammateInput(ToolInput):
     role: AgentRole
     objective: str = Field(min_length=1, max_length=2_000)
+    input_artifact_ids: tuple[str, ...] | None = Field(default=None, max_length=64)
+    knowledge_refs: tuple[KnowledgeReference, ...] = Field(default=(), max_length=32)
+    expected_output_kind: str | None = None
+    plan_step_id: str | None = None
 
 
 class AwaitTeammatesInput(ToolInput):
@@ -219,8 +230,7 @@ class ToolRegistry:
         return tuple(
             run.id
             for run in self._team_coordinator["manager"].list(task_id)
-            if run.status.value in {"created", "working", "waiting"}
-            and not run.cancel_requested
+            if run.status.value in {"created", "working", "waiting"} and not run.cancel_requested
         )
 
     def schemas(self) -> tuple[ToolSchema, ...]:
@@ -337,6 +347,15 @@ class ToolRegistry:
         try:
             handled = definition.handler(arguments, context)
             self._artifacts.set_producer(handled.artifact_ids, execution_id)
+            HandoffValidationService(
+                self._tasks._connection, self._artifacts._workspace
+            ).record_outputs(
+                handled.artifact_ids,
+                task_id=context.task_id,
+                execution_id=execution_id,
+                agent_id=context.agent_id,
+                run_id=context.run_id,
+            )
             self._tasks.finish_tool_execution(execution_id, "succeeded")
             self._tasks.append_event(
                 context.task_id,
@@ -483,6 +502,7 @@ def build_tool_registry(
                         "id": artifact.id,
                         "type": artifact.artifact_type.value,
                         "title": artifact.title,
+                        "relative_path": workspace.relative_path(context.project_id, artifact.path),
                         "task_id": artifact.task_id,
                     }
                     for artifact in project_artifacts
@@ -524,6 +544,7 @@ def build_tool_registry(
                 context.project_id,
                 arguments.sql,
                 arguments.bindings,
+                task_id=context.task_id,
             )
         except QueryTimeoutError as exc:
             raise ToolHandlerError(
@@ -716,6 +737,7 @@ def build_tool_registry(
             context.task_id,
             arguments.code,
             arguments.declared_outputs,
+            input_artifact_ids=arguments.input_artifact_ids,
         )
         artifact_ids = (
             result.code_artifact.id,
@@ -821,6 +843,11 @@ def build_tool_registry(
 
         assert isinstance(arguments, SpawnTeammateInput)
         try:
+            work_order = HandoffValidationService(tasks._connection, workspace).prepare_work_order(
+                context.task_id,
+                arguments.role,
+                WorkOrder.model_validate(arguments.model_dump(exclude={"role", "objective"})),
+            )
             trace_context = (
                 TraceContext(
                     context.run_id,
@@ -833,7 +860,7 @@ def build_tool_registry(
             )
             if trace_context is None:
                 run = coordinator["manager"].spawn(
-                    context.task_id, arguments.role, arguments.objective
+                    context.task_id, arguments.role, arguments.objective, work_order=work_order
                 )
             else:
                 run = coordinator["manager"].spawn(
@@ -841,6 +868,7 @@ def build_tool_registry(
                     arguments.role,
                     arguments.objective,
                     trace_context=trace_context,
+                    work_order=work_order,
                 )
         except (ValueError, TeamCapacityError):
             raise ToolHandlerError(
@@ -918,7 +946,9 @@ def build_tool_registry(
         ),
         ToolDefinition(
             "run_python",
-            "Run contained Python analysis and register declared output files.",
+            "Analyze registered datasets with Python/Pandas in an isolated workspace. "
+            "Use relative paths and declare output files and input artifact IDs. "
+            "The default Docker backend denies network access and limits resources.",
             RunPythonInput,
             run_python,
         ),
@@ -1024,6 +1054,11 @@ def _safe_run(run: Any) -> dict[str, Any]:
         "status": run.status.value,
         "result_summary": _result_summary(run.result_json),
         "error_category": run.error_category,
+        "handoff_validation": validation_metadata(
+            getattr(run, "work_order_json", None),
+            getattr(run, "handoff_validation_json", None),
+            run.error_category,
+        ),
     }
 
 

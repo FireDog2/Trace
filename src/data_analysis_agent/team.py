@@ -22,6 +22,12 @@ from data_analysis_agent.db import (
     sqlite_connection_lock,
     utc_now,
 )
+from data_analysis_agent.handoffs import (
+    HandoffEvidenceError,
+    HandoffValidationService,
+    parse_handoff,
+    repair_feedback,
+)
 from data_analysis_agent.model_config import SecretProtector
 from data_analysis_agent.prompts import PromptContext, assemble_prompt
 from data_analysis_agent.providers import ModelProvider, ModelRequest, ProviderError
@@ -31,6 +37,7 @@ from data_analysis_agent.settings import Settings
 from data_analysis_agent.team_types import AgentRole
 from data_analysis_agent.tools import ToolCall, ToolContext, ToolRegistry, ToolResult
 from data_analysis_agent.tracing import TraceContext, TraceRecorder, TraceRepository
+from data_analysis_agent.workspace import WorkspaceService
 
 
 class AgentRunStatus(StrEnum):
@@ -74,6 +81,9 @@ class AgentRun:
     worker_claimed_at: str | None
     trace_run_id: str | None
     parent_event_id: str | None
+    work_order_json: str | None = None
+    handoff_validation_json: str | None = None
+    handoff_repair_attempted: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +128,7 @@ _SAFE_ERROR_MESSAGES = {
     "agent_timeout": "Teammate deadline reached",
     "agent_turn_limit": "Teammate turn limit reached",
     "invalid_handoff": "Teammate returned an invalid handoff",
+    "invalid_handoff_evidence": "Teammate evidence could not be validated",
     "provider_error": "The model provider failed",
     "tool_error": "A teammate tool failed unexpectedly",
     "message_persistence_error": "Protected teammate message storage is unavailable",
@@ -137,6 +148,7 @@ ROLE_TOOLS: dict[AgentRole, frozenset[str]] = {
             "inspect_database_schema",
             "query_data",
             "query_database",
+            "run_python",
         }
     ),
     AgentRole.REPORT: frozenset(
@@ -155,14 +167,7 @@ ROLE_PROMPTS: dict[AgentRole, str] = {
     role: assemble_prompt(PromptContext(role=role.value)).text for role in AgentRole
 }
 
-_MAX_HANDOFF_BYTES = 64_000
 _TRANSIENT_PROVIDER_ERRORS = frozenset({"timeout", "network", "rate_limit", "upstream"})
-_HANDOFF_REPAIR_MESSAGE = (
-    "Your previous response was not a valid teammate handoff. "
-    "Return exactly one JSON object that follows the required handoff schema. "
-    "Do not call another tool and do not wrap the JSON in Markdown."
-)
-
 
 TaskEventPublisher = Callable[[str, str, dict[str, object]], object]
 
@@ -188,9 +193,15 @@ class TeamRepository:
         objective: str,
         *,
         trace_context: TraceContext | None = None,
+        work_order: dict[str, object] | None = None,
     ) -> AgentRun:
         return self._create_run(
-            task_id, role, objective, max_active=None, trace_context=trace_context
+            task_id,
+            role,
+            objective,
+            max_active=None,
+            trace_context=trace_context,
+            work_order=work_order,
         )
 
     @sqlite_connection_guarded
@@ -202,6 +213,7 @@ class TeamRepository:
         *,
         max_active: int = 3,
         trace_context: TraceContext | None = None,
+        work_order: dict[str, object] | None = None,
     ) -> AgentRun:
         if not 1 <= max_active <= 3:
             raise ValueError("max_active must be between 1 and 3")
@@ -211,6 +223,7 @@ class TeamRepository:
             objective,
             max_active=max_active,
             trace_context=trace_context,
+            work_order=work_order,
         )
 
     def _create_run(
@@ -221,6 +234,7 @@ class TeamRepository:
         *,
         max_active: int | None,
         trace_context: TraceContext | None,
+        work_order: dict[str, object] | None,
     ) -> AgentRun:
         normalized_objective = objective.strip()
         if not normalized_objective:
@@ -244,6 +258,11 @@ class TeamRepository:
             worker_claimed_at=None,
             trace_run_id=trace_context.run_id if trace_context else None,
             parent_event_id=trace_context.parent_event_id if trace_context else None,
+            work_order_json=(
+                json.dumps(work_order if work_order is not None else {}, ensure_ascii=False)
+                if AgentRole(role) is not AgentRole.CURATOR
+                else None
+            ),
         )
         try:
             self._connection.execute("BEGIN IMMEDIATE")
@@ -282,6 +301,10 @@ class TeamRepository:
                     run.trace_run_id,
                     run.parent_event_id,
                 ),
+            )
+            self._connection.execute(
+                "UPDATE agent_runs SET work_order_json=? WHERE id=?",
+                (run.work_order_json, run.id),
             )
             self._connection.commit()
             self._publish_created(run)
@@ -559,9 +582,15 @@ class TeamRepository:
             raise
 
     @sqlite_connection_guarded
-    def complete_run(self, agent_run_id: str, result_json: str) -> AgentRun:
+    def complete_run(
+        self, agent_run_id: str, result_json: str, *, validation_json: str | None = None
+    ) -> AgentRun:
         try:
             self._connection.execute("BEGIN IMMEDIATE")
+            self._connection.execute(
+                "UPDATE agent_runs SET handoff_validation_json=? WHERE id=?",
+                (validation_json, agent_run_id),
+            )
             run = self._transition_in_transaction(
                 agent_run_id, AgentRunStatus.COMPLETED, result_json=result_json
             )
@@ -593,6 +622,24 @@ class TeamRepository:
         except Exception:
             self._connection.rollback()
             raise
+
+    @sqlite_connection_guarded
+    def set_work_order(self, agent_run_id: str, order: dict[str, object]) -> None:
+        self._connection.execute(
+            "UPDATE agent_runs SET work_order_json=? WHERE id=?",
+            (json.dumps(order, ensure_ascii=False), agent_run_id),
+        )
+        self._connection.commit()
+
+    @sqlite_connection_guarded
+    def claim_handoff_repair(self, agent_run_id: str) -> bool:
+        cursor = self._connection.execute(
+            "UPDATE agent_runs SET handoff_repair_attempted=1 "
+            "WHERE id=? AND handoff_repair_attempted=0 AND status='working'",
+            (agent_run_id,),
+        )
+        self._connection.commit()
+        return cursor.rowcount == 1
 
     def _read_run(self, agent_run_id: str) -> AgentRun:
         return _run_from_row(self._get_row(agent_run_id))
@@ -701,6 +748,9 @@ class TeamRepository:
             worker_claimed_at=None if release else current.worker_claimed_at,
             trace_run_id=current.trace_run_id,
             parent_event_id=current.parent_event_id,
+            work_order_json=current.work_order_json,
+            handoff_validation_json=current.handoff_validation_json,
+            handoff_repair_attempted=current.handoff_repair_attempted,
         )
 
 
@@ -724,6 +774,9 @@ def _run_from_row(row: sqlite3.Row) -> AgentRun:
         worker_claimed_at=row["worker_claimed_at"],
         trace_run_id=row["trace_run_id"],
         parent_event_id=row["parent_event_id"],
+        work_order_json=row["work_order_json"],
+        handoff_validation_json=row["handoff_validation_json"],
+        handoff_repair_attempted=bool(row["handoff_repair_attempted"]),
     )
 
 
@@ -796,6 +849,9 @@ class TeammateRunner:
         )
         self._trace_recorder = TraceRecorder(traces) if traces is not None else None
         self._retry_sleep = retry_sleep or time.sleep
+        self._handoffs = HandoffValidationService(
+            repository._connection, WorkspaceService(settings)
+        )
         self._context = ContextManager(
             ContextCheckpointRepository(repository._connection),
             max_tokens=settings.context_max_tokens,
@@ -830,7 +886,14 @@ class TeammateRunner:
         self._trace(run, "teammate.started", "running", {"role": run.role.value})
         tools = self._tools.restrict(ROLE_TOOLS[run.role])
         recovery = RecoveryState(RecoveryPolicy(max_attempts=self._settings.max_tool_attempts))
-        handoff_repair_attempted = False
+        raw_order = json.loads(run.work_order_json or "{}")
+        if "input_hashes" not in raw_order:
+            try:
+                raw_order = self._handoffs.prepare_work_order(run.task_id, run.role)
+                self._repository.set_work_order(run.id, raw_order)
+                run = self._repository.get_run(run.id)
+            except ValueError:
+                return self._repository.fail_run(run.id, "invalid_handoff_evidence")
         if resumed_from_wait:
             try:
                 replay_call = self._approval_replay_call(run.id)
@@ -860,7 +923,9 @@ class TeammateRunner:
             if terminal is not None:
                 return terminal
             try:
-                response = self._complete_model(run, tools)
+                response = self._complete_model(
+                    run, tools.restrict(set()) if run.handoff_repair_attempted else tools
+                )
                 self._trace(
                     run,
                     "teammate.model.completed",
@@ -877,11 +942,19 @@ class TeammateRunner:
             terminal = self._terminal_before_action(run)
             if terminal is not None:
                 return terminal
+            if run.handoff_repair_attempted and response.tool_calls:
+                return self._repository.fail_run(run.id, "invalid_handoff")
             if not response.tool_calls:
                 try:
-                    handoff = self._parse_handoff(response.text)
+                    parsed = parse_handoff(run.role, response.text)
+                    validation = self._handoffs.validate(
+                        agent_id=run.id, task_id=run.task_id, order=raw_order, handoff=parsed
+                    )
+                    handoff = parsed.model_dump_json()
                     self._repository.append_message(run.id, "assistant", handoff)
-                    completed = self._repository.complete_run(run.id, handoff)
+                    completed = self._repository.complete_run(
+                        run.id, handoff, validation_json=json.dumps(validation)
+                    )
                     self._trace(
                         completed,
                         "teammate.completed",
@@ -889,11 +962,19 @@ class TeammateRunner:
                         {"role": run.role.value},
                     )
                     return completed
-                except ValueError:
-                    if not handoff_repair_attempted:
-                        handoff_repair_attempted = True
+                except HandoffEvidenceError as exc:
+                    self._trace(
+                        run,
+                        "teammate.handoff.rejected",
+                        "failed",
+                        {"reason": str(exc)},
+                        error_category="invalid_handoff_evidence",
+                    )
+                    return self._repository.fail_run(run.id, "invalid_handoff_evidence")
+                except ValueError as exc:
+                    if self._repository.claim_handoff_repair(run.id):
                         self._repository.append_message(
-                            run.id, "system", _HANDOFF_REPAIR_MESSAGE
+                            run.id, "system", repair_feedback(run.role, exc)
                         )
                         self._trace(
                             run,
@@ -1020,6 +1101,7 @@ class TeammateRunner:
                 task_id=run.task_id,
                 task_status=run.status.value,
                 enabled_tools=tuple(schema.name for schema in schemas),
+                work_order=run.work_order_json or "",
             )
         )
         messages = tuple(
@@ -1375,20 +1457,6 @@ class TeammateRunner:
         except Exception:
             return False
 
-    def _parse_handoff(self, text: str) -> str:
-        if not text or len(text.encode("utf-8")) > _MAX_HANDOFF_BYTES:
-            raise ValueError("invalid handoff")
-        try:
-            value = json.loads(text, parse_constant=_reject_non_finite_json)
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise ValueError("invalid handoff") from exc
-        if not isinstance(value, dict):
-            raise ValueError("invalid handoff")
-        try:
-            return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("invalid handoff") from exc
-
 
 RunnerFactory = Callable[[AgentRole, Event], TeammateRunner]
 WorkerFailureHandler = Callable[[str], AgentRun]
@@ -1421,6 +1489,7 @@ class TeamManager:
         objective: str,
         *,
         trace_context: TraceContext | None = None,
+        work_order: dict[str, object] | None = None,
     ) -> AgentRun:
         if AgentRole(role) is AgentRole.CURATOR:
             raise ValueError("Curator agents can only be started from accepted runs")
@@ -1433,6 +1502,7 @@ class TeamManager:
                 objective,
                 max_active=self._settings.max_active_teammates,
                 trace_context=trace_context,
+                work_order=work_order,
             )
             event = Event()
             self._cancel_events[run.id] = event
@@ -1605,10 +1675,6 @@ def _has_rich_database_result(result: ToolResult) -> bool:
     return isinstance(result.output, dict) and any(
         key in result.output for key in ("preview", "rows", "raw_result")
     )
-
-
-def _reject_non_finite_json(value: str) -> None:
-    raise ValueError(f"non-finite JSON constant: {value}")
 
 
 def _utc_datetime(value: str) -> datetime:

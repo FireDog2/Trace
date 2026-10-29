@@ -40,6 +40,7 @@ from data_analysis_agent.datasets import DatasetError, DatasetService
 from data_analysis_agent.db import connect_database
 from data_analysis_agent.domain import Artifact, ArtifactType, Project, Task, TaskStatus
 from data_analysis_agent.execution import DuckDBExecutor, PythonExecutor
+from data_analysis_agent.handoffs import validation_metadata
 from data_analysis_agent.knowledge import (
     BusinessKnowledgeEntry,
     BusinessKnowledgeRepository,
@@ -62,6 +63,7 @@ from data_analysis_agent.permissions import ApprovalRepository, PermissionPolicy
 from data_analysis_agent.postgres import SqlSafetyGateway
 from data_analysis_agent.providers import (
     ModelProvider,
+    local_provider_from_settings,
     provider_from_credentials,
 )
 from data_analysis_agent.reporting import ReportService
@@ -255,6 +257,10 @@ class AgentRunResponse(ApiModel):
     id: str
     task_id: str
     role: str
+    handoff_validation: dict[str, object] = Field(
+        default_factory=lambda: dict[str, object](status="legacy_unvalidated")
+    )
+    work_order: dict[str, object] | None = None
     objective: str
     status: str
     result_summary: str | None
@@ -269,6 +275,7 @@ class AnalysisRunResponse(ApiModel):
     task_id: str
     status: str
     accepted: bool
+    review_requested: bool
     started_at: str
     completed_at: str | None
     error_category: str | None
@@ -370,6 +377,9 @@ class AppServices:
     def resolve_provider(self) -> ModelProvider:
         if self.provider is not None:
             return self.provider
+        local_provider = local_provider_from_settings(self.settings)
+        if local_provider is not None:
+            return local_provider
         credentials = self.model_configs.credentials()
         return self.provider_factory(
             credentials,
@@ -1353,6 +1363,24 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=409, detail="Run cannot be accepted") from exc
 
+    @app.post("/api/runs/{run_id}/failure-review", response_model=AnalysisRunResponse)
+    def request_failure_review(run_id: str) -> AnalysisRunResponse:
+        try:
+            previous = services.traces.get_run(run_id)
+            reviewed = services.traces.request_failure_review(run_id)
+            if not previous.review_requested:
+                services.trace_recorder.event(
+                    TraceContext(reviewed.id, reviewed.task_id),
+                    "failure_review.requested",
+                    "completed",
+                    {"source_run_id": reviewed.id},
+                )
+            if services.team_manager is not None:
+                services.team_manager.ensure_curator(reviewed.task_id, reviewed.id)
+            return _analysis_run_response(reviewed)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail="Run cannot be reviewed") from exc
+
     @app.post("/api/runs/{run_id}/skill-candidates", status_code=status.HTTP_201_CREATED)
     def create_skill_candidate(run_id: str):
         try:
@@ -1692,6 +1720,10 @@ def _agent_run_response(run) -> AgentRunResponse:
         id=run.id,
         task_id=run.task_id,
         role=run.role.value,
+        handoff_validation=validation_metadata(
+            run.work_order_json, run.handoff_validation_json, run.error_category
+        ),
+        work_order=json.loads(run.work_order_json) if run.work_order_json else None,
         objective=run.objective,
         status=run.status.value,
         result_summary=_result_summary(run.result_json),
@@ -1708,6 +1740,7 @@ def _analysis_run_response(run: AnalysisRun) -> AnalysisRunResponse:
         task_id=run.task_id,
         status=run.status,
         accepted=run.accepted,
+        review_requested=run.review_requested,
         started_at=run.started_at,
         completed_at=run.completed_at,
         error_category=run.error_category,
@@ -1737,6 +1770,7 @@ def _skill_candidate_response(candidate: SkillCandidate) -> dict[str, object]:
         "id": candidate.id,
         "source_run_id": candidate.source_run_id,
         "name": candidate.name,
+        "candidate_type": candidate.candidate_type,
         "version": candidate.version,
         "markdown": candidate.markdown,
         "status": candidate.status,

@@ -201,6 +201,9 @@ function fakeApiWithCompletedTask(
     acceptRun: async () => {
       throw new Error("Not used in this test");
     },
+    requestFailureReview: async () => {
+      throw new Error("Not used in this test");
+    },
     getSkillCandidateForRun: async () => {
       throw new Error("Not used in this test");
     },
@@ -991,6 +994,7 @@ describe("analysis workbench", () => {
         task_id: "task-1",
         status: "completed",
         accepted: false,
+        review_requested: false,
         started_at: "",
         completed_at: "",
         error_category: null,

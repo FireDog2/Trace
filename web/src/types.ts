@@ -59,6 +59,12 @@ export interface AgentRun {
   id: string;
   task_id: string;
   role: "knowledge" | "sql" | "report" | "curator";
+  work_order?: Record<string, unknown> | null;
+  handoff_validation?: {
+    status: "validated" | "legacy_unvalidated" | "pending" | "rejected";
+    level?: "reference";
+    artifact_hashes?: Record<string, string>;
+  };
   objective: string;
   status:
     | "created"
@@ -134,6 +140,7 @@ export interface AnalysisRun {
   task_id: string;
   status: "running" | "completed" | "failed" | "cancelled";
   accepted: boolean;
+  review_requested: boolean;
   started_at: string;
   completed_at: string | null;
   error_category: string | null;
@@ -157,6 +164,7 @@ export interface SkillCandidate {
   id: string;
   source_run_id: string;
   name: string;
+  candidate_type: "workflow" | "failure_review";
   version: number;
   markdown: string;
   status: "candidate" | "approved" | "rejected";

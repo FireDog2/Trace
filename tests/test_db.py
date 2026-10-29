@@ -36,6 +36,7 @@ def test_migrate_creates_versioned_core_tables(db_connection) -> None:
         "protected_agent_message_payloads",
         "business_knowledge_entries",
         "context_checkpoints",
+        "artifact_execution_provenance",
     } <= names
     assert db_connection.execute(
         "SELECT version FROM schema_migrations ORDER BY version"
@@ -58,6 +59,8 @@ def test_migrate_creates_versioned_core_tables(db_connection) -> None:
         (16,),
         (17,),
         (18,),
+        (19,),
+        (20,),
     ]
     task_columns = {row[1] for row in db_connection.execute("PRAGMA table_info(tasks)")}
     assert {"pinned", "deleted_at"} <= task_columns
@@ -67,6 +70,9 @@ def test_migrate_creates_versioned_core_tables(db_connection) -> None:
         "deadline_at",
         "trace_run_id",
         "parent_event_id",
+        "work_order_json",
+        "handoff_validation_json",
+        "handoff_repair_attempted",
     } <= agent_run_columns
     for table in ("data_access_policies", "database_query_attempts"):
         assert any(

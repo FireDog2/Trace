@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+from handoff_samples import blocked_handoff
+
 from data_analysis_agent.agent import AgentRunner
 from data_analysis_agent.providers import ModelResponse, ScriptedProvider
 from data_analysis_agent.team import TeammateRunner, TeamRepository
@@ -100,7 +102,7 @@ def test_teammate_lifecycle_is_recorded_on_parent_analysis_run(
         "Resolve metric definition",
         trace_context=TraceContext(analysis_run.id, task.id),
     )
-    provider = ScriptedProvider([ModelResponse('{"definition":"net revenue"}', ())])
+    provider = ScriptedProvider([ModelResponse(blocked_handoff("knowledge", "net revenue"), ())])
 
     completed = TeammateRunner(
         settings=settings,

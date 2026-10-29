@@ -67,8 +67,8 @@ def test_lead_coordination_tools_execute_with_real_registry_and_enforce_ownershi
     )
 
     class Coordinator:
-        def spawn(self, task_id, role, objective):
-            return repository.create_run(task_id, role, objective)
+        def spawn(self, task_id, role, objective, *, work_order=None):
+            return repository.create_run(task_id, role, objective, work_order=work_order)
 
         def list(self, task_id):
             return repository.list_runs(task_id)

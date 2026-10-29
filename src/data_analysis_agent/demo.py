@@ -44,6 +44,7 @@ class DemoReportProvider:
     def __init__(self) -> None:
         self._step = 0
         self._chart_id = ""
+        self._derived_id = ""
 
     def complete(self, request: ModelRequest) -> ModelResponse:
         self._step += 1
@@ -76,6 +77,7 @@ class DemoReportProvider:
             artifact_ids = result["output"]["artifact_ids"]
             derived_id, chart_id = artifact_ids[1], artifact_ids[2]
             self._chart_id = chart_id
+            self._derived_id = derived_id
             return _tool_response(
                 "report",
                 "write_report",
@@ -112,9 +114,13 @@ class DemoReportProvider:
         return ModelResponse(
             text=json.dumps(
                 {
+                    "protocol_version": "1",
+                    "status": "ready",
+                    "limitations": [],
                     "summary": "East profit fell 33.8% in March; the 27-point logistics-cost increase fully explains the decline.",
                     "report_artifact_id": report_id,
-                    "chart_artifact_id": self._chart_id,
+                    "chart_artifact_ids": [self._chart_id],
+                    "evidence_artifact_ids": [self._derived_id, self._chart_id],
                 },
                 ensure_ascii=False,
             ),
@@ -213,9 +219,7 @@ def run_portfolio_demo(settings: Settings) -> DemoManifest:
             if artifact.artifact_type is ArtifactType.MARKDOWN_REPORT
         )
         chart = next(
-            artifact
-            for artifact in artifacts
-            if artifact.artifact_type is ArtifactType.CHART
+            artifact for artifact in artifacts if artifact.artifact_type is ArtifactType.CHART
         )
         run = services.traces.list_runs(task.id)[-1]
         events = services.traces.events_for_run(run.id)

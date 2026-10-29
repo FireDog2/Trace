@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from data_analysis_agent.api import build_services
 from data_analysis_agent.demo import run_portfolio_demo
 from data_analysis_agent.domain import ArtifactType, StepStatus, TaskStatus
@@ -5,7 +7,8 @@ from data_analysis_agent.settings import Settings
 
 
 def test_portfolio_demo_creates_a_clean_completed_workspace(tmp_path) -> None:
-    settings = Settings.local(tmp_path / "demo")
+    # This demo contains only repository-owned deterministic analysis code.
+    settings = replace(Settings.local(tmp_path / "demo"), python_backend="trusted_local")
 
     manifest = run_portfolio_demo(settings)
 

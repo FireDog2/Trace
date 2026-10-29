@@ -63,6 +63,7 @@ export interface ApiClient {
   listRuns(taskId: string): Promise<AnalysisRun[]>;
   getTrace(runId: string): Promise<TraceEvent[]>;
   acceptRun(runId: string): Promise<AnalysisRun>;
+  requestFailureReview(runId: string): Promise<AnalysisRun>;
   getSkillCandidateForRun(runId: string): Promise<SkillCandidate>;
   createSkillCandidate(runId: string): Promise<SkillCandidate>;
   decideSkillCandidate(
@@ -264,6 +265,11 @@ export class HttpApiClient implements ApiClient {
   }
   acceptRun(runId: string): Promise<AnalysisRun> {
     return this.request(`/api/runs/${runId}/accept`, { method: "POST" });
+  }
+  requestFailureReview(runId: string): Promise<AnalysisRun> {
+    return this.request(`/api/runs/${runId}/failure-review`, {
+      method: "POST",
+    });
   }
   getSkillCandidateForRun(runId: string): Promise<SkillCandidate> {
     return this.request(`/api/runs/${runId}/skill-candidate`);

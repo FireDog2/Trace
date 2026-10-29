@@ -30,7 +30,9 @@ def extract_knowledge_candidates(filename: str, content: bytes) -> tuple[Knowled
     safe_name = Path(filename).name
     suffix = Path(safe_name).suffix.lower()
     if suffix not in SUPPORTED_KNOWLEDGE_DOCUMENTS:
-        raise KnowledgeDocumentError("Only PDF, Word, Markdown, TXT, CSV, and Excel documents are supported")
+        raise KnowledgeDocumentError(
+            "Only PDF, Word, Markdown, TXT, CSV, and Excel documents are supported"
+        )
     try:
         text = _extract_text(suffix, content)
     except KnowledgeDocumentError:
@@ -119,7 +121,9 @@ def _pdf_text(content: bytes) -> str:
     try:
         from pypdf import PdfReader
     except ImportError as exc:  # pragma: no cover - dependency is declared by the package
-        raise KnowledgeDocumentError("The PDF parsing component is not available in this environment") from exc
+        raise KnowledgeDocumentError(
+            "The PDF parsing component is not available in this environment"
+        ) from exc
     reader = PdfReader(io.BytesIO(content))
     if reader.is_encrypted:
         try:
@@ -127,7 +131,9 @@ def _pdf_text(content: bytes) -> str:
         except Exception as exc:
             raise KnowledgeDocumentError("Encrypted PDFs are not supported") from exc
     if len(reader.pages) > 300:
-        raise KnowledgeDocumentError("The PDF exceeds 300 pages. Split it into smaller files before uploading")
+        raise KnowledgeDocumentError(
+            "The PDF exceeds 300 pages. Split it into smaller files before uploading"
+        )
     return "\n\n".join((page.extract_text() or "").strip() for page in reader.pages)
 
 

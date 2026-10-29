@@ -5,6 +5,7 @@ from threading import Event
 
 import pytest
 from fastapi.testclient import TestClient
+from handoff_samples import blocked_handoff
 
 import data_analysis_agent.api as api_module
 from data_analysis_agent.api import create_app
@@ -101,31 +102,37 @@ def test_project_can_be_permanently_deleted_with_its_workspace(settings, operati
 
         assert uploaded.status_code == 201
         assert deleted.status_code == 204
-        assert [item["id"] for item in client.get("/api/projects").json()] == [
-            other_project.id
-        ]
+        assert [item["id"] for item in client.get("/api/projects").json()] == [other_project.id]
         assert client.get(f"/api/tasks/{task.id}").status_code == 404
         assert client.get(f"/api/tasks/{other_task.id}").status_code == 200
         assert not project_root.exists()
         for table in ("artifacts", "tasks"):
-            assert app.state.services.connection.execute(
-                f"SELECT 1 FROM {table} WHERE project_id = ?",
-                (project["id"],),
-            ).fetchone() is None
+            assert (
+                app.state.services.connection.execute(
+                    f"SELECT 1 FROM {table} WHERE project_id = ?",
+                    (project["id"],),
+                ).fetchone()
+                is None
+            )
         for table in ("messages", "plan_revisions", "task_events"):
-            assert app.state.services.connection.execute(
-                f"SELECT 1 FROM {table} WHERE task_id = ?",
-                (task.id,),
-            ).fetchone() is None
-        assert app.state.services.data_sources.get_public(
-            legacy_source.id
-        ).project_id == GLOBAL_PROJECT_ID
-        assert app.state.services.knowledge.get(
-            legacy_entry.id
-        ).project_id == GLOBAL_PROJECT_ID
-        assert app.state.services.connection.execute(
-            "SELECT 1 FROM database_query_attempts WHERE id = 'cross-project-attempt'"
-        ).fetchone() is not None
+            assert (
+                app.state.services.connection.execute(
+                    f"SELECT 1 FROM {table} WHERE task_id = ?",
+                    (task.id,),
+                ).fetchone()
+                is None
+            )
+        assert (
+            app.state.services.data_sources.get_public(legacy_source.id).project_id
+            == GLOBAL_PROJECT_ID
+        )
+        assert app.state.services.knowledge.get(legacy_entry.id).project_id == GLOBAL_PROJECT_ID
+        assert (
+            app.state.services.connection.execute(
+                "SELECT 1 FROM database_query_attempts WHERE id = 'cross-project-attempt'"
+            ).fetchone()
+            is not None
+        )
 
 
 def test_project_with_active_task_cannot_be_deleted(api_client) -> None:
@@ -329,9 +336,7 @@ def test_markdown_report_can_be_exported_as_source_or_pdf(settings) -> None:
 
     assert download.headers["content-disposition"].startswith("attachment;")
     assert preview.headers["content-disposition"].startswith("inline;")
-    assert preview.headers["content-security-policy"].startswith(
-        "sandbox allow-scripts;"
-    )
+    assert preview.headers["content-security-policy"].startswith("sandbox allow-scripts;")
     assert preview.headers["x-content-type-options"] == "nosniff"
     assert markdown.status_code == 200
     assert markdown.content.startswith("# 分析报告".encode())
@@ -368,7 +373,9 @@ def test_business_knowledge_document_import_creates_classified_entries(
         "经营利润",
         "数据导出规则",
     ]
-    assert all(entry["source"] == "Document import · 财务口径.md" for entry in response.json()["created"])
+    assert all(
+        entry["source"] == "Document import · 财务口径.md" for entry in response.json()["created"]
+    )
 
 
 def test_policy_update_rejects_a_stale_editor_version(settings) -> None:
@@ -697,7 +704,13 @@ def test_explicit_teammate_provider_factory_creates_fresh_workers_without_model_
     created: list[ScriptedProvider] = []
 
     def teammate_provider_factory() -> ScriptedProvider:
-        provider = ScriptedProvider([ModelResponse('{"summary":"done"}', ())])
+        class RoleProvider(ScriptedProvider):
+            def complete(self, request):
+                self.requests.append(request)
+                role = "knowledge" if "[role.knowledge@" in request.system else "report"
+                return ModelResponse(blocked_handoff(role, "done"), ())
+
+        provider = RoleProvider([])
         created.append(provider)
         return provider
 
@@ -837,7 +850,11 @@ def test_agents_endpoint_exposes_safe_state_and_lifecycle_events(settings) -> No
     app = create_app(
         settings,
         teammate_provider_factory=lambda: ScriptedProvider(
-            [ModelResponse(text='{"summary":"Profit is revenue minus cost"}', tool_calls=())]
+            [
+                ModelResponse(
+                    text=blocked_handoff("sql", "Profit is revenue minus cost"), tool_calls=()
+                )
+            ]
         ),
     )
     services = app.state.services
@@ -858,6 +875,8 @@ def test_agents_endpoint_exposes_safe_state_and_lifecycle_events(settings) -> No
                 "task_id": task.id,
                 "role": "sql",
                 "objective": "Aggregate profit",
+                "handoff_validation": response.json()[0]["handoff_validation"],
+                "work_order": response.json()[0]["work_order"],
                 "status": "completed",
                 "result_summary": "Profit is revenue minus cost",
                 "error_category": None,

@@ -78,6 +78,7 @@ describe("agent observability", () => {
           id: "c",
           source_run_id: "r",
           name: "Revenue review",
+          candidate_type: "workflow",
           version: 1,
           markdown: "# skill",
           status: "candidate",

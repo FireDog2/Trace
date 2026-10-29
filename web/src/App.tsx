@@ -317,6 +317,28 @@ export function App({ api: suppliedApi }: AppProps) {
     }
   }
 
+  async function requestFailureReview(runId: string) {
+    setCurating(true);
+    setError(null);
+    try {
+      await api.requestFailureReview(runId);
+      if (selectedTaskId) setRuns(await api.listRuns(selectedTaskId));
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const next = await api.getSkillCandidateForRun(runId).catch(() => null);
+        if (next) {
+          setCandidate(next);
+          break;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 250));
+      }
+      if (selectedTaskId) setAgents(await api.listAgents(selectedTaskId));
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setCurating(false);
+    }
+  }
+
   async function decideSkill(candidateId: string, approved: boolean) {
     setCandidate(await api.decideSkillCandidate(candidateId, approved));
   }
@@ -539,6 +561,7 @@ export function App({ api: suppliedApi }: AppProps) {
           curating={curating}
           onSelectRun={selectRun}
           onAcceptRun={acceptAndCurate}
+          onFailureReview={requestFailureReview}
           onDecideSkill={decideSkill}
           drawerOpen={artifactWorkspaceOpen}
           onClose={() => {

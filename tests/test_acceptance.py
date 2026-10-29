@@ -58,6 +58,7 @@ class OperatingDiagnosisProvider:
             assert result["success"], result
             artifact_ids = result["output"]["artifact_ids"]
             derived_id, chart_id = artifact_ids[1], artifact_ids[2]
+            self.evidence_ids = [derived_id, chart_id]
             return _tool_response(
                 "report",
                 "write_report",
@@ -79,8 +80,13 @@ class OperatingDiagnosisProvider:
         return ModelResponse(
             text=json.dumps(
                 {
+                    "protocol_version": "1",
+                    "status": "ready",
+                    "limitations": [],
                     "summary": "East profit weakened while logistics cost increased.",
                     "report_artifact_id": report_id,
+                    "chart_artifact_ids": [self.evidence_ids[1]],
+                    "evidence_artifact_ids": self.evidence_ids,
                 }
             ),
             tool_calls=(),

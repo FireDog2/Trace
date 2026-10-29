@@ -137,9 +137,7 @@ class AgentRunner:
 
             if not response.tool_calls:
                 active_lookup = getattr(self._tools, "active_teammate_ids", None)
-                active_agent_ids = (
-                    tuple(active_lookup(task_id)) if callable(active_lookup) else ()
-                )
+                active_agent_ids = tuple(active_lookup(task_id)) if callable(active_lookup) else ()
                 if active_agent_ids:
                     response = replace(
                         response,

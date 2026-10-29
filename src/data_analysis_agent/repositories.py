@@ -198,10 +198,13 @@ class ProjectRepository:
     def delete(self, project_id: str) -> None:
         if project_id == GLOBAL_PROJECT_ID:
             raise RecordNotFoundError(f"Project not found: {project_id}")
-        if self._connection.execute(
-            "SELECT 1 FROM projects WHERE id = ?",
-            (project_id,),
-        ).fetchone() is None:
+        if (
+            self._connection.execute(
+                "SELECT 1 FROM projects WHERE id = ?",
+                (project_id,),
+            ).fetchone()
+            is None
+        ):
             raise RecordNotFoundError(f"Project not found: {project_id}")
         terminal_statuses = (
             TaskStatus.COMPLETED.value,
@@ -285,14 +288,16 @@ class ProjectRepository:
                 (project_id,),
             ).fetchall():
                 source_name = source["name"]
-                if self._connection.execute(
-                    "SELECT 1 FROM data_sources WHERE project_id = ? AND name = ? LIMIT 1",
-                    (GLOBAL_PROJECT_ID, source_name),
-                ).fetchone() is not None:
+                if (
+                    self._connection.execute(
+                        "SELECT 1 FROM data_sources WHERE project_id = ? AND name = ? LIMIT 1",
+                        (GLOBAL_PROJECT_ID, source_name),
+                    ).fetchone()
+                    is not None
+                ):
                     source_name = f"{source_name} [{source['id']}]"
                 self._connection.execute(
-                    "UPDATE data_sources SET project_id = ?, name = ?, updated_at = ? "
-                    "WHERE id = ?",
+                    "UPDATE data_sources SET project_id = ?, name = ?, updated_at = ? WHERE id = ?",
                     (GLOBAL_PROJECT_ID, source_name, utc_now(), source["id"]),
                 )
             for entry in self._connection.execute(
@@ -300,11 +305,14 @@ class ProjectRepository:
                 (project_id,),
             ).fetchall():
                 entry_name = entry["name"]
-                if self._connection.execute(
-                    "SELECT 1 FROM business_knowledge_entries "
-                    "WHERE project_id = ? AND name = ? COLLATE NOCASE LIMIT 1",
-                    (GLOBAL_PROJECT_ID, entry_name),
-                ).fetchone() is not None:
+                if (
+                    self._connection.execute(
+                        "SELECT 1 FROM business_knowledge_entries "
+                        "WHERE project_id = ? AND name = ? COLLATE NOCASE LIMIT 1",
+                        (GLOBAL_PROJECT_ID, entry_name),
+                    ).fetchone()
+                    is not None
+                ):
                     entry_name = f"{entry_name} [{entry['id']}]"
                 self._connection.execute(
                     "UPDATE business_knowledge_entries "
